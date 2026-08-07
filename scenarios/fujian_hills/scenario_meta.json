@@ -1,0 +1,35 @@
+{
+  "name": "fujian_hills",
+  "description": "Fujian coastal hills / valley (SRTM N25E118)",
+  "lat": 25.75,
+  "lon": 118.6,
+  "hgt": "data/N25E118.hgt",
+  "start_time": "2024-03-20T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 24,
+    "height": 18,
+    "resolution_m": 100.0
+  },
+  "elevation_m": {
+    "min": 278.12085446155373,
+    "max": 1163.89804682815,
+    "mean": 663.0563330616641
+  },
+  "wind": {
+    "u_km_mean": -2.895996647064575,
+    "v_km_mean": 0.45859135836951986,
+    "speed_mean": 2.9335142064903574
+  },
+  "mission": {
+    "start": [
+      3,
+      13
+    ],
+    "goal": [
+      20,
+      5
+    ]
+  },
+  "built_at": "2026-08-05T18:32:23Z"
+}

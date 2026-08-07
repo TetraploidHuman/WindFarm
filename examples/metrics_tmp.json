@@ -1,0 +1,7 @@
+{
+  "rmse_physics": 0.6687437036624649,
+  "rmse_final": 0.32301045471908474,
+  "direction_mae_rad": 0.02551213516559867,
+  "train_size": 38707,
+  "test_size": 16589
+}

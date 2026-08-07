@@ -1,0 +1,23 @@
+# Build / IDE / local agent junk
+.gradle/
+.idea/
+*.iml
+.qwen/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-linux/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Large local experiment outputs (regenerable)
+runs/
+*.log
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
