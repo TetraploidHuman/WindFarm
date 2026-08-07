@@ -1,0 +1,16 @@
+[project]
+name = "windfarm"
+version = "0.1.0"
+description = "Wind-field downscaling and route planning for UAV missions."
+requires-python = ">=3.11"
+dependencies = ["xgboost>=3.2.0", "lightgbm>=4.6.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,35 @@
+{
+  "name": "beijing_plain",
+  "description": "North China plain near Beijing (SRTM N39E116)",
+  "lat": 39.55,
+  "lon": 116.45,
+  "hgt": "data/N39E116.hgt",
+  "start_time": "2024-04-12T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 24,
+    "height": 18,
+    "resolution_m": 100.0
+  },
+  "elevation_m": {
+    "min": 20.79613800241644,
+    "max": 35.28594332595844,
+    "mean": 28.619612588600663
+  },
+  "wind": {
+    "u_km_mean": 1.5588494336622187,
+    "v_km_mean": 4.282903619316573,
+    "speed_mean": 4.5577708333333335
+  },
+  "mission": {
+    "start": [
+      4,
+      12
+    ],
+    "goal": [
+      19,
+      5
+    ]
+  },
+  "built_at": "2026-08-05T18:21:33Z"
+}

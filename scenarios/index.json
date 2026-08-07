@@ -1,0 +1,109 @@
+{
+  "scenarios": [
+    {
+      "name": "fujian_hills",
+      "description": "Fujian coastal hills / valley (SRTM N25E118)",
+      "lat": 25.75,
+      "lon": 118.6,
+      "hgt": "data/N25E118.hgt",
+      "start_time": "2024-03-20T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 24,
+        "height": 18,
+        "resolution_m": 100.0
+      },
+      "elevation_m": {
+        "min": 278.12085446155373,
+        "max": 1163.89804682815,
+        "mean": 663.0563330616641
+      },
+      "wind": {
+        "u_km_mean": -2.895996647064575,
+        "v_km_mean": 0.45859135836951986,
+        "speed_mean": 2.9335142064903574
+      },
+      "mission": {
+        "start": [
+          3,
+          13
+        ],
+        "goal": [
+          20,
+          5
+        ]
+      },
+      "built_at": "2026-08-05T18:32:23Z"
+    },
+    {
+      "name": "qinghai_ridge",
+      "description": "NE Tibetan plateau foothills / ridge (SRTM N36E100)",
+      "lat": 36.5,
+      "lon": 100.6,
+      "hgt": "data/N36E100.hgt",
+      "start_time": "2024-01-18T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 24,
+        "height": 18,
+        "resolution_m": 100.0
+      },
+      "elevation_m": {
+        "min": 3570.177678486725,
+        "max": 4120.427737460537,
+        "mean": 3812.9671841535505
+      },
+      "wind": {
+        "u_km_mean": 3.1123336150571665,
+        "v_km_mean": -2.361899502490702,
+        "speed_mean": 3.9096747503417677
+      },
+      "mission": {
+        "start": [
+          3,
+          12
+        ],
+        "goal": [
+          19,
+          6
+        ]
+      },
+      "built_at": "2026-08-05T18:32:33Z"
+    },
+    {
+      "name": "qingdao_coast",
+      "description": "Shandong windy coast (SRTM N36E120)",
+      "lat": 36.2,
+      "lon": 120.65,
+      "hgt": "data/N36E120.hgt",
+      "start_time": "2024-11-05T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 24,
+        "height": 18,
+        "resolution_m": 100.0
+      },
+      "elevation_m": {
+        "min": 188.592582626397,
+        "max": 921.5424253410641,
+        "mean": 666.9221942429542
+      },
+      "wind": {
+        "u_km_mean": 1.608662163306317,
+        "v_km_mean": -1.0200998681061793,
+        "speed_mean": 1.9062117662642286
+      },
+      "mission": {
+        "start": [
+          4,
+          12
+        ],
+        "goal": [
+          18,
+          6
+        ]
+      },
+      "built_at": "2026-08-05T18:32:43Z"
+    }
+  ]
+}
