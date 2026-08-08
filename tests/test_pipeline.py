@@ -326,11 +326,32 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(any(label.startswith("guide_straight_agl") for label, _ in guides_off))
         self.assertFalse(any(label.startswith("guide_corridor_") for label, _ in guides_off))
 
-        mission.corridor_energy_margin = 0.95
+        mission.corridor_energy_margin = 1.02
         guides_on = _energy_guide_paths(start, goal, belief_map, mission)
         self.assertTrue(
             any(label.startswith("guide_corridor_") for label, _ in guides_on),
             msg=f"expected a corridor candidate, got {[l for l,_ in guides_on]}",
+        )
+        # With strong north-side tailwind, a corridor should beat straight in planning.
+        mission.preferred_cruise_agl = 1.0
+        plan = plan_path_details(
+            belief_map,
+            mission,
+            risk_weight=1.0,
+            safety_weight=1.0,
+            anytime_rounds=2,
+            heuristic_weight_start=2.0,
+            heuristic_weight_end=1.0,
+            search_node_budget=4000,
+            horizon_steps=6,
+            beam_width=16,
+            branch_width=8,
+            discount_factor=0.93,
+            terminal_progress_weight=20.0,
+        )
+        self.assertTrue(
+            str(plan.get("planning_mode", "")).startswith("guide_corridor"),
+            msg=f"expected corridor planning mode, got {plan.get('planning_mode')}",
         )
 
     def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:

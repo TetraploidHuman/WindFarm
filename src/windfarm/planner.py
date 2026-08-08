@@ -630,8 +630,10 @@ def plan_path_details(
     # Soft rate-limit only — evidence gates live in _select_preferred_cruise_band.
     sticky_now = getattr(mission, "preferred_cruise_agl", None)
     if sticky_now is not None and selected_band is not None and horizontal_to_goal > 10.0:
-        lo = float(sticky_now) - 0.35
-        hi = float(sticky_now) + 0.35
+        # Faster climb/dump when DEM along-route already forces significant rise.
+        step_cap = 0.50 if route_terrain_rise >= max(float(getattr(mission, "altitude_step_m", 50.0)), 1.0) else 0.35
+        lo = float(sticky_now) - step_cap
+        hi = float(sticky_now) + step_cap
         selected_band = float(min(max(float(selected_band), lo), hi))
     elif sticky_now is not None and selected_band is not None:
         # Approach: allow faster descent than climb.
@@ -671,25 +673,30 @@ def plan_path_details(
     )
     for (label, path), energy in zip(ranked_candidates, ranked_energies):
         floor_e = preferred_straight_energy if preferred_straight_energy < math.inf else straight_guide_energy
-        # Soft floor: non-straight may win if within ~3% of preferred straight energy.
-        if not label.startswith("guide_straight_agl") and floor_e < math.inf and energy > floor_e * 1.03:
+        # Soft floor: non-straight may win if within ~5% of preferred straight (model Joules).
+        if not label.startswith("guide_straight_agl") and floor_e < math.inf and energy > floor_e * 1.05:
             continue
         if label.startswith("guide_corridor_"):
-            # Margin ≥1.0 allows near-parity corridors; default slightly permissive.
             corr_m = getattr(mission, "corridor_energy_margin", None)
             corr_m = 1.02 if corr_m is None else float(corr_m)
             if corr_m <= 0.0:
                 continue
-            if floor_e < math.inf and energy > floor_e * corr_m:
+            # Commit only with a clear model-energy edge (belief noise otherwise detours).
+            win_need = min(float(corr_m), 0.992)
+            if floor_e < math.inf and energy > floor_e * win_need:
                 continue
-            if mpc_completed_energy < math.inf and energy > mpc_completed_energy * corr_m:
+            if mpc_completed_energy < math.inf and energy > mpc_completed_energy * min(float(corr_m), 1.0):
                 continue
         elif label.startswith("guide_straight_agl"):
             band = _cruise_z_from_guide_label(label, clearance, mission)
             if selected_band is not None and abs(band - selected_band) <= band_eps:
-                energy *= 0.97
+                energy *= 0.998
             else:
-                energy *= 1.01
+                energy *= 1.005
+        elif label.startswith("mpc"):
+            # MPC must also show a clear edge vs the preferred straight band.
+            if floor_e < math.inf and energy > floor_e * 0.992:
+                continue
         terminal = heuristic(_continuous_state_tuple(path[-1]), goal, mission)
         score = energy + 0.05 * terminal
         if score < best_energy:
@@ -707,7 +714,7 @@ def plan_path_details(
         )
         if wrong_straight:
             best_label, chosen = straight_paths[selected_band]
-            best_energy = preferred_straight_energy * 0.97
+            best_energy = preferred_straight_energy * 0.998
     if chosen is not None and best_label != planning_mode:
         best_path = chosen
         planning_mode = best_label
@@ -1428,23 +1435,26 @@ def _energy_guide_paths(
                 cruise_z=best_band,
             )
             if corridor_margin is not None and len(locked_path) > 1:
-                locked_e = _polyline_risk_adjusted_energy_j(locked_path, belief_map, mission, uncertainty_gain=0.12)
-                if locked_e <= straight_floor * float(corridor_margin):
+                locked_e = _polyline_model_energy_j(locked_path, belief_map, mission)
+                # Sticky via must remain a clear win; otherwise drop it.
+                if locked_e <= straight_floor * min(float(corridor_margin), 0.992):
                     guides.append(("guide_corridor_locked", locked_path))
                 else:
                     mission.guide_via = None
             else:
                 mission.guide_via = None
 
-    # Lateral corridors: risk-adjusted belief energy must beat straight by a clear margin.
+    # Lateral corridors: generate near-parity candidates; final selector requires a clear win.
     if corridor_margin is None or float(corridor_margin) <= 0.0:
         return guides
     corridor_margin = float(corridor_margin)
+    gen_margin = min(max(corridor_margin, 0.95), 1.0)  # never generate worse-than-straight corridors
     ux, uy = dx / horiz, dy / horiz
     px, py = -uy, ux
     direct_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, gx, gy, samples=8)
-    offsets = tuple(offset_m / cell_m for offset_m in (150.0, 250.0, 350.0))
-    detour_max_cells = 250.0 / cell_m
+    # Physical offsets (m); denser near-path samples catch mild wind shear without huge detours.
+    offsets = tuple(offset_m / cell_m for offset_m in (100.0, 150.0, 200.0, 250.0, 350.0))
+    detour_max_cells = 300.0 / cell_m
     corridor_candidates: list[tuple[str, list[tuple[float, float, float]]]] = []
     for sign in (-1.0, 1.0):
         for offset in offsets:
@@ -1452,7 +1462,8 @@ def _energy_guide_paths(
             my = clamp(sy + 0.5 * dy + sign * offset * py, 0.0, belief_map.height - 1)
             via_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, mx, my, samples=4)
             via_rise += terrain_climb_along_line_m(mission.elevation, mx, my, gx, gy, samples=4)
-            if direct_rise > 1.0 and via_rise > direct_rise * 1.05:
+            # Block corridors that add clear extra terrain climb vs the direct line.
+            if direct_rise > 1.0 and via_rise > direct_rise * 1.10 + 0.5 * max(float(mission.altitude_step_m), 1.0):
                 continue
             detour = (math.hypot(mx - sx, my - sy) + math.hypot(gx - mx, gy - my)) - horiz
             if detour > detour_max_cells:
@@ -1463,14 +1474,18 @@ def _energy_guide_paths(
             label = f"guide_corridor_{sign:+.0f}_{offset:.1f}"
             corridor_candidates.append((label, path))
     if corridor_candidates:
+        scored: list[tuple[float, str, list[tuple[float, float, float]]]] = []
         for label, path in corridor_candidates:
-            # Primary gate = model energy (same Joules as eval); risk is a soft surcharge.
             raw = _polyline_model_energy_j(path, belief_map, mission)
-            if straight_floor < math.inf and raw > straight_floor * corridor_margin:
+            if straight_floor < math.inf and raw > straight_floor * gen_margin:
                 continue
-            energy = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.06)
-            if straight_floor < math.inf and energy > straight_floor * (corridor_margin + 0.03):
+            # Prefer corridors that also look good after a light uncertainty tax.
+            risk = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.04)
+            if straight_floor < math.inf and risk > straight_floor * (gen_margin + 0.04):
                 continue
+            scored.append((0.9 * raw + 0.1 * risk, label, path))
+        scored.sort(key=lambda item: item[0])
+        for _, label, path in scored[:3]:
             guides.append((label, path))
     return guides
 
