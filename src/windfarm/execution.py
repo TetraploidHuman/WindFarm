@@ -641,7 +641,7 @@ class NavigationEngine:
             descent_power_reduction_per_mps_w=context.mission.descent_power_reduction_per_mps_w,
             terrain_dz_m=terrain_dz_m,
         )
-        required_energy *= max(0.5, min(1.4, 1.0 - 0.20 * max(energy_w, 0.0)))
+        # uplift_energy_scale is applied inside transition_energy_j
         if required_energy > context.battery_j:
             context.planned_path = [context.planned_path[0]]
             return 0.0

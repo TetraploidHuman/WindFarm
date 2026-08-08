@@ -641,20 +641,19 @@ def plan_path_details(
     )
     for (label, path), energy in zip(ranked_candidates, ranked_energies):
         floor_e = preferred_straight_energy if preferred_straight_energy < math.inf else straight_guide_energy
-        # Universal hard floor: never commit below the preferred straight AGL band.
-        if not label.startswith("guide_straight_agl") and floor_e < math.inf and energy > floor_e * 1.001:
+        # Soft floor: non-straight may win if within ~3% of preferred straight energy.
+        if not label.startswith("guide_straight_agl") and floor_e < math.inf and energy > floor_e * 1.03:
             continue
         if label.startswith("guide_corridor_"):
-            # Same margin knob as generation (default 0.95); no extra 10%+ deadweight.
+            # Margin ≥1.0 allows near-parity corridors; default slightly permissive.
             corr_m = getattr(mission, "corridor_energy_margin", None)
-            corr_m = 0.97 if corr_m is None else float(corr_m)
+            corr_m = 1.02 if corr_m is None else float(corr_m)
             if corr_m <= 0.0:
                 continue
             if floor_e < math.inf and energy > floor_e * corr_m:
                 continue
             if mpc_completed_energy < math.inf and energy > mpc_completed_energy * corr_m:
                 continue
-            energy += 0.01 * max(floor_e, energy)
         elif label.startswith("guide_straight_agl"):
             band = _cruise_z_from_guide_label(label, clearance, mission)
             if selected_band is not None and abs(band - selected_band) <= band_eps:
@@ -667,7 +666,7 @@ def plan_path_details(
             best_energy = score
             chosen = path
             best_label = label
-    # Snap MPC / wrong-band straights to the selected cruise band; keep winning corridors.
+    # Snap only wrong-band straights; keep winning MPC / corridor paths.
     if (
         selected_band is not None
         and selected_band in straight_paths
@@ -676,7 +675,7 @@ def plan_path_details(
         wrong_straight = best_label.startswith("guide_straight_agl") and (
             abs(_cruise_z_from_guide_label(best_label, clearance, mission) - selected_band) > band_eps
         )
-        if best_label.startswith("mpc") or wrong_straight:
+        if wrong_straight:
             best_label, chosen = straight_paths[selected_band]
             best_energy = preferred_straight_energy * 0.97
     if chosen is not None and best_label != planning_mode:
@@ -858,15 +857,14 @@ def _polylines_model_energy_j(
         descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
         terrain_dz_m=terrain_dz,
     )
-    uplift = np.clip(1.0 - 0.20 * np.maximum(samples["wind_w"], 0.0), 0.5, 1.4)
-    seg = step_e * uplift
+    # uplift_energy_scale is already inside transition_energy_batch
     out: list[float] = []
     offset = 0
     for n in counts:
         if n <= 0:
             out.append(0.0)
         else:
-            out.append(float(np.sum(seg[offset : offset + n])))
+            out.append(float(np.sum(step_e[offset : offset + n])))
             offset += n
     return out
 
@@ -1209,15 +1207,15 @@ def _select_preferred_cruise_band(
     """Pick cruise AGL from full-path band scores with evidence-gated changes.
 
     Universal rules (no map-specific thresholds):
-    - Leave clearance / climb only if the winner beats the reference by ~1.5%.
-    - Dump a sticky layer only with a stronger ~2.5% edge (asymmetric).
+    - Climb only if the winner beats the reference by ≥3%.
+    - Dump with the same 3% evidence (symmetric) so noise climbs can reverse.
     - Rate-limit is applied by the caller; this function picks the evidence target.
     """
     if not band_scores:
         return None
     step = max(float(band_step), 0.01)
-    climb_need = 0.985  # ≥1.5% savings to climb
-    dump_need = 0.975  # ≥2.5% savings to dump mid-cruise
+    climb_need = 0.97  # ≥3% savings to climb
+    dump_need = 0.97  # ≥3% savings to dump (symmetric)
     best_z = float(min(band_scores.keys(), key=lambda z: band_scores[z]))
     best_e = band_scores[best_z]
     clearance_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance))))
@@ -1236,6 +1234,10 @@ def _select_preferred_cruise_band(
 
     sticky_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(sticky))))
     sticky_e = band_scores[sticky_key]
+
+    # Universal recovery: sticky clearly worse than clearance → ease down.
+    if sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * 1.03:
+        return float(max(clearance_key, sticky_key - 0.35))
 
     # Approach: gentle descent only.
     if remaining_horiz <= 10.0:
@@ -1413,9 +1415,9 @@ def _energy_guide_paths(
             energy = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.12)
             if straight_floor < math.inf and energy > straight_floor * corridor_margin:
                 continue
-            # Raw model energy must not exceed straight (blocks pure uncertainty gaming).
+            # Raw model energy may be slightly above straight (noise / short detours).
             raw = _polyline_model_energy_j(path, belief_map, mission)
-            if straight_floor < math.inf and raw > straight_floor * 1.0:
+            if straight_floor < math.inf and raw > straight_floor * 1.03:
                 continue
             guides.append((label, path))
     return guides
@@ -1972,7 +1974,9 @@ def _rank_continuous_successors(
         if step_len > 1e-6 and not near_goal:
             wasted = max(0.0, step_len - max(0.0, xy_progress))
             wind_assist -= 36.0 * wasted
-        if not near_goal and xy_progress < 0.20:
+        is_thermal = str(control.get("mode", "")) == "thermal_orbit"
+        # Low XY progress is expected while thermalling — do not punish lift there.
+        if not near_goal and xy_progress < 0.20 and not is_thermal:
             wind_assist -= 55.0 * max(0.0, blend_w)
             energy_progress_reward = min(energy_progress_reward, 10.0)
 
@@ -1999,7 +2003,9 @@ def _rank_continuous_successors(
             + 55.0 * next_local["mode_prob_uplift"]
             - 30.0 * next_local["mode_prob_sink"]
         )
-        if not near_goal and xy_progress < 0.20:
+        if is_thermal:
+            belief_energy_bonus *= 1.25
+        elif not near_goal and xy_progress < 0.20:
             belief_energy_bonus *= 0.15
         step_reward = energy_progress_reward + goal_progress_reward + belief_energy_bonus + wind_assist - step_cost
         scored.append(
@@ -2284,14 +2290,13 @@ def _control_library(
         if horizontal <= 7.0:
             controls.append({"mode": "approach", "turn_rate_rad_s": base_turn, "airspeed": DEFAULT_ENVELOPE.best_glide_speed + 2.5, "climb_bias": -1.4})
 
-    # Thermal only with usable uplift AND non-adverse along-track wind.
+    # Opportunistic thermal when lift is usable and we are not forced to descend.
     allow_thermal = (
         horizontal > 6.0
-        and preferred_z is not None
-        and preferred_z > current.z + 0.3
         and bearing_tw >= -0.35
-        and (local["wind_w"] > 0.2 or local["mode_prob_uplift"] > 0.4)
+        and (local["wind_w"] > 0.15 or local["mode_prob_uplift"] > 0.35)
         and ahead_rise < 50.0
+        and (preferred_z is None or preferred_z >= current.z - 0.15)
     )
     if allow_thermal:
         thermal_turn = max(0.15, best_thermalling_bank(local["wind_w"]) / max(DEFAULT_ENVELOPE.max_bank_rad, 1e-6) * DEFAULT_ENVELOPE.max_turn_rate_rad_s)

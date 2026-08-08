@@ -25,6 +25,11 @@ class FlightEnvelope:
 DEFAULT_ENVELOPE = FlightEnvelope()
 
 
+def uplift_energy_scale(local_w: float) -> float:
+    """Shared planning/execution discount for usable vertical lift (unitless)."""
+    return max(0.5, min(1.4, 1.0 - 0.20 * max(float(local_w), 0.0)))
+
+
 def compute_heading(current: tuple[float, float, float], nxt: tuple[float, float, float]) -> float:
     dx = nxt[0] - current[0]
     dy = nxt[1] - current[1]
@@ -100,13 +105,14 @@ def transition_energy_j(
     maneuver_power = max(0.0, aero - 90.0)
     climb_power = climb_power_per_mps_w * max(vertical_rate_mps, 0.0)
     descent_credit = descent_power_reduction_per_mps_w * max(-vertical_rate_mps, 0.0)
-    uplift_credit = 0.30 * descent_power_reduction_per_mps_w * max(local_w, 0.0)
+    # Partial credit for weak lift; full credit above sink so mild ridge lift matters.
+    uplift_credit = 0.55 * descent_power_reduction_per_mps_w * max(local_w, 0.0)
     legacy_vertical_bias = climb_cost_per_level_j * max(effective_dz, 0.0) / max(travel_time, 1e-6)
     total_power = max(
         hover_power_w,
         baseline_power + wind_power + maneuver_power + climb_power + legacy_vertical_bias - descent_credit - uplift_credit,
     )
-    return max(0.0, total_power * travel_time)
+    return max(0.0, total_power * travel_time * uplift_energy_scale(local_w))
 
 
 def transition_energy_batch(
@@ -214,7 +220,8 @@ def _transition_energy_batch_core_numpy(
         (1.0 / np.maximum(np.cos(np.clip(bank_rad, 0.0, max_bank_rad)), 1e-3)) - 1.0,
     )
     sink = base_sink_mps + polar_quad_coeff * dv * dv + bank_penalty
-    thermal_credit = 55.0 * np.maximum(w - sink, 0.0)
+    # Weak lift still reduces aero cost; surplus above sink gets extra credit.
+    thermal_credit = 40.0 * np.maximum(w - 0.25 * sink, 0.0) + 25.0 * np.maximum(w - sink, 0.0)
     profile_drag = 42.0 + 0.48 * airspeed * airspeed
     bank_drag = 18.0 * np.maximum(
         0.0,
@@ -231,13 +238,14 @@ def _transition_energy_batch_core_numpy(
     maneuver_power = np.maximum(0.0, aero - 90.0)
     climb_power = climb_power_per_mps_w * np.maximum(vertical_rate_mps, 0.0)
     descent_credit = descent_power_reduction_per_mps_w * np.maximum(-vertical_rate_mps, 0.0)
-    uplift_credit = 0.30 * descent_power_reduction_per_mps_w * np.maximum(w, 0.0)
+    uplift_credit = 0.55 * descent_power_reduction_per_mps_w * np.maximum(w, 0.0)
     legacy_vertical_bias = climb_cost_per_level_j * np.maximum(effective_dz, 0.0) / np.maximum(travel_time, 1e-6)
     total_power = np.maximum(
         hover_power_w,
         baseline_power + wind_power + maneuver_power + climb_power + legacy_vertical_bias - descent_credit - uplift_credit,
     )
-    return np.maximum(0.0, total_power * travel_time)
+    uplift_scale = np.clip(1.0 - 0.20 * np.maximum(w, 0.0), 0.5, 1.4)
+    return np.maximum(0.0, total_power * travel_time * uplift_scale)
 
 
 try:
@@ -297,7 +305,7 @@ try:
                 cos_b = 1e-3
             bank_penalty = induced_drag_coeff * max(0.0, (1.0 / cos_b) - 1.0)
             sink = base_sink_mps + polar_quad_coeff * dv * dv + bank_penalty
-            thermal_credit = 55.0 * max(w[i] - sink, 0.0)
+            thermal_credit = 40.0 * max(w[i] - 0.25 * sink, 0.0) + 25.0 * max(w[i] - sink, 0.0)
             bank_drag = 18.0 * max(0.0, (1.0 / cos_b) - 1.0)
             aero = profile_drag + bank_drag - thermal_credit
             if aero < 12.0:
@@ -314,12 +322,17 @@ try:
             maneuver_power = max(0.0, aero - 90.0)
             climb_power = climb_power_per_mps_w * max(vertical_rate_mps, 0.0)
             descent_credit = descent_power_reduction_per_mps_w * max(-vertical_rate_mps, 0.0)
-            uplift_credit = 0.30 * descent_power_reduction_per_mps_w * max(w[i], 0.0)
+            uplift_credit = 0.55 * descent_power_reduction_per_mps_w * max(w[i], 0.0)
             legacy_vertical_bias = climb_cost_per_level_j * max(effective_dz, 0.0) / travel_time
             total_power = baseline_power + wind_power + maneuver_power + climb_power + legacy_vertical_bias - descent_credit - uplift_credit
             if total_power < hover_power_w:
                 total_power = hover_power_w
-            energy = total_power * travel_time
+            uplift_scale = 1.0 - 0.20 * max(w[i], 0.0)
+            if uplift_scale < 0.5:
+                uplift_scale = 0.5
+            elif uplift_scale > 1.4:
+                uplift_scale = 1.4
+            energy = total_power * travel_time * uplift_scale
             out[i] = energy if energy > 0.0 else 0.0
         return out
 
@@ -417,7 +430,7 @@ def aerodynamic_power_w(
     envelope: FlightEnvelope = DEFAULT_ENVELOPE,
 ) -> float:
     sink = glide_sink_rate_mps(airspeed, bank_rad, envelope)
-    thermal_credit = 55.0 * max(vertical_w - sink, 0.0)
+    thermal_credit = 40.0 * max(vertical_w - 0.25 * sink, 0.0) + 25.0 * max(vertical_w - sink, 0.0)
     profile_drag = 42.0 + 0.48 * airspeed * airspeed
     bank_drag = 18.0 * max(0.0, (1.0 / max(math.cos(clamp(bank_rad, 0.0, envelope.max_bank_rad)), 1e-3)) - 1.0)
     return max(12.0, profile_drag + bank_drag - thermal_credit)

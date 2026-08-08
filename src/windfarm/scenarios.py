@@ -188,7 +188,7 @@ def build_scenario_dataset(
         climb_cost_per_level_j=climb_cost,
         clearance_agl_level=config.mission.clearance_agl_level,
         cruise_band_step=cruise_band_step,
-        corridor_energy_margin=getattr(config.mission, "corridor_energy_margin", 0.97),
+        corridor_energy_margin=getattr(config.mission, "corridor_energy_margin", 1.02),
     )
     save_task_config(output_dir / "config.json", config)
 

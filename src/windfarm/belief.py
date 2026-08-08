@@ -281,12 +281,19 @@ class BeliefUpdater:
             + 0.12 * _logistic_np(horizontal_speed - 5.0)
             + 0.10 * _clamp01_np(uncertainty / 3.0)
         )
+        # Punish downdraft / shear risk only — rising air is useful, not hazardous.
         safety = _clamp01_np(
             0.52 * hazard
             + 0.28 * _clamp01_np(uncertainty / 3.0)
-            + 0.20 * _clamp01_np(np.abs(wind_w) / 2.5)
+            + 0.20 * _clamp01_np(np.maximum(-wind_w, 0.0) / 2.5)
         )
-        expected = 0.16 * horizontal_speed + 1.05 * wind_w + (1.25 * mode_u - 0.95 * mode_s) - 0.28 * safety
+        # Direction-agnostic horizontal speed is NOT a gain (could be headwind).
+        expected = (
+            0.55 * np.maximum(wind_w, 0.0)
+            - 0.85 * np.maximum(-wind_w, 0.0)
+            + (1.25 * mode_u - 0.95 * mode_s)
+            - 0.28 * safety
+        )
         confidence = 1.0 / (1.0 + uncertainty)
 
         # Arrays are the hot-path source of truth; skip O(ZHW) cell writeback.
@@ -400,11 +407,10 @@ class BeliefUpdater:
             mode_s, mode_n, mode_u, obs_s, obs_n, obs_u, blend
         )
         mode_entropy = _entropy_np(mode_s, mode_n, mode_u)
-        horizontal_speed = np.hypot(wind_u, wind_v)
         expected = (1.0 - gain_scale * influence) * expected + (gain_scale * influence) * energy_gain
         expected_from_wind = (
-            0.16 * horizontal_speed
-            + 1.05 * wind_w
+            0.55 * np.maximum(wind_w, 0.0)
+            - 0.85 * np.maximum(-wind_w, 0.0)
             + (1.25 * mode_u - 0.95 * mode_s)
             - 0.28 * safety
         )
@@ -717,8 +723,14 @@ def _entropy_np(*probs: np.ndarray) -> np.ndarray:
 
 
 def _expected_energy_from_cell(cell: BeliefCell, horizontal_speed: float) -> float:
+    del horizontal_speed  # unused: undirected speed is not an energy gain
     mode_bias = (1.25 * cell.mode_prob_uplift) - (0.95 * cell.mode_prob_sink)
-    return 0.16 * horizontal_speed + 1.05 * cell.wind_w + mode_bias - 0.28 * cell.safety_penalty
+    return (
+        0.55 * max(cell.wind_w, 0.0)
+        - 0.85 * max(-cell.wind_w, 0.0)
+        + mode_bias
+        - 0.28 * cell.safety_penalty
+    )
 
 
 def _logistic(value: float) -> float:

@@ -74,6 +74,6 @@
     "climb_cost_per_level_j": 135.0,
     "clearance_agl_level": 1.0,
     "cruise_band_step": 0.03333333333333333,
-    "corridor_energy_margin": 0.95
+    "corridor_energy_margin": 1.02
   }
 }
