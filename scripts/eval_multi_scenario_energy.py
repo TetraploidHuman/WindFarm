@@ -21,7 +21,50 @@ from windfarm.io import read_json
 from windfarm.mathutils import trilinear_sample
 
 
-SCENARIOS = ("fujian_hills", "beijing_plain", "qinghai_ridge", "qingdao_coast")
+# Core maps used during early tuning.
+CORE_SCENARIOS = (
+    "fujian_hills",
+    "beijing_plain",
+    "qinghai_ridge",
+    "qingdao_coast",
+)
+# Holdout real-world maps (anti-overfit; do not tune on these in isolation).
+HOLDOUT_SCENARIOS = (
+    "zhangbei_steppe",
+    "yunnan_karst",
+    "xinjiang_gobi",
+    "jilin_forest",
+    "neimeng_grass",
+    "sichuan_foothills",
+)
+SCENARIOS = CORE_SCENARIOS + HOLDOUT_SCENARIOS
+
+
+def _discover_scenarios(scenarios_dir: Path) -> list[str]:
+    """Prefer index.json order, then any on-disk scenario with terrain.json."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    index_path = scenarios_dir / "index.json"
+    if index_path.exists():
+        try:
+            rows = json.loads(index_path.read_text(encoding="utf-8")).get("scenarios") or []
+            for row in rows:
+                name = str(row.get("name") or "")
+                if name and (scenarios_dir / name / "terrain.json").exists():
+                    ordered.append(name)
+                    seen.add(name)
+        except json.JSONDecodeError:
+            pass
+    for name in SCENARIOS:
+        if name not in seen and (scenarios_dir / name / "terrain.json").exists():
+            ordered.append(name)
+            seen.add(name)
+    for path in sorted(scenarios_dir.glob("*/terrain.json")):
+        name = path.parent.name
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
 
 
 def _mission_params(mission: dict) -> dict:
@@ -301,13 +344,21 @@ def main() -> None:
                 flush=True,
             )
     else:
-        names = [name for name in SCENARIOS if (ROOT / "scenarios" / name / "terrain.json").exists()]
+        names = _discover_scenarios(ROOT / "scenarios")
+        if not names:
+            raise SystemExit("no scenarios with terrain.json found under scenarios/")
+        # Optional filter: python scripts/eval_multi_scenario_energy.py --only a b c
+        if len(sys.argv) > 1 and sys.argv[1] == "--only":
+            wanted = set(sys.argv[2:])
+            names = [n for n in names if n in wanted]
+            if not names:
+                raise SystemExit("no matching scenarios for --only")
         max_workers = min(len(names), max(1, os.cpu_count() or 4))
         # Split cores across concurrent scenario processes to avoid XGB/OpenMP thrash.
         per_proc_jobs = max(1, (os.cpu_count() or 4) // max(max_workers, 1))
         print(
             f"parallel scenarios: {len(names)} workers={max_workers} "
-            f"WINDFARM_N_JOBS={per_proc_jobs}",
+            f"WINDFARM_N_JOBS={per_proc_jobs} names={names}",
             flush=True,
         )
         run_dirs: dict[str, Path] = {}
@@ -334,7 +385,7 @@ def main() -> None:
                     flush=True,
                 )
         # Stable scenario order in summary.
-        order = {name: i for i, name in enumerate(SCENARIOS)}
+        order = {name: i for i, name in enumerate(list(SCENARIOS) + names)}
         results.sort(key=lambda r: order.get(r["scenario"], 999))
 
     summary = {
@@ -343,12 +394,15 @@ def main() -> None:
         "savings_definition": "positive % means algorithm path-model used less energy than baseline",
         "primary_energy": "path_model_kJ",
         "battery_note": "battery_kJ / savings_battery_* are diagnostic only",
+        "core_scenarios": list(CORE_SCENARIOS),
+        "holdout_scenarios": list(HOLDOUT_SCENARIOS),
         "results": results,
     }
-    if results:
-        reached = [r for r in results if r["goal_reached"]]
-        summary["aggregate"] = {
-            "n_scenarios": len(results),
+
+    def _aggregate(rows: list[dict]) -> dict:
+        reached = [r for r in rows if r["goal_reached"]]
+        return {
+            "n_scenarios": len(rows),
             "n_reached": len(reached),
             "mean_savings_vs_nominal_pct": sum(r["savings_vs_nominal_pct"] for r in reached) / max(len(reached), 1),
             "mean_savings_vs_best_pct": sum(r["savings_vs_best_pct"] for r in reached) / max(len(reached), 1),
@@ -358,6 +412,15 @@ def main() -> None:
             "mean_savings_battery_vs_nominal_pct": sum(r["savings_battery_vs_nominal_pct"] for r in reached)
             / max(len(reached), 1),
         }
+
+    if results:
+        summary["aggregate"] = _aggregate(results)
+        core_rows = [r for r in results if r["scenario"] in CORE_SCENARIOS]
+        hold_rows = [r for r in results if r["scenario"] in HOLDOUT_SCENARIOS]
+        if core_rows:
+            summary["aggregate_core"] = _aggregate(core_rows)
+        if hold_rows:
+            summary["aggregate_holdout"] = _aggregate(hold_rows)
 
     out_path = out_dir / "energy_summary.json"
     out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -383,6 +446,15 @@ def main() -> None:
             f"{a['mean_savings_vs_nominal_pct']:+9.1f} {a['mean_savings_vs_best_pct']:+10.1f} "
             f"{a['mean_savings_battery_vs_nominal_pct']:+9.1f}"
         )
+        for key, label in (("aggregate_core", "CORE"), ("aggregate_holdout", "HOLDOUT")):
+            if key in summary:
+                b = summary[key]
+                lines.append(
+                    f"{label} (reached {b['n_reached']}/{b['n_scenarios']})        "
+                    f"{b['mean_path_model_kJ']:8.2f} {b['mean_baseline_nominal_kJ']:7.2f}         "
+                    f"{b['mean_savings_vs_nominal_pct']:+9.1f} {b['mean_savings_vs_best_pct']:+10.1f} "
+                    f"{b['mean_savings_battery_vs_nominal_pct']:+9.1f}"
+                )
     table = "\n".join(lines) + "\n"
     (out_dir / "energy_summary.txt").write_text(table, encoding="utf-8")
     print("\n" + table)

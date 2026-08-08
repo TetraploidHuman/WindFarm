@@ -1,0 +1,41 @@
+{
+  "name": "sichuan_foothills",
+  "description": "West Sichuan basin-edge foothills (SRTM N30E103)",
+  "lat": 30.65,
+  "lon": 103.45,
+  "hgt": "data/N30E103.hgt",
+  "start_time": "2024-08-22T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 560.3178316873368,
+    "max": 638.9753512825204,
+    "mean": 586.7602838251079
+  },
+  "wind": {
+    "u_km_mean": -0.597917943212295,
+    "v_km_mean": -0.12771857628817454,
+    "speed_mean": 0.6153118361851563,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      42
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-08T15:24:54Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

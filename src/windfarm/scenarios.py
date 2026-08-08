@@ -252,8 +252,26 @@ def build_default_scenarios(
             f"wind_speed≈{summary['wind']['speed_mean']:.2f} m/s, "
             f"mission {summary['mission']['start']}→{summary['mission']['goal']}"
         )
-    index = {"scenarios": summaries}
-    (scenarios_dir / "index.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Merge into existing index so `--only` rebuilds do not drop other maps.
+    by_name: dict[str, dict] = {}
+    index_path = scenarios_dir / "index.json"
+    if index_path.exists():
+        try:
+            prev = json.loads(index_path.read_text(encoding="utf-8"))
+            for row in prev.get("scenarios") or []:
+                if isinstance(row, dict) and row.get("name"):
+                    by_name[str(row["name"])] = row
+        except json.JSONDecodeError:
+            pass
+    for row in summaries:
+        by_name[str(row["name"])] = row
+    order = [spec.name for spec in DEFAULT_SCENARIOS]
+    merged = [by_name[name] for name in order if name in by_name]
+    for name, row in by_name.items():
+        if name not in order:
+            merged.append(row)
+    index = {"scenarios": merged}
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
     return summaries
 
 

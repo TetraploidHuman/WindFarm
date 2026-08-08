@@ -1,0 +1,41 @@
+{
+  "name": "jilin_forest",
+  "description": "Changbai foothills / forested hills (SRTM N42E127)",
+  "lat": 42.45,
+  "lon": 127.25,
+  "hgt": "data/N42E127.hgt",
+  "start_time": "2024-09-18T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 575.0,
+    "max": 733.7723798349723,
+    "mean": 635.9229530352859
+  },
+  "wind": {
+    "u_km_mean": 1.3474380938637718,
+    "v_km_mean": 0.023081429804789073,
+    "speed_mean": 1.3494931996929604,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      11,
+      42
+    ],
+    "goal": [
+      67,
+      18
+    ]
+  },
+  "built_at": "2026-08-08T14:08:38Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

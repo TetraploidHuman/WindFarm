@@ -1,0 +1,41 @@
+{
+  "name": "yunnan_karst",
+  "description": "Central Yunnan karst hills near Kunming (SRTM N25E102)",
+  "lat": 25.05,
+  "lon": 102.72,
+  "hgt": "data/N25E102.hgt",
+  "start_time": "2024-05-15T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 1888.3853646458447,
+    "max": 1936.4580811556366,
+    "mean": 1900.7065632892502
+  },
+  "wind": {
+    "u_km_mean": -4.746253481364793,
+    "v_km_mean": -1.1592739634168556,
+    "speed_mean": 4.8865344103441455,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      10,
+      44
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-08T13:27:58Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

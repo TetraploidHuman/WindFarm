@@ -123,9 +123,39 @@ WindFarm 是一个面向不确定风环境下自主飞行的 Python 工程原型
 python -m unittest tests.test_pipeline
 ```
 
+### 真实场景数据（防过拟合）
+
+数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。当前已构建 **10** 张真实地图。
+
+| 分组 | 场景 | 地形类型 |
+|------|------|----------|
+| Core（调参常用） | fujian_hills / beijing_plain / qinghai_ridge / qingdao_coast | 丘陵、平原、高原脊、海岸 |
+| Holdout（独立验收） | zhangbei_steppe / yunnan_karst / xinjiang_gobi / jilin_forest / neimeng_grass / sichuan_foothills | 坝上草原、喀斯特、戈壁、林地、锡林郭勒草原、四川盆地边缘 |
+
+构建 / 补下载：
+
+```bash
+# 若客户端 Clash Verge 已开「允许局域网」，在 NixOS 开发机上走网关代理（更快下 SRTM）：
+export HTTPS_PROXY=http://172.20.128.1:7897   # 端口以 Clash 设置页为准，常见 7890/7897
+export HTTP_PROXY="$HTTPS_PROXY"
+
+.venv-linux/bin/python -m windfarm.cli build-scenarios \
+  --output-dir scenarios --data-dir data --base-config config_eval.json \
+  --resolution-m 30
+```
+
+能量评测（自动发现已构建场景，并分别汇总 CORE / HOLDOUT）：
+
+```bash
+.venv-linux/bin/python scripts/eval_multi_scenario_energy.py
+.venv-linux/bin/python scripts/eval_multi_scenario_energy.py --only zhangbei_steppe yunnan_karst
+```
+
+**规则**：不要只对着某一张 holdout 调参；改动必须以 CORE+HOLDOUT 均值与「无单场景大亏」为准。
+
 ## 已知问题诊断：风场利用表现不佳（2026-08-08）
 
-多场景能量评测（`scripts/eval_multi_scenario_energy.py`）是防过拟合的主指标：改参数必须同时看福建 / 北京 / 青海 / 青岛四场景，禁止为单图加特例阈值。
+多场景能量评测（`scripts/eval_multi_scenario_energy.py`）是防过拟合的主指标：必须同时看 core 与 holdout 真实地图，禁止为单图加特例阈值。
 
 ### 已落地的通用修复
 
@@ -137,24 +167,26 @@ python -m unittest tests.test_pipeline
 - 走廊：只生成不差于直线的候选，终选需模型能量明确更省（约 ≥0.8%）；避免「看起来差不多」的绕行亏电
 - 信念预测改为与先验滤波融合（不再整场覆盖），近期观测与侧向风差可保留
 
-### 最新四场景结果（`multi-scenario-energy-20260808-205538`）
+### 最新 8 场景结果（`multi-scenario-energy-20260808-222925`）
 
-| 场景 | vs 名义直线 | vs 最佳高度带 | z_max | 说明 |
-|------|-------------|---------------|-------|------|
-| fujian_hills | **+3.3%** | **+3.3%** | 1.00 | 在线走廊绕行开始兑现 |
-| beijing_plain | 0% | 0% | 1.00 | 贴名义直线（风场差异不足） |
-| qinghai_ridge | **+17.0%** | -3.2% | 2.77 | 仍主要靠高度带；略逊最优常数 AGL |
-| qingdao_coast | -0.6% | -0.6% | 1.07 | 接近持平，无大亏 |
-| 均值 | **+4.9%** | **-0.1%** | — | 相对最佳带接近打平；无单场景大亏 |
+含 4 个 core + 4 个 holdout（张北 / 云南 / 新疆 / 吉林）：
 
-对比：修复前糟糕 run `...-104637` 均值 **-29%**。  
-曾出现「走廊过松 → 福建赚、青岛大亏」——已用明确省电门槛约束，避免单图过拟合。
+| 分组 | vs 名义直线 | vs 最佳高度带 |
+|------|-------------|---------------|
+| CORE | **+4.9%** | -0.1% |
+| HOLDOUT | **+0.2%** | -0.5% |
+| 全部 8 场景 | **+2.6%** | -0.3% |
+
+要点：holdout 没有出现大亏（最差约 -1.3%），说明当前策略没有明显过拟合到原四图；福建仍有 +3.3% 走廊收益，青海相对名义直线 +17%，但相对最佳高度带仍略负。
+
+对比：修复前糟糕 run `...-104637` 均值 **-29%**。
 
 ### 仍未解决
 
-1. **`save_best%` 尚未四场景均为正** — 青海仍略逊最优常数 AGL  
+1. **`save_best%` 尚未全面为正** — 青海 / 部分 holdout 仍略逊最优常数 AGL  
 2. **青岛偶发小幅负值** — 需继续压低错误绕行  
 3. **盘旋热利用仍弱** — 走廊有进展，热盘旋链路待加强  
+4. **10 场景全量评测** — `neimeng_grass` / `sichuan_foothills` 已构建，跑全量 holdout 验收  
 
 ### 评测怎么读
 

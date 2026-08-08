@@ -1,0 +1,41 @@
+{
+  "name": "zhangbei_steppe",
+  "description": "Hebei Zhangbei windy steppe / Bashang (SRTM N41E114)",
+  "lat": 41.18,
+  "lon": 114.72,
+  "hgt": "data/N41E114.hgt",
+  "start_time": "2024-04-20T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 1374.8973226681917,
+    "max": 1394.0,
+    "mean": 1387.0734724814056
+  },
+  "wind": {
+    "u_km_mean": 1.680346391380456,
+    "v_km_mean": -1.7954949202272978,
+    "speed_mean": 2.4593053320342633,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      43
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-08T13:12:35Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

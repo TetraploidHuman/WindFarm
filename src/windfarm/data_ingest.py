@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import math
+import os
 import struct
 import urllib.error
 import urllib.parse
@@ -19,6 +20,35 @@ from .types import TerrainField
 SRTM_SIZE = 3601
 SRTM_SKADI_BASE = "https://elevation-tiles-prod.s3.amazonaws.com/skadi"
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
+
+
+def _proxy_opener() -> urllib.request.OpenerDirector:
+    """Build a URL opener that honors Clash/system proxy env vars.
+
+    Supported (first non-empty wins for https):
+      WINDFARM_HTTP_PROXY, HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy, ALL_PROXY, all_proxy
+
+    Example with Clash Verge on the LAN gateway (Allow LAN enabled):
+      export HTTPS_PROXY=http://172.20.128.1:7897
+    """
+    keys = (
+        "WINDFARM_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    )
+    proxy = next((os.environ[k].strip() for k in keys if os.environ.get(k, "").strip()), "")
+    if not proxy:
+        return urllib.request.build_opener()
+    handlers = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    return urllib.request.build_opener(handlers)
+
+
+def _urlopen(request: urllib.request.Request, timeout: float):
+    return _proxy_opener().open(request, timeout=timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +70,7 @@ class ScenarioSpec:
     goal_frac: tuple[float, float] = (0.85, 0.30)
 
 
-# Diverse sites: coastal hills, flat plains, alpine ridge, windy coast.
+# Diverse sites across climate / terrain regimes (anti-overfit holdouts).
 DEFAULT_SCENARIOS: tuple[ScenarioSpec, ...] = (
     ScenarioSpec(
         name="fujian_hills",
@@ -90,6 +120,79 @@ DEFAULT_SCENARIOS: tuple[ScenarioSpec, ...] = (
         start_frac=(0.16, 0.68),
         goal_frac=(0.80, 0.34),
     ),
+    # --- holdout maps (not used while tuning the first four) ---
+    ScenarioSpec(
+        name="zhangbei_steppe",
+        description="Hebei Zhangbei windy steppe / Bashang (SRTM N41E114)",
+        lat=41.18,
+        lon=114.72,
+        tile_lat=41,
+        tile_lon=114,
+        wind_start_date="2024-04-20",
+        wind_end_date="2024-04-21",
+        start_frac=(0.15, 0.74),
+        goal_frac=(0.84, 0.30),
+    ),
+    ScenarioSpec(
+        name="yunnan_karst",
+        description="Central Yunnan karst hills near Kunming (SRTM N25E102)",
+        lat=25.05,
+        lon=102.72,
+        tile_lat=25,
+        tile_lon=102,
+        wind_start_date="2024-05-15",
+        wind_end_date="2024-05-16",
+        start_frac=(0.13, 0.76),
+        goal_frac=(0.85, 0.29),
+    ),
+    ScenarioSpec(
+        name="xinjiang_gobi",
+        description="Hami Gobi corridor / arid basin (SRTM N42E093)",
+        lat=42.83,
+        lon=93.52,
+        tile_lat=42,
+        tile_lon=93,
+        wind_start_date="2024-02-10",
+        wind_end_date="2024-02-11",
+        start_frac=(0.16, 0.70),
+        goal_frac=(0.83, 0.33),
+    ),
+    ScenarioSpec(
+        name="jilin_forest",
+        description="Changbai foothills / forested hills (SRTM N42E127)",
+        lat=42.45,
+        lon=127.25,
+        tile_lat=42,
+        tile_lon=127,
+        wind_start_date="2024-09-18",
+        wind_end_date="2024-09-19",
+        start_frac=(0.14, 0.72),
+        goal_frac=(0.86, 0.31),
+    ),
+    ScenarioSpec(
+        name="neimeng_grass",
+        description="Xilingol grassland / open steppe (SRTM N43E116)",
+        lat=43.95,
+        lon=116.08,
+        tile_lat=43,
+        tile_lon=116,
+        wind_start_date="2024-06-08",
+        wind_end_date="2024-06-09",
+        start_frac=(0.17, 0.71),
+        goal_frac=(0.83, 0.32),
+    ),
+    ScenarioSpec(
+        name="sichuan_foothills",
+        description="West Sichuan basin-edge foothills (SRTM N30E103)",
+        lat=30.65,
+        lon=103.45,
+        tile_lat=30,
+        tile_lon=103,
+        wind_start_date="2024-08-22",
+        wind_end_date="2024-08-23",
+        start_frac=(0.15, 0.73),
+        goal_frac=(0.85, 0.30),
+    ),
 )
 
 
@@ -118,7 +221,12 @@ def ensure_srtm_tile(data_dir: str | Path, lat: int, lon: int, timeout_s: float 
         return path
     url = skadi_url(lat, lon)
     request = urllib.request.Request(url, headers={"User-Agent": "WindFarm/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("WINDFARM_HTTP_PROXY") or ""
+    if proxy:
+        print(f"[srtm] downloading {path.name} via proxy {proxy}")
+    else:
+        print(f"[srtm] downloading {path.name} (direct; set HTTPS_PROXY for Clash)")
+    with _urlopen(request, timeout_s) as response:
         payload = response.read()
     if url.endswith(".gz") or payload[:2] == b"\x1f\x8b":
         payload = gzip.decompress(payload)
@@ -269,7 +377,7 @@ def terrain_from_srtm(
 def _http_json(url: str, timeout_s: float = 90.0) -> dict:
     request = urllib.request.Request(url, headers={"User-Agent": "WindFarm/1.0"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        with _urlopen(request, timeout_s) as response:
             import json
 
             return json.loads(response.read().decode("utf-8"))
