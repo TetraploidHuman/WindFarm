@@ -109,6 +109,8 @@ class Mission:
     guide_via: tuple[float, float] | None = None
     # Sticky cruise AGL band from the winning energy guide (may be above clearance floor).
     preferred_cruise_agl: float | None = None
+    # True once a climb above clearance was earned with clearance-relative evidence.
+    cruise_climb_earned: bool = False
 
 
 @dataclass(slots=True)
