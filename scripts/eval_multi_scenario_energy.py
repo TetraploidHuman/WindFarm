@@ -36,6 +36,10 @@ HOLDOUT_SCENARIOS = (
     "jilin_forest",
     "neimeng_grass",
     "sichuan_foothills",
+    "hainan_coast",
+    "gansu_hexi",
+    "shanxi_loess",
+    "hubei_jianghan",
 )
 SCENARIOS = CORE_SCENARIOS + HOLDOUT_SCENARIOS
 
