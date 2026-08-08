@@ -452,6 +452,7 @@ class NavigationEngine:
             # Final half-cell: allow full descent to goal altitude.
             # Allow final descent: clear elevated cruise hold.
             context.mission.preferred_cruise_agl = None
+            context.mission.cruise_climb_earned = False
         plan_mission = Mission(
             start=(context.state.x, context.state.y, context.state.z),
             goal=context.mission.goal,
@@ -477,6 +478,7 @@ class NavigationEngine:
             elevation=context.terrain.elevation,
             guide_via=getattr(context.mission, "guide_via", None),
             preferred_cruise_agl=getattr(context.mission, "preferred_cruise_agl", None),
+            cruise_climb_earned=bool(getattr(context.mission, "cruise_climb_earned", False)),
         )
         # Reuse Dijkstra return map for a few steps (belief wind drifts slowly vs replan rate).
         cache_ttl = max(2, int(getattr(self.config.planner, "replan_interval_steps", 2)) * 2)
@@ -504,6 +506,7 @@ class NavigationEngine:
         )
         context.mission.guide_via = getattr(plan_mission, "guide_via", None)
         context.mission.preferred_cruise_agl = getattr(plan_mission, "preferred_cruise_agl", None)
+        context.mission.cruise_climb_earned = bool(getattr(plan_mission, "cruise_climb_earned", False))
         context.latest_planning = planning
         fresh_map = planning.get("return_cost_map")
         if fresh_map is not None:

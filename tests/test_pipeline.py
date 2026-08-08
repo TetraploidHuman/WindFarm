@@ -334,11 +334,11 @@ class PipelineTest(unittest.TestCase):
         )
 
     def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:
-        # Noise-sized 0.5% "win" at higher band must not leave clearance.
-        scores = {1.0: 1000.0, 1.35: 995.0, 2.0: 990.0}
+        # Sub-5% "wins" at higher bands must not leave clearance (belief noise aloft).
+        scores = {1.0: 1000.0, 1.35: 995.0, 2.0: 960.0}
         z = _select_preferred_cruise_band(scores, sticky=None, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
         self.assertAlmostEqual(z, 1.0, places=5)
-        # Clear ≥1.5% win does climb.
+        # Clear ≥5% win vs clearance does climb.
         scores2 = {1.0: 1000.0, 1.5: 980.0, 2.5: 820.0}
         z2 = _select_preferred_cruise_band(scores2, sticky=None, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
         self.assertAlmostEqual(z2, 2.5, places=5)
@@ -346,10 +346,33 @@ class PipelineTest(unittest.TestCase):
         scores3 = {1.0: 1000.0, 2.5: 820.0, 2.7: 818.0}
         z3 = _select_preferred_cruise_band(scores3, sticky=2.5, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
         self.assertAlmostEqual(z3, 2.5, places=5)
-        # Mistaken sticky with ≥2.5% worse than clearance → corrective step down.
+        # Mistaken sticky ≥2% worse than clearance → corrective step down.
         scores4 = {1.0: 1000.0, 1.6: 1040.0}
         z4 = _select_preferred_cruise_band(scores4, sticky=1.6, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
         self.assertLess(z4, 1.6)
+        # Unearned sticky (better than clearance by only ~3%) still eases down.
+        scores5 = {1.0: 1000.0, 2.2: 970.0}
+        z5 = _select_preferred_cruise_band(
+            scores5, sticky=2.2, clearance=1.0, remaining_horiz=40.0, band_step=0.05, climb_earned=False
+        )
+        self.assertLess(z5, 2.2)
+        # Once earned, the same sticky may hold.
+        z5b = _select_preferred_cruise_band(
+            scores5, sticky=2.2, clearance=1.0, remaining_horiz=40.0, band_step=0.05, climb_earned=True
+        )
+        self.assertAlmostEqual(z5b, 2.2, places=5)
+        # Significant route terrain rise relaxes climb bar (3% enough).
+        scores6 = {1.0: 1000.0, 2.0: 960.0}
+        z6 = _select_preferred_cruise_band(
+            scores6,
+            sticky=None,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            terrain_rise_m=80.0,
+            altitude_step_m=50.0,
+        )
+        self.assertAlmostEqual(z6, 2.0, places=5)
 
     def test_downscale_uses_100m_profile_aloft(self) -> None:
         elev = [[100.0, 110.0], [105.0, 115.0]]

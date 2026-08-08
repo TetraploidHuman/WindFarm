@@ -571,24 +571,51 @@ def plan_path_details(
     else:
         cruise_fair = _band_selection_scores(start, goal, belief_map, mission, bands)
         select_scores = cruise_fair
-    # Tiny climb prior — break exact ties toward clearance (not a hard preference).
+    # Mild climb prior: belief noise aloft often looks "free"; tax ~1%/level above clearance.
+    raw_band_scores = dict(select_scores) if select_scores else {}
     if select_scores and step <= 0.26 + 1e-12:
         floor_z = min(select_scores.keys(), key=lambda z: abs(z - clearance))
         floor_e = max(select_scores[floor_z], 1.0)
-        pen = 0.002 * floor_e
+        pen = 0.01 * floor_e
         select_scores = {
             z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
         }
     sticky_now = getattr(mission, "preferred_cruise_agl", None)
     sz_now = float(start[2])
-    # Cancel aero-descent optimism when already established in cruise.
+    # Small anti-thrash only within ±0.5 of the hold — never block clearance recovery.
     if sticky_now is not None and sz_now >= clearance + 0.25 and select_scores and horizontal_to_goal > 8.0:
         climb_cost = float(getattr(mission, "climb_cost_per_level_j", 180.0))
         hold = min(sz_now, float(sticky_now))
         select_scores = {
-            z: e + climb_cost * max(0.0, hold - float(z))
+            z: (
+                e + 0.35 * climb_cost * max(0.0, hold - float(z))
+                if abs(float(z) - hold) <= 0.55
+                else e
+            )
             for z, e in select_scores.items()
         }
+        # If raw clearance already beats sticky, keep scores honest for recovery.
+        if raw_band_scores:
+            clr_key = min(raw_band_scores.keys(), key=lambda z: abs(float(z) - clearance))
+            stk_key = min(raw_band_scores.keys(), key=lambda z: abs(float(z) - float(sticky_now)))
+            if raw_band_scores[stk_key] > raw_band_scores[clr_key] * 1.02:
+                select_scores = dict(raw_band_scores)
+                if step <= 0.26 + 1e-12:
+                    floor_e = max(select_scores[clr_key], 1.0)
+                    pen = 0.01 * floor_e
+                    select_scores = {
+                        z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
+                    }
+    route_terrain_rise = 0.0
+    if getattr(mission, "elevation", None) is not None:
+        route_terrain_rise = terrain_climb_along_line_m(
+            mission.elevation,
+            float(start[0]),
+            float(start[1]),
+            float(goal[0]),
+            float(goal[1]),
+            samples=8,
+        )
     selected_band = _select_preferred_cruise_band(
         select_scores,
         sticky=getattr(mission, "preferred_cruise_agl", None),
@@ -596,6 +623,9 @@ def plan_path_details(
         remaining_horiz=horizontal_to_goal,
         tiebreak_scores=straight_energies if straight_energies else cruise_fair,
         band_step=step,
+        terrain_rise_m=route_terrain_rise,
+        altitude_step_m=float(getattr(mission, "altitude_step_m", 50.0)),
+        climb_earned=bool(getattr(mission, "cruise_climb_earned", False)),
     )
     # Soft rate-limit only — evidence gates live in _select_preferred_cruise_band.
     sticky_now = getattr(mission, "preferred_cruise_agl", None)
@@ -1125,21 +1155,23 @@ def _commit_preferred_cruise(
         new_e = _lookup(z)
         argmin_z = float(min(band_energies.keys(), key=lambda k: band_energies[k]))
         argmin_e = band_energies[argmin_z]
-        # Align with band selector: climb needs ~1.5%, dump needs ~2.5%.
+        clr = float(clearance)
+        clr_e = _lookup(clr)
+        # Align with band selector: climb ≥5% vs clearance; dump ≥2% vs sticky.
         if z + 1e-9 < prev:
-            if new_e > prev_e * 0.975:
+            if new_e > prev_e * 0.98 and not (prev > clr + 0.5 * step and prev_e > clr_e * 1.02):
                 z = prev
             elif z < prev - 0.35 - 1e-9:
                 z = prev - 0.35
-        elif z > prev + 1e-9 and new_e <= prev_e * 0.985:
-            pass  # earned climb
-        elif z > prev + 1e-9 and new_e > prev_e * 0.985:
-            z = prev
+        elif z > prev + 1e-9:
+            earned = new_e <= clr_e * 0.95 and new_e <= prev_e * 0.95
+            if not earned:
+                z = prev
         else:
             if abs(new_e - prev_e) <= prev_e * 0.015:
                 z = prev
         if z > argmin_z + 2.0 * step + 1e-9 and _lookup(z) > argmin_e * 1.05 and z >= prev - 1e-9:
-            if argmin_z + 1e-9 >= prev and argmin_e <= prev_e * 0.985:
+            if argmin_z + 1e-9 >= prev and argmin_e <= prev_e * 0.95:
                 z = min(argmin_z, prev + 0.35)
         if z > prev + 0.35 + 1e-9:
             z = prev + 0.35
@@ -1157,6 +1189,16 @@ def _commit_preferred_cruise(
         step=step,
     )
     mission.preferred_cruise_agl = z
+    if z > float(clearance) + 0.5 * step:
+        if band_energies:
+            clr_key = min(band_energies.keys(), key=lambda k: abs(k - float(clearance)))
+            z_key = min(band_energies.keys(), key=lambda k: abs(k - z))
+            if band_energies[z_key] <= band_energies[clr_key] * 0.97:
+                mission.cruise_climb_earned = True
+        else:
+            mission.cruise_climb_earned = True
+    elif z <= float(clearance) + 1e-9:
+        mission.cruise_climb_earned = False
     return z
 
 
@@ -1203,23 +1245,33 @@ def _select_preferred_cruise_band(
     remaining_horiz: float = 0.0,
     tiebreak_scores: dict[float, float] | None = None,
     band_step: float = 0.5,
+    *,
+    terrain_rise_m: float = 0.0,
+    altitude_step_m: float = 50.0,
+    climb_earned: bool = False,
 ) -> float | None:
     """Pick cruise AGL from full-path band scores with evidence-gated changes.
 
     Universal rules (no map-specific thresholds):
-    - Climb only if the winner beats the reference by ≥3%.
-    - Dump with the same 3% evidence (symmetric) so noise climbs can reverse.
-    - Rate-limit is applied by the caller; this function picks the evidence target.
+    - Flat routes: climb only if winner beats clearance by ≥5% (belief aloft is noisy).
+    - Significant along-route terrain rise: relax to ≥3% (ridge-following needs height).
+    - Dump toward clearance if sticky is ≥2% worse than clearance.
+    - Unearned sticky (never cleared the climb bar) eases down even if slightly cheaper.
     """
+    del tiebreak_scores  # reserved for callers; selection uses band_scores only
     if not band_scores:
         return None
     step = max(float(band_step), 0.01)
-    climb_need = 0.97  # ≥3% savings to climb
-    dump_need = 0.97  # ≥3% savings to dump (symmetric)
+    # Terrain-aware but map-agnostic: more climb freedom when the DEM forces lift.
+    climb_need = 0.97 if terrain_rise_m >= max(float(altitude_step_m), 1.0) else 0.95
+    dump_need = 0.98  # ≥2% savings to dump toward a better lower band
     best_z = float(min(band_scores.keys(), key=lambda z: band_scores[z]))
     best_e = band_scores[best_z]
     clearance_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance))))
     clearance_e = band_scores[clearance_key]
+
+    def _earned_climb(candidate_e: float) -> bool:
+        return candidate_e <= clearance_e * climb_need
 
     if sticky is None or remaining_horiz <= 6.0:
         # Cold start / final approach: stay at clearance unless climb is clearly earned.
@@ -1228,45 +1280,45 @@ def _select_preferred_cruise_band(
                 return best_z
             if remaining_horiz <= 3.5:
                 return float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance_key))))
-        if best_e <= clearance_e * climb_need:
+        if best_z > clearance_key + 0.5 * step and _earned_climb(best_e):
             return best_z
         return clearance_key
 
     sticky_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(sticky))))
     sticky_e = band_scores[sticky_key]
 
-    # Universal recovery: sticky clearly worse than clearance → ease down.
-    if sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * 1.03:
+    # Universal recovery: sticky worse than clearance → ease down (any altitude).
+    if sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * 1.02:
         return float(max(clearance_key, sticky_key - 0.35))
 
     # Approach: gentle descent only.
     if remaining_horiz <= 10.0:
-        if best_z + 1e-9 < sticky_key and best_e <= sticky_e * 0.98:
+        if best_z + 1e-9 < sticky_key and best_e <= sticky_e * dump_need:
             return float(min(sticky_key, max(best_z, sticky_key - 0.35)))
+        if sticky_key > clearance_key + 0.5 * step:
+            return float(max(clearance_key, sticky_key - 0.35))
         return sticky_key
 
-    # Late cruise: hold unless a strong correction is available (wrong-layer recovery).
+    # Late cruise: hold unless a correction is available (wrong-layer recovery).
     if remaining_horiz <= 16.0:
-        if best_e <= sticky_e * dump_need and abs(best_z - sticky_key) > 0.5 * step:
-            if best_z > sticky_key:
-                return float(min(best_z, sticky_key + 0.35))
+        if best_z + 1e-9 < sticky_key and best_e <= sticky_e * dump_need:
             return float(max(best_z, sticky_key - 0.35))
+        if best_z >= sticky_key + 0.5 * step and _earned_climb(best_e) and best_e <= sticky_e * climb_need:
+            return float(min(best_z, sticky_key + 0.35))
         return sticky_key
 
-    # Early/mid cruise: evidence-gated climb or corrective dump; else hold.
-    if best_z >= sticky_key + 0.5 * step and best_e <= sticky_e * climb_need:
+    # Early/mid cruise: climb only with clearance-relative evidence; dump freely if better.
+    if best_z >= sticky_key + 0.5 * step and _earned_climb(best_e) and best_e <= sticky_e * climb_need:
         return float(min(best_z, sticky_key + 0.35))
     if best_z + 1e-9 < sticky_key - 0.5 * step and best_e <= sticky_e * dump_need:
         return float(max(best_z, sticky_key - 0.35))
-    # Also compare against clearance when sticky is only slightly elevated — blocks
-    # noise climbs that never beat clearance by climb_need.
-    if sticky_key <= clearance_key + 0.40 + 1e-9:
-        if best_z > sticky_key + 1e-9 and best_e > clearance_e * climb_need:
-            return sticky_key
-        if best_z <= clearance_key + 1e-9 and sticky_e > clearance_e * (1.0 / climb_need):
-            # Sticky worse than clearance without having earned the layer → ease down.
-            if best_e <= sticky_e * dump_need or best_z <= clearance_key + 1e-9:
-                return float(max(clearance_key, sticky_key - 0.35))
+    # Sticky elevated but never earned the clearance-relative bar → ease down.
+    if (
+        sticky_key > clearance_key + 0.5 * step
+        and not climb_earned
+        and not _earned_climb(sticky_e)
+    ):
+        return float(max(clearance_key, sticky_key - 0.35))
     return sticky_key
 
 
@@ -1412,12 +1464,12 @@ def _energy_guide_paths(
             corridor_candidates.append((label, path))
     if corridor_candidates:
         for label, path in corridor_candidates:
-            energy = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.12)
-            if straight_floor < math.inf and energy > straight_floor * corridor_margin:
-                continue
-            # Raw model energy may be slightly above straight (noise / short detours).
+            # Primary gate = model energy (same Joules as eval); risk is a soft surcharge.
             raw = _polyline_model_energy_j(path, belief_map, mission)
-            if straight_floor < math.inf and raw > straight_floor * 1.03:
+            if straight_floor < math.inf and raw > straight_floor * corridor_margin:
+                continue
+            energy = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.06)
+            if straight_floor < math.inf and energy > straight_floor * (corridor_margin + 0.03):
                 continue
             guides.append((label, path))
     return guides
