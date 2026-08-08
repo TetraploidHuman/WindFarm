@@ -102,7 +102,7 @@ class Mission:
     cruise_band_step: float = 0.02
     # Lateral corridor gate: risk-adjusted energy must be ≤ margin * straight.
     # None / ≤0 disables corridors; default 0.97 = require ~3% clear edge vs straight.
-    corridor_energy_margin: float | None = 0.97
+    corridor_energy_margin: float | None = 1.02
     # Optional DEM (meters). When set, constant-AGL moves pay terrain climb energy.
     elevation: list[list[float]] | None = None
     # Sticky lateral via (cells) selected by an energy guide; avoids corridor flip-flops.

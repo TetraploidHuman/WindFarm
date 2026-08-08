@@ -59,8 +59,8 @@ def _step_energy(cur, nxt, u, v, w, kw: dict, elevation, apply_uplift_discount: 
         terrain_dz_m=terrain_dz_m,
         **kw,
     )
-    if apply_uplift_discount:
-        req *= max(0.5, min(1.4, 1.0 - 0.20 * max(w, 0.0)))
+    # uplift discount lives inside transition_energy_j; flag kept for API compat
+    del apply_uplift_discount
     return req
 
 

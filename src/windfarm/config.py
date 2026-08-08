@@ -120,7 +120,7 @@ class MissionConfig:
     clearance_agl_level: float = 1.0
     # ~1 m physical when altitude_step_m=50
     cruise_band_step: float = 0.02
-    corridor_energy_margin: float | None = 0.97
+    corridor_energy_margin: float | None = 1.02
 
 
 @dataclass(slots=True)
