@@ -285,14 +285,14 @@ def fetch_open_meteo_hourly(
     end_date: str,
     timeout_s: float = 90.0,
 ) -> list[dict]:
-    """Fetch hourly 10 m wind; return list of {timestamp,u_km,v_km,w_km,speed,direction}."""
+    """Fetch hourly 10 m + 100 m wind from Open-Meteo archive."""
     query = urllib.parse.urlencode(
         {
             "latitude": f"{lat:.4f}",
             "longitude": f"{lon:.4f}",
             "start_date": start_date,
             "end_date": end_date,
-            "hourly": "wind_speed_10m,wind_direction_10m",
+            "hourly": "wind_speed_10m,wind_direction_10m,wind_speed_100m,wind_direction_100m",
             "wind_speed_unit": "ms",
             "timezone": "UTC",
         }
@@ -302,17 +302,24 @@ def fetch_open_meteo_hourly(
     times = hourly.get("time") or []
     speeds = hourly.get("wind_speed_10m") or []
     dirs = hourly.get("wind_direction_10m") or []
+    speeds_100 = hourly.get("wind_speed_100m") or [None] * len(times)
+    dirs_100 = hourly.get("wind_direction_100m") or [None] * len(times)
     if not times or len(times) != len(speeds) or len(times) != len(dirs):
         raise RuntimeError("Open-Meteo response missing hourly wind fields")
     samples: list[dict] = []
-    for stamp, speed, direction in zip(times, speeds, dirs):
+    for stamp, speed, direction, speed100, direction100 in zip(times, speeds, dirs, speeds_100, dirs_100):
         if speed is None or direction is None:
             continue
-        # Meteorological direction: degrees FROM which wind blows.
         rad = math.radians(float(direction))
         u_km = -float(speed) * math.sin(rad)
         v_km = -float(speed) * math.cos(rad)
-        # Weak diurnal vertical proxy when archive has no w.
+        if speed100 is not None and direction100 is not None:
+            rad100 = math.radians(float(direction100))
+            u100_km = -float(speed100) * math.sin(rad100)
+            v100_km = -float(speed100) * math.cos(rad100)
+        else:
+            u100_km = u_km
+            v100_km = v_km
         hour = int(stamp[11:13]) if len(stamp) >= 13 else 12
         w_km = 0.18 * max(0.0, math.sin(math.pi * (hour - 8) / 10.0))
         iso = stamp if "T" in stamp else stamp
@@ -324,6 +331,8 @@ def fetch_open_meteo_hourly(
                 "u_km": u_km,
                 "v_km": v_km,
                 "w_km": w_km,
+                "u100_km": u100_km,
+                "v100_km": v100_km,
                 "speed_mps": float(speed),
                 "direction_deg": float(direction),
             }
@@ -346,11 +355,12 @@ def resample_coarse_wind(
     u = [float(item["u_km"]) for item in hourly]
     v = [float(item["v_km"]) for item in hourly]
     w = [float(item.get("w_km", 0.0)) for item in hourly]
+    u100 = [float(item["u100_km"]) if item.get("u100_km") is not None else float(item["u_km"]) for item in hourly]
+    v100 = [float(item["v100_km"]) if item.get("v100_km") is not None else float(item["v_km"]) for item in hourly]
     t0 = datetime.fromisoformat(start_time)
     out: list[dict] = []
     for step in range(time_steps):
         t = t0 + timedelta(seconds=step * sample_interval_seconds)
-        # Clamp / lerp in the hourly series.
         if t <= base[0]:
             idx = 0
             frac = 0.0
@@ -366,7 +376,18 @@ def resample_coarse_wind(
         u_km = u[idx] + (u[idx + 1] - u[idx]) * frac
         v_km = v[idx] + (v[idx + 1] - v[idx]) * frac
         w_km = w[idx] + (w[idx + 1] - w[idx]) * frac
-        out.append({"timestamp": t.isoformat(timespec="seconds"), "u_km": u_km, "v_km": v_km, "w_km": w_km})
+        u100_km = u100[idx] + (u100[idx + 1] - u100[idx]) * frac
+        v100_km = v100[idx] + (v100[idx + 1] - v100[idx]) * frac
+        out.append(
+            {
+                "timestamp": t.isoformat(timespec="seconds"),
+                "u_km": u_km,
+                "v_km": v_km,
+                "w_km": w_km,
+                "u100_km": u100_km,
+                "v100_km": v100_km,
+            }
+        )
     return out
 
 

@@ -26,6 +26,17 @@ class DataIngestTests(unittest.TestCase):
         self.assertEqual(len(elev[0]), 24)
         self.assertGreater(max(flat) - min(flat), 200.0)
 
+    def test_native_30m_crop_shape(self) -> None:
+        from windfarm.scenarios import grid_dims_for_extent
+
+        w, h = grid_dims_for_extent(2350.0, 1750.0, 30.0)
+        self.assertEqual((w, h), (79, 59))
+        elev = crop_srtm_to_grid(HGT, 25.75, 118.60, width=w, height=h, resolution_m=30.0, tile_lat=25, tile_lon=118)
+        self.assertEqual(len(elev), h)
+        self.assertEqual(len(elev[0]), w)
+        flat = [v for row in elev for v in row]
+        self.assertGreater(max(flat) - min(flat), 150.0)
+
     def test_terrain_prepare_and_mission(self) -> None:
         terrain = terrain_from_srtm(HGT, 25.75, 118.60, 24, 18, 100.0, 25, 118)
         self.assertEqual(len(terrain.slope), 18)

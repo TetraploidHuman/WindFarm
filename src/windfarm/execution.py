@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from collections import deque
 import math
 
+import numpy as np
+
 from .altitude import (
     cruise_agl_floor,
     msl_height_m,
@@ -16,7 +18,7 @@ from .belief import BeliefUpdater, belief_snapshot, create_belief_map
 from .config import TaskConfig
 from .controller import advance_continuous_state, transition_energy_j
 from .mathutils import bilinear_sample, clamp, magnitude, magnitude3, trilinear_sample
-from .planner import plan_path_details
+from .planner import _cruise_z_from_guide_label, plan_path_details
 from .types import CoarseWindSample, DroneState, Mission, Observation, TerrainField, WindField
 
 
@@ -100,12 +102,22 @@ class PredictSession:
             "local_w_mean": sum(local_w_values) / len(local_w_values),
         }
 
-    def update_cell_history(self, u_grid: list[list[float]], v_grid: list[list[float]], w_grid: list[list[float]], z: int) -> None:
+    def update_cell_history(self, u_grid, v_grid, w_grid, z: int) -> None:
+        u_arr = np.asarray(u_grid, dtype=np.float64)
+        v_arr = np.asarray(v_grid, dtype=np.float64)
+        w_arr = np.asarray(w_grid, dtype=np.float64)
+        if u_arr.ndim != 2 or u_arr.size == 0:
+            self.cell_history = {}
+            return
+        height, width = u_arr.shape
         next_history = {}
-        for y in range(len(u_grid)):
-            for x in range(len(u_grid[0]) if u_grid else 0):
-                self.observe_cell(x, y, z, u_grid[y][x], v_grid[y][x], w_grid[y][x])
-                next_history[(x, y, z)] = {"u_local": u_grid[y][x], "v_local": v_grid[y][x], "w_local": w_grid[y][x]}
+        for y in range(height):
+            for x in range(width):
+                uu = float(u_arr[y, x])
+                vv = float(v_arr[y, x])
+                ww = float(w_arr[y, x])
+                self.observe_cell(x, y, z, uu, vv, ww)
+                next_history[(x, y, z)] = {"u_local": uu, "v_local": vv, "w_local": ww}
         self.cell_history = next_history
 
     def observe_cell(self, x: int, y: int, z: int, u_local: float, v_local: float, w_local: float) -> None:
@@ -132,6 +144,8 @@ class NavigationContext:
     latest_planning: dict = field(default_factory=lambda: {"path": [], "path_cost": 0.0, "candidates": []})
     latest_prediction: dict | None = None
     latest_physics: dict | None = None
+    return_cost_map_cache: object | None = None
+    return_cost_map_step: int = -10_000
 
 
 class NavigationEngine:
@@ -167,12 +181,13 @@ class NavigationEngine:
             climb_power_per_mps_w=getattr(self.config.mission, "climb_power_per_mps_w", 125.0),
             descent_power_reduction_per_mps_w=getattr(self.config.mission, "descent_power_reduction_per_mps_w", 58.0),
             reserve_energy_ratio=getattr(self.config.mission, "reserve_energy_ratio", 0.22),
-            altitude_step_m=getattr(self.config.mission, "altitude_step_m", 40.0),
+            altitude_step_m=getattr(self.config.mission, "altitude_step_m", 50.0),
             min_altitude_level=getattr(self.config.mission, "min_altitude_level", 0),
             max_altitude_level=getattr(self.config.mission, "max_altitude_level", 4),
             climb_cost_per_level_j=getattr(self.config.mission, "climb_cost_per_level_j", 180.0),
             clearance_agl_level=getattr(self.config.mission, "clearance_agl_level", 1.0),
-            cruise_band_step=getattr(self.config.mission, "cruise_band_step", 0.025),
+            cruise_band_step=getattr(self.config.mission, "cruise_band_step", 0.02),
+            corridor_energy_margin=getattr(self.config.mission, "corridor_energy_margin", None),
             elevation=self.pipeline.terrain.elevation,
         )
         state = DroneState(
@@ -240,13 +255,21 @@ class NavigationEngine:
         context.trace.append(frame)
         return frame
 
+    def _resolved_guide_cruise_agl(self, context: NavigationContext) -> float:
+        """Sticky preferred cruise, else parse from guide_straight_agl_* mode label."""
+        clearance = float(getattr(context.mission, "clearance_agl_level", 1.0))
+        preferred = getattr(context.mission, "preferred_cruise_agl", None)
+        if preferred is not None:
+            return float(preferred)
+        mode = str((context.latest_planning or {}).get("planning_mode") or "")
+        return float(_cruise_z_from_guide_label(mode, clearance, context.mission))
+
     def _guide_cruise_target_z(self, context: NavigationContext, horizontal: float, total_horiz: float) -> float | None:
         """Baseline-like AGL profile while locked to a straight/corridor energy guide."""
         mode = str((context.latest_planning or {}).get("planning_mode") or "")
         if not (mode.startswith("guide_straight_agl") or mode.startswith("guide_corridor_")):
             return None
-        clearance = float(getattr(context.mission, "clearance_agl_level", 1.0))
-        cruise = float(getattr(context.mission, "preferred_cruise_agl", None) or clearance)
+        cruise = self._resolved_guide_cruise_agl(context)
         goal_z = float(context.mission.goal[2]) if len(context.mission.goal) >= 3 else 0.0
         if total_horiz < 1e-6:
             return goal_z
@@ -276,8 +299,7 @@ class NavigationEngine:
         total_horiz = math.hypot(float(goal[0]) - float(ms[0]), float(goal[1]) - float(ms[1]))
         total_horiz = max(total_horiz, horizontal, 1.0)
         mode = str((context.latest_planning or {}).get("planning_mode") or "")
-        clearance = float(getattr(context.mission, "clearance_agl_level", 1.0))
-        cruise = float(getattr(context.mission, "preferred_cruise_agl", None) or clearance)
+        cruise = self._resolved_guide_cruise_agl(context)
 
         if mode.startswith("guide_straight_agl"):
             start_xyz = (
@@ -450,11 +472,20 @@ class NavigationEngine:
             max_altitude_level=context.mission.max_altitude_level,
             climb_cost_per_level_j=context.mission.climb_cost_per_level_j,
             clearance_agl_level=getattr(context.mission, "clearance_agl_level", 1.0),
-            cruise_band_step=getattr(context.mission, "cruise_band_step", 0.025),
+            cruise_band_step=getattr(context.mission, "cruise_band_step", 0.02),
+            corridor_energy_margin=getattr(context.mission, "corridor_energy_margin", None),
             elevation=context.terrain.elevation,
             guide_via=getattr(context.mission, "guide_via", None),
             preferred_cruise_agl=getattr(context.mission, "preferred_cruise_agl", None),
         )
+        # Reuse Dijkstra return map for a few steps (belief wind drifts slowly vs replan rate).
+        cache_ttl = max(2, int(getattr(self.config.planner, "replan_interval_steps", 2)) * 2)
+        cached = None
+        if (
+            context.return_cost_map_cache is not None
+            and context.step - context.return_cost_map_step <= cache_ttl
+        ):
+            cached = context.return_cost_map_cache
         planning = plan_path_details(
             context.belief_map,
             plan_mission,
@@ -469,10 +500,15 @@ class NavigationEngine:
             branch_width=self.config.planner.branch_width,
             discount_factor=self.config.planner.discount_factor,
             terminal_progress_weight=self.config.planner.terminal_progress_weight,
+            return_cost_map_cache=cached,
         )
         context.mission.guide_via = getattr(plan_mission, "guide_via", None)
         context.mission.preferred_cruise_agl = getattr(plan_mission, "preferred_cruise_agl", None)
         context.latest_planning = planning
+        fresh_map = planning.get("return_cost_map")
+        if fresh_map is not None:
+            context.return_cost_map_cache = fresh_map
+            context.return_cost_map_step = context.step
         context.planned_path = planning["path"]
         context.planned_path = self._ensure_goal_approach(context)
 
@@ -630,6 +666,8 @@ class NavigationEngine:
                 sample.w_km,
                 context.predict_session,
                 altitude_level=_state_level(context.state.z, context.belief_map.levels),
+                u_100=sample.u100_km,
+                v_100=sample.v100_km,
             )
             physics = self.pipeline.physics_grid(
                 sample.timestamp,
@@ -637,6 +675,8 @@ class NavigationEngine:
                 sample.v_km,
                 sample.w_km,
                 altitude_level=_state_level(context.state.z, context.belief_map.levels),
+                u_100=sample.u100_km,
+                v_100=sample.v100_km,
             )
             context.latest_prediction = prediction
             context.latest_physics = physics
@@ -654,6 +694,8 @@ class NavigationEngine:
             sample.w_km,
             context.predict_session,
             altitude_level=_state_level(context.state.z, context.belief_map.levels),
+            u_100=sample.u100_km,
+            v_100=sample.v100_km,
         )
         physics_window = self.pipeline.physics_window(
             sample.timestamp,
@@ -665,6 +707,8 @@ class NavigationEngine:
             y1,
             sample.w_km,
             altitude_level=_state_level(context.state.z, context.belief_map.levels),
+            u_100=sample.u100_km,
+            v_100=sample.v100_km,
         )
         prediction = _merge_window_into_grid(context.latest_prediction, prediction_window)
         physics = _merge_window_into_grid(context.latest_physics, physics_window)
@@ -1003,30 +1047,37 @@ def _sample_belief_scalar_2d(belief_map, attr: str, x: float, y: float, level: i
     return top + (bottom - top) * ty
 
 
-def _wind_speed_grid(u_grid: list[list[float]], v_grid: list[list[float]], w_grid: list[list[float]] | None = None) -> list[list[float]]:
-    height = len(u_grid)
-    width = len(u_grid[0]) if height else 0
+def _wind_speed_grid(u_grid, v_grid, w_grid=None) -> list[list[float]]:
+    u_arr = np.asarray(u_grid, dtype=np.float64)
+    v_arr = np.asarray(v_grid, dtype=np.float64)
+    if u_arr.ndim != 2 or u_arr.size == 0:
+        return []
+    height, width = u_arr.shape
     if w_grid is None:
-        w_grid = [[0.0 for _ in range(width)] for _ in range(height)]
-    return [[magnitude3(u_grid[y][x], v_grid[y][x], w_grid[y][x]) for x in range(width)] for y in range(height)]
+        w_arr = np.zeros((height, width), dtype=np.float64)
+    else:
+        w_arr = np.asarray(w_grid, dtype=np.float64)
+    speed = np.sqrt(u_arr * u_arr + v_arr * v_arr + w_arr * w_arr)
+    return speed.tolist()
 
 
-def _residual_speed_grid(u_grid: list[list[float]], v_grid: list[list[float]], w_grid: list[list[float]], truth_field: dict) -> list[list[float]]:
-    height = len(u_grid)
-    width = len(u_grid[0]) if height else 0
+def _residual_speed_grid(u_grid, v_grid, w_grid, truth_field: dict) -> list[list[float]]:
+    u_arr = np.asarray(u_grid, dtype=np.float64)
+    v_arr = np.asarray(v_grid, dtype=np.float64)
+    w_arr = np.asarray(w_grid, dtype=np.float64)
+    if u_arr.ndim != 2 or u_arr.size == 0:
+        return []
+    height, width = u_arr.shape
     truth_w = truth_field.get("w")
     if truth_w is None:
-        truth_w = [[0.0 for _ in range(width)] for _ in range(height)]
-    return [
-        [
-            abs(
-                magnitude3(u_grid[y][x], v_grid[y][x], w_grid[y][x])
-                - magnitude3(truth_field["u"][y][x], truth_field["v"][y][x], truth_w[y][x])
-            )
-            for x in range(width)
-        ]
-        for y in range(height)
-    ]
+        tw = np.zeros((height, width), dtype=np.float64)
+    else:
+        tw = np.asarray(truth_w, dtype=np.float64)
+    tu = np.asarray(truth_field["u"], dtype=np.float64)
+    tv = np.asarray(truth_field["v"], dtype=np.float64)
+    pred = np.sqrt(u_arr * u_arr + v_arr * v_arr + w_arr * w_arr)
+    truth = np.sqrt(tu * tu + tv * tv + tw * tw)
+    return np.abs(pred - truth).tolist()
 
 
 def _return_cost_margin_grid(return_cost_map: dict[tuple[int, int, int], float], budget_j: float, mission: Mission) -> list[list[float]]:

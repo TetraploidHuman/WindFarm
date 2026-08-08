@@ -3,17 +3,112 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+import numpy as np
+
 from .mathutils import magnitude, magnitude3
 from .types import BeliefCell, BeliefMap, Observation, WindField
 
 
 def create_belief_map(width: int, height: int, levels: int = 1) -> BeliefMap:
-    cells = [[[BeliefCell() for _ in range(width)] for _ in range(height)] for _ in range(max(1, levels))]
-    return BeliefMap(width=width, height=height, levels=max(1, levels), cells=cells)
+    z_n = max(1, levels)
+    cells = [[[BeliefCell() for _ in range(width)] for _ in range(height)] for _ in range(z_n)]
+    belief_map = BeliefMap(width=width, height=height, levels=z_n, cells=cells)
+    belief_map.field_arrays = _default_field_arrays(z_n, height, width)
+    return belief_map
+
+
+def _default_field_arrays(z_n: int, height: int, width: int) -> dict[str, np.ndarray]:
+    shape = (z_n, height, width)
+    return {
+        "wind_u": np.zeros(shape, dtype=np.float64),
+        "wind_v": np.zeros(shape, dtype=np.float64),
+        "wind_w": np.zeros(shape, dtype=np.float64),
+        "mode_prob_sink": np.full(shape, 0.25, dtype=np.float64),
+        "mode_prob_neutral": np.full(shape, 0.5, dtype=np.float64),
+        "mode_prob_uplift": np.full(shape, 0.25, dtype=np.float64),
+        "wind_var_u": np.ones(shape, dtype=np.float64),
+        "wind_var_v": np.ones(shape, dtype=np.float64),
+        "wind_var_w": np.ones(shape, dtype=np.float64),
+        "wind_cov_uv": np.zeros(shape, dtype=np.float64),
+        "belief_entropy": np.full(shape, 1.5, dtype=np.float64),
+        "uncertainty": np.ones(shape, dtype=np.float64),
+        "hazard_prob": np.full(shape, 0.15, dtype=np.float64),
+        "safety_penalty": np.zeros(shape, dtype=np.float64),
+        "expected_energy_gain": np.zeros(shape, dtype=np.float64),
+        "confidence": np.zeros(shape, dtype=np.float64),
+        "last_update": np.zeros(shape, dtype=np.float64),
+    }
+
+
+def sync_belief_cells_from_arrays(belief_map: BeliefMap) -> None:
+    """Copy field_arrays → BeliefCell grid (dashboard / legacy cell readers)."""
+    arrays = belief_map.field_arrays
+    if not arrays:
+        return
+    z_n, h, w = belief_map.levels, belief_map.height, belief_map.width
+    cells = belief_map.cells
+    names = (
+        "wind_u",
+        "wind_v",
+        "wind_w",
+        "mode_prob_sink",
+        "mode_prob_neutral",
+        "mode_prob_uplift",
+        "wind_var_u",
+        "wind_var_v",
+        "wind_var_w",
+        "wind_cov_uv",
+        "belief_entropy",
+        "uncertainty",
+        "hazard_prob",
+        "safety_penalty",
+        "expected_energy_gain",
+        "confidence",
+        "last_update",
+    )
+    packed = {name: np.asarray(arrays[name], dtype=np.float64) for name in names if name in arrays}
+    for z in range(z_n):
+        layer = cells[z]
+        for y in range(h):
+            row = layer[y]
+            for x in range(w):
+                cell = row[x]
+                for name, arr in packed.items():
+                    if name == "last_update":
+                        cell.last_update = int(arr[z, y, x])
+                    else:
+                        setattr(cell, name, float(arr[z, y, x]))
 
 
 def belief_snapshot(belief_map: BeliefMap, level: int = 0) -> dict[str, list[list[float]]]:
     active_level = _clamp_level(level, belief_map.levels)
+    arrays = belief_map.field_arrays
+    if arrays is not None and "wind_u" in arrays:
+        def _layer(name: str) -> list[list[float]]:
+            return np.asarray(arrays[name][active_level], dtype=np.float64).tolist()
+
+        wind_u = _layer("wind_u")
+        wind_v = _layer("wind_v")
+        wind_w = _layer("wind_w")
+        wu = np.asarray(arrays["wind_u"][active_level], dtype=np.float64)
+        wv = np.asarray(arrays["wind_v"][active_level], dtype=np.float64)
+        ww = np.asarray(arrays["wind_w"][active_level], dtype=np.float64)
+        speed = np.sqrt(wu * wu + wv * wv + ww * ww).tolist()
+        return {
+            "energy": _layer("expected_energy_gain"),
+            "uncertainty": _layer("uncertainty"),
+            "confidence": _layer("confidence"),
+            "entropy": _layer("belief_entropy"),
+            "safety": _layer("safety_penalty"),
+            "uplift_prob": _layer("mode_prob_uplift"),
+            "sink_prob": _layer("mode_prob_sink"),
+            "wind_u": wind_u,
+            "wind_v": wind_v,
+            "wind_w": wind_w,
+            "vertical_w": wind_w,
+            "wind_speed": speed,
+        }
+
     energy = [[0.0 for _ in range(belief_map.width)] for _ in range(belief_map.height)]
     uncertainty = [[0.0 for _ in range(belief_map.width)] for _ in range(belief_map.height)]
     confidence = [[0.0 for _ in range(belief_map.width)] for _ in range(belief_map.height)]
@@ -57,6 +152,52 @@ def belief_snapshot(belief_map: BeliefMap, level: int = 0) -> dict[str, list[lis
     }
 
 
+def pack_belief_field(belief_map: BeliefMap, attr: str) -> np.ndarray:
+    """Pack a BeliefCell attribute into a (Z, H, W) float64 array."""
+    arrays = belief_map.field_arrays
+    if arrays is not None and attr in arrays:
+        return np.asarray(arrays[attr], dtype=np.float64)
+    z_n, h, w = belief_map.levels, belief_map.height, belief_map.width
+    out = np.empty((z_n, h, w), dtype=np.float64)
+    cells = belief_map.cells
+    for z in range(z_n):
+        layer = cells[z]
+        for y in range(h):
+            row = layer[y]
+            for x in range(w):
+                out[z, y, x] = getattr(row[x], attr)
+    return out
+
+
+def ensure_belief_field_arrays(belief_map: BeliefMap, attrs: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
+    """Return (and cache) packed belief fields used by the planner.
+
+    Returns references into ``belief_map.field_arrays`` when possible (no copy).
+    """
+    needed = attrs or (
+        "wind_u",
+        "wind_v",
+        "wind_w",
+        "expected_energy_gain",
+        "uncertainty",
+        "safety_penalty",
+        "mode_prob_uplift",
+        "mode_prob_sink",
+        "confidence",
+        "belief_entropy",
+    )
+    arrays = belief_map.field_arrays
+    if arrays is not None and all(name in arrays for name in needed):
+        # Hot path: reuse existing ndarrays; avoid np.asarray copy every call.
+        return {name: arrays[name] for name in needed}  # type: ignore[misc]
+    packed = {name: pack_belief_field(belief_map, name) for name in needed}
+    if belief_map.field_arrays is None:
+        belief_map.field_arrays = packed
+    else:
+        belief_map.field_arrays.update(packed)
+    return packed
+
+
 @dataclass(slots=True)
 class BeliefUpdater:
     observation_radius: int = 2
@@ -67,40 +208,107 @@ class BeliefUpdater:
     advection_noise: float = 0.08
 
     def apply_prediction(self, belief_map: BeliefMap, wind: WindField, step: int) -> None:
-        for z in range(belief_map.levels):
-            for y in range(belief_map.height):
-                for x in range(belief_map.width):
-                    cell = belief_map.cells[z][y][x]
-                    age = max(step - cell.last_update, 0)
-                    process_var = self.process_noise * (1.0 + self.decay_per_step * age)
-                    cell.wind_u = wind.u[z][y][x]
-                    cell.wind_v = wind.v[z][y][x]
-                    cell.wind_w = wind.w[z][y][x]
-                    predicted_modes = _predict_mode_probs(cell.mode_prob_sink, cell.mode_prob_neutral, cell.mode_prob_uplift)
-                    cell.mode_prob_sink = predicted_modes[0]
-                    cell.mode_prob_neutral = predicted_modes[1]
-                    cell.mode_prob_uplift = predicted_modes[2]
-                    horizontal_speed = magnitude(cell.wind_u, cell.wind_v)
-                    cell.wind_var_u = min(4.0, cell.wind_var_u + process_var)
-                    cell.wind_var_v = min(4.0, cell.wind_var_v + process_var)
-                    cell.wind_var_w = min(4.0, cell.wind_var_w + process_var)
-                    cell.wind_cov_uv *= max(0.0, 1.0 - self.decay_per_step)
-                    mode_entropy = _entropy(cell.mode_prob_sink, cell.mode_prob_neutral, cell.mode_prob_uplift)
-                    cell.belief_entropy = mode_entropy
-                    cell.uncertainty = ((cell.wind_var_u + cell.wind_var_v + cell.wind_var_w) / 3.0) + 0.25 * mode_entropy
-                    cell.hazard_prob = _clamp01(
-                        0.58 * cell.mode_prob_sink
-                        + 0.18 * _logistic((-cell.wind_w - 0.25) * 1.7)
-                        + 0.12 * _logistic(horizontal_speed - 5.0)
-                        + 0.10 * _clamp01(cell.uncertainty / 3.0)
-                    )
-                    cell.safety_penalty = _clamp01(
-                        0.52 * cell.hazard_prob
-                        + 0.28 * _clamp01(cell.uncertainty / 3.0)
-                        + 0.20 * _clamp01(abs(cell.wind_w) / 2.5)
-                    )
-                    cell.expected_energy_gain = _expected_energy_from_cell(cell, horizontal_speed)
-                    cell.confidence = 1.0 / (1.0 + cell.uncertainty)
+        z_n, h, w = belief_map.levels, belief_map.height, belief_map.width
+        if z_n <= 0 or h <= 0 or w <= 0:
+            return
+
+        wind_u = np.asarray(wind.u, dtype=np.float64)
+        wind_v = np.asarray(wind.v, dtype=np.float64)
+        wind_w = np.asarray(wind.w, dtype=np.float64)
+        if wind_u.ndim != 3:
+            wind_u = np.asarray(wind_u, dtype=np.float64).reshape(z_n, h, w)
+            wind_v = np.asarray(wind_v, dtype=np.float64).reshape(z_n, h, w)
+            wind_w = np.asarray(wind_w, dtype=np.float64).reshape(z_n, h, w)
+
+        arrays = belief_map.field_arrays
+        if arrays is not None and "last_update" in arrays and "wind_var_u" in arrays:
+            last_update = np.asarray(arrays["last_update"], dtype=np.float64)
+            var_u = np.asarray(arrays["wind_var_u"], dtype=np.float64).copy()
+            var_v = np.asarray(arrays["wind_var_v"], dtype=np.float64).copy()
+            var_w = np.asarray(arrays["wind_var_w"], dtype=np.float64).copy()
+            cov_uv = np.asarray(arrays["wind_cov_uv"], dtype=np.float64).copy()
+            mode_s = np.asarray(arrays["mode_prob_sink"], dtype=np.float64).copy()
+            mode_n = np.asarray(arrays["mode_prob_neutral"], dtype=np.float64).copy()
+            mode_u = np.asarray(arrays["mode_prob_uplift"], dtype=np.float64).copy()
+        else:
+            last_update = np.empty((z_n, h, w), dtype=np.float64)
+            var_u = np.empty((z_n, h, w), dtype=np.float64)
+            var_v = np.empty((z_n, h, w), dtype=np.float64)
+            var_w = np.empty((z_n, h, w), dtype=np.float64)
+            cov_uv = np.empty((z_n, h, w), dtype=np.float64)
+            mode_s = np.empty((z_n, h, w), dtype=np.float64)
+            mode_n = np.empty((z_n, h, w), dtype=np.float64)
+            mode_u = np.empty((z_n, h, w), dtype=np.float64)
+            cells = belief_map.cells
+            for z in range(z_n):
+                layer = cells[z]
+                for y in range(h):
+                    row = layer[y]
+                    for x in range(w):
+                        cell = row[x]
+                        last_update[z, y, x] = cell.last_update
+                        var_u[z, y, x] = cell.wind_var_u
+                        var_v[z, y, x] = cell.wind_var_v
+                        var_w[z, y, x] = cell.wind_var_w
+                        cov_uv[z, y, x] = cell.wind_cov_uv
+                        mode_s[z, y, x] = cell.mode_prob_sink
+                        mode_n[z, y, x] = cell.mode_prob_neutral
+                        mode_u[z, y, x] = cell.mode_prob_uplift
+
+        age = np.maximum(step - last_update, 0.0)
+        process_var = self.process_noise * (1.0 + self.decay_per_step * age)
+
+        next_s = 0.72 * mode_s + 0.18 * mode_n + 0.06 * mode_u
+        next_n = 0.20 * mode_s + 0.64 * mode_n + 0.20 * mode_u
+        next_u = 0.08 * mode_s + 0.18 * mode_n + 0.74 * mode_u
+        floor = 1e-6
+        total = np.maximum(next_s + next_n + next_u, floor * 3.0)
+        mode_s = np.maximum(next_s, floor) / total
+        mode_n = np.maximum(next_n, floor) / total
+        mode_u = np.maximum(next_u, floor) / total
+
+        var_u = np.minimum(4.0, var_u + process_var)
+        var_v = np.minimum(4.0, var_v + process_var)
+        var_w = np.minimum(4.0, var_w + process_var)
+        cov_uv = cov_uv * max(0.0, 1.0 - self.decay_per_step)
+
+        mode_entropy = _entropy_np(mode_s, mode_n, mode_u)
+        horizontal_speed = np.hypot(wind_u, wind_v)
+        uncertainty = ((var_u + var_v + var_w) / 3.0) + 0.25 * mode_entropy
+        hazard = _clamp01_np(
+            0.58 * mode_s
+            + 0.18 * _logistic_np((-wind_w - 0.25) * 1.7)
+            + 0.12 * _logistic_np(horizontal_speed - 5.0)
+            + 0.10 * _clamp01_np(uncertainty / 3.0)
+        )
+        safety = _clamp01_np(
+            0.52 * hazard
+            + 0.28 * _clamp01_np(uncertainty / 3.0)
+            + 0.20 * _clamp01_np(np.abs(wind_w) / 2.5)
+        )
+        expected = 0.16 * horizontal_speed + 1.05 * wind_w + (1.25 * mode_u - 0.95 * mode_s) - 0.28 * safety
+        confidence = 1.0 / (1.0 + uncertainty)
+
+        # Arrays are the hot-path source of truth; skip O(ZHW) cell writeback.
+        belief_map.field_arrays = {
+            "wind_u": wind_u,
+            "wind_v": wind_v,
+            "wind_w": wind_w,
+            "mode_prob_sink": mode_s,
+            "mode_prob_neutral": mode_n,
+            "mode_prob_uplift": mode_u,
+            "wind_var_u": var_u,
+            "wind_var_v": var_v,
+            "wind_var_w": var_w,
+            "wind_cov_uv": cov_uv,
+            "belief_entropy": mode_entropy,
+            "uncertainty": uncertainty,
+            "hazard_prob": hazard,
+            "safety_penalty": safety,
+            "expected_energy_gain": expected,
+            "confidence": confidence,
+            "last_update": last_update,
+        }
 
     def update_with_observation(
         self,
@@ -114,6 +322,174 @@ class BeliefUpdater:
         level = _clamp_level(observation.z, belief_map.levels)
         energy_gain = 0.5 * (observation.ground_speed - max(observation.airspeed, 0.0)) + observation.climb_rate
         observed_modes = _observe_mode_probs(observation.w_obs, energy_gain)
+        arrays = belief_map.field_arrays
+        if arrays is None or "wind_u" not in arrays:
+            # Legacy cell-only path (tests without field_arrays).
+            self._update_with_observation_cells(
+                belief_map, observation, predicted_u, predicted_v, predicted_w, step, level, energy_gain, observed_modes
+            )
+            return
+
+        y0 = max(0, observation.y - self.observation_radius)
+        y1 = min(belief_map.height, observation.y + self.observation_radius + 1)
+        x0 = max(0, observation.x - self.observation_radius)
+        x1 = min(belief_map.width, observation.x + self.observation_radius + 1)
+        if y1 <= y0 or x1 <= x0:
+            return
+
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        distance = np.hypot(xx - observation.x, yy - observation.y)
+        influence = np.maximum(0.0, 1.0 - distance / (self.observation_radius + 1))
+        mask = influence > 0.0
+        if not np.any(mask):
+            return
+
+        wind_u = np.asarray(arrays["wind_u"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        wind_v = np.asarray(arrays["wind_v"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        wind_w = np.asarray(arrays["wind_w"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        var_u = np.asarray(arrays["wind_var_u"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        var_v = np.asarray(arrays["wind_var_v"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        var_w = np.asarray(arrays["wind_var_w"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        cov_uv = np.asarray(arrays["wind_cov_uv"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        mode_s = np.asarray(arrays["mode_prob_sink"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        mode_n = np.asarray(arrays["mode_prob_neutral"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        mode_u = np.asarray(arrays["mode_prob_uplift"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        expected = np.asarray(arrays["expected_energy_gain"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        hazard = np.asarray(arrays["hazard_prob"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        safety = np.asarray(arrays["safety_penalty"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+
+        measurement_var = self.observation_noise / np.maximum(influence * influence, 1e-6)
+        p00, p01, p10, p11 = var_u, cov_uv, cov_uv, var_v
+        s00 = p00 + measurement_var
+        s01 = p01
+        s10 = p10
+        s11 = p11 + measurement_var
+        det_s = np.maximum((s00 * s11) - (s01 * s10), 1e-6)
+        inv_s00 = s11 / det_s
+        inv_s01 = -s01 / det_s
+        inv_s10 = -s10 / det_s
+        inv_s11 = s00 / det_s
+        k00 = p00 * inv_s00 + p01 * inv_s10
+        k01 = p00 * inv_s01 + p01 * inv_s11
+        k10 = p10 * inv_s00 + p11 * inv_s10
+        k11 = p10 * inv_s01 + p11 * inv_s11
+        residual_u = observation.u_obs - wind_u
+        residual_v = observation.v_obs - wind_v
+        wind_u = wind_u + k00 * residual_u + k01 * residual_v
+        wind_v = wind_v + k10 * residual_u + k11 * residual_v
+        residual_w = observation.w_obs - wind_w
+        kalman_w = var_w / np.maximum(var_w + measurement_var, 1e-6)
+        wind_w = wind_w + kalman_w * residual_w
+        predicted_residual = magnitude3(
+            observation.u_obs - predicted_u,
+            observation.v_obs - predicted_v,
+            observation.w_obs - predicted_w,
+        )
+        updated_p00 = (1.0 - k00) * p00 - k01 * p10
+        updated_p01 = (1.0 - k00) * p01 - k01 * p11
+        updated_p10 = -k10 * p00 + (1.0 - k11) * p10
+        updated_p11 = -k10 * p01 + (1.0 - k11) * p11
+        var_u = np.maximum(0.02, updated_p00)
+        var_v = np.maximum(0.02, updated_p11)
+        var_w = np.maximum(0.02, (1.0 - kalman_w) * var_w)
+        cov_uv = np.clip(0.5 * (updated_p01 + updated_p10), -1.0, 1.0)
+        gain_scale = 0.5 * (k00 + k11)
+        blend = _clamp01_np(gain_scale * influence + 0.18)
+        obs_s, obs_n, obs_u = observed_modes
+        mode_s, mode_n, mode_u = _blend_mode_probs_np(
+            mode_s, mode_n, mode_u, obs_s, obs_n, obs_u, blend
+        )
+        mode_entropy = _entropy_np(mode_s, mode_n, mode_u)
+        horizontal_speed = np.hypot(wind_u, wind_v)
+        expected = (1.0 - gain_scale * influence) * expected + (gain_scale * influence) * energy_gain
+        expected_from_wind = (
+            0.16 * horizontal_speed
+            + 1.05 * wind_w
+            + (1.25 * mode_u - 0.95 * mode_s)
+            - 0.28 * safety
+        )
+        expected = 0.5 * expected + 0.5 * expected_from_wind
+        uncertainty = ((var_u + var_v + var_w) / 3.0) + 0.25 * mode_entropy
+        local_shear = np.hypot(wind_u - predicted_u, wind_v - predicted_v)
+        observed_hazard = _clamp01_np(
+            0.42 * mode_s
+            + 0.18 * _logistic_np((-observation.w_obs - 0.2) * 2.2)
+            + 0.16 * _clamp01_np(np.full_like(influence, predicted_residual / 3.0))
+            + 0.12 * _clamp01_np(local_shear / 4.0)
+            + 0.12 * _clamp01_np(uncertainty / 3.0)
+        )
+        hazard = 0.65 * hazard + 0.35 * observed_hazard
+        safety = _clamp01_np(
+            0.50 * hazard
+            + 0.25 * _clamp01_np(uncertainty / 3.0)
+            + 0.15 * _clamp01_np(abs(observation.acceleration) / 0.35)
+            + 0.10 * _clamp01_np(max(0.0, -observation.climb_rate) / 1.4)
+        )
+        confidence = 1.0 / (1.0 + uncertainty)
+
+        # Write only influenced cells back into the full arrays.
+        def _put(name: str, patch: np.ndarray) -> None:
+            arr = arrays[name]
+            layer = arr[level, y0:y1, x0:x1]
+            layer = np.asarray(layer, dtype=np.float64).copy()
+            layer[mask] = patch[mask]
+            arr[level, y0:y1, x0:x1] = layer
+
+        _put("wind_u", wind_u)
+        _put("wind_v", wind_v)
+        _put("wind_w", wind_w)
+        _put("wind_var_u", var_u)
+        _put("wind_var_v", var_v)
+        _put("wind_var_w", var_w)
+        _put("wind_cov_uv", cov_uv)
+        _put("mode_prob_sink", mode_s)
+        _put("mode_prob_neutral", mode_n)
+        _put("mode_prob_uplift", mode_u)
+        _put("belief_entropy", mode_entropy)
+        _put("uncertainty", uncertainty)
+        _put("hazard_prob", hazard)
+        _put("safety_penalty", safety)
+        _put("expected_energy_gain", expected)
+        _put("confidence", confidence)
+        last = np.asarray(arrays["last_update"][level, y0:y1, x0:x1], dtype=np.float64).copy()
+        last[mask] = float(step)
+        arrays["last_update"][level, y0:y1, x0:x1] = last
+
+        # Keep origin cell in sync for advection (reads cells).
+        oy, ox = observation.y, observation.x
+        if 0 <= oy < belief_map.height and 0 <= ox < belief_map.width:
+            cell = belief_map.cells[level][oy][ox]
+            cell.wind_u = float(arrays["wind_u"][level, oy, ox])
+            cell.wind_v = float(arrays["wind_v"][level, oy, ox])
+            cell.wind_w = float(arrays["wind_w"][level, oy, ox])
+            cell.wind_var_u = float(arrays["wind_var_u"][level, oy, ox])
+            cell.wind_var_v = float(arrays["wind_var_v"][level, oy, ox])
+            cell.wind_var_w = float(arrays["wind_var_w"][level, oy, ox])
+            cell.wind_cov_uv = float(arrays["wind_cov_uv"][level, oy, ox])
+            cell.mode_prob_sink = float(arrays["mode_prob_sink"][level, oy, ox])
+            cell.mode_prob_neutral = float(arrays["mode_prob_neutral"][level, oy, ox])
+            cell.mode_prob_uplift = float(arrays["mode_prob_uplift"][level, oy, ox])
+            cell.expected_energy_gain = float(arrays["expected_energy_gain"][level, oy, ox])
+            cell.uncertainty = float(arrays["uncertainty"][level, oy, ox])
+            cell.hazard_prob = float(arrays["hazard_prob"][level, oy, ox])
+            cell.safety_penalty = float(arrays["safety_penalty"][level, oy, ox])
+            cell.belief_entropy = float(arrays["belief_entropy"][level, oy, ox])
+            cell.confidence = float(arrays["confidence"][level, oy, ox])
+            cell.last_update = step
+        self._advect_along_wind(belief_map, observation.x, observation.y, level)
+
+    def _update_with_observation_cells(
+        self,
+        belief_map: BeliefMap,
+        observation: Observation,
+        predicted_u: float,
+        predicted_v: float,
+        predicted_w: float,
+        step: int,
+        level: int,
+        energy_gain: float,
+        observed_modes: tuple[float, float, float],
+    ) -> None:
         for y in range(max(0, observation.y - self.observation_radius),
                        min(belief_map.height, observation.y + self.observation_radius + 1)):
             for x in range(max(0, observation.x - self.observation_radius),
@@ -196,7 +572,22 @@ class BeliefUpdater:
         self._advect_along_wind(belief_map, observation.x, observation.y, level)
 
     def _advect_along_wind(self, belief_map: BeliefMap, x: int, y: int, z: int) -> None:
+        arrays = belief_map.field_arrays
         origin = belief_map.cells[z][y][x]
+        if arrays is not None and "wind_u" in arrays:
+            origin.wind_u = float(arrays["wind_u"][z, y, x])
+            origin.wind_v = float(arrays["wind_v"][z, y, x])
+            origin.wind_w = float(arrays["wind_w"][z, y, x])
+            origin.wind_var_u = float(arrays["wind_var_u"][z, y, x])
+            origin.wind_var_v = float(arrays["wind_var_v"][z, y, x])
+            origin.wind_var_w = float(arrays["wind_var_w"][z, y, x])
+            origin.wind_cov_uv = float(arrays["wind_cov_uv"][z, y, x])
+            origin.expected_energy_gain = float(arrays["expected_energy_gain"][z, y, x])
+            origin.mode_prob_sink = float(arrays["mode_prob_sink"][z, y, x])
+            origin.mode_prob_neutral = float(arrays["mode_prob_neutral"][z, y, x])
+            origin.mode_prob_uplift = float(arrays["mode_prob_uplift"][z, y, x])
+            origin.hazard_prob = float(arrays["hazard_prob"][z, y, x])
+            origin.safety_penalty = float(arrays["safety_penalty"][z, y, x])
         dx = 0 if abs(origin.wind_u) < 1e-6 else int(math.copysign(1, origin.wind_u))
         dy = 0 if abs(origin.wind_v) < 1e-6 else int(math.copysign(1, origin.wind_v))
         for step in range(1, 4):
@@ -204,6 +595,20 @@ class BeliefUpdater:
             ny = y + dy * step
             if 0 <= nx < belief_map.width and 0 <= ny < belief_map.height:
                 cell = belief_map.cells[z][ny][nx]
+                if arrays is not None and "wind_u" in arrays:
+                    cell.wind_u = float(arrays["wind_u"][z, ny, nx])
+                    cell.wind_v = float(arrays["wind_v"][z, ny, nx])
+                    cell.wind_w = float(arrays["wind_w"][z, ny, nx])
+                    cell.wind_var_u = float(arrays["wind_var_u"][z, ny, nx])
+                    cell.wind_var_v = float(arrays["wind_var_v"][z, ny, nx])
+                    cell.wind_var_w = float(arrays["wind_var_w"][z, ny, nx])
+                    cell.wind_cov_uv = float(arrays["wind_cov_uv"][z, ny, nx])
+                    cell.expected_energy_gain = float(arrays["expected_energy_gain"][z, ny, nx])
+                    cell.mode_prob_sink = float(arrays["mode_prob_sink"][z, ny, nx])
+                    cell.mode_prob_neutral = float(arrays["mode_prob_neutral"][z, ny, nx])
+                    cell.mode_prob_uplift = float(arrays["mode_prob_uplift"][z, ny, nx])
+                    cell.hazard_prob = float(arrays["hazard_prob"][z, ny, nx])
+                    cell.safety_penalty = float(arrays["safety_penalty"][z, ny, nx])
                 influence = self.advection_gain / step
                 cell.wind_u = (1.0 - influence) * cell.wind_u + influence * origin.wind_u
                 cell.wind_v = (1.0 - influence) * cell.wind_v + influence * origin.wind_v
@@ -223,19 +628,35 @@ class BeliefUpdater:
                 cell.safety_penalty = _clamp01((1.0 - influence) * cell.safety_penalty + influence * origin.safety_penalty)
                 cell.uncertainty = ((cell.wind_var_u + cell.wind_var_v + cell.wind_var_w) / 3.0) + 0.25 * cell.belief_entropy
                 cell.confidence = 1.0 / (1.0 + cell.uncertainty)
+                arrays = belief_map.field_arrays
+                if arrays is not None:
+                    for name, value in (
+                        ("wind_u", cell.wind_u),
+                        ("wind_v", cell.wind_v),
+                        ("wind_w", cell.wind_w),
+                        ("mode_prob_sink", cell.mode_prob_sink),
+                        ("mode_prob_neutral", cell.mode_prob_neutral),
+                        ("mode_prob_uplift", cell.mode_prob_uplift),
+                        ("wind_var_u", cell.wind_var_u),
+                        ("wind_var_v", cell.wind_var_v),
+                        ("wind_var_w", cell.wind_var_w),
+                        ("wind_cov_uv", cell.wind_cov_uv),
+                        ("belief_entropy", cell.belief_entropy),
+                        ("uncertainty", cell.uncertainty),
+                        ("hazard_prob", cell.hazard_prob),
+                        ("safety_penalty", cell.safety_penalty),
+                        ("expected_energy_gain", cell.expected_energy_gain),
+                        ("confidence", cell.confidence),
+                    ):
+                        arr = arrays.get(name)
+                        if arr is not None:
+                            arr[z, ny, nx] = value
 
 
 def _clamp_level(level: int, levels: int) -> int:
     if levels <= 0:
         return 0
     return max(0, min(levels - 1, int(level)))
-
-
-def _predict_mode_probs(sink: float, neutral: float, uplift: float) -> tuple[float, float, float]:
-    next_sink = 0.72 * sink + 0.18 * neutral + 0.06 * uplift
-    next_neutral = 0.20 * sink + 0.64 * neutral + 0.20 * uplift
-    next_uplift = 0.08 * sink + 0.18 * neutral + 0.74 * uplift
-    return _normalize_modes(next_sink, next_neutral, next_uplift)
 
 
 def _observe_mode_probs(vertical_w: float, energy_gain: float) -> tuple[float, float, float]:
@@ -256,6 +677,23 @@ def _blend_mode_probs(
     return _normalize_modes(sink, neutral, uplift)
 
 
+def _blend_mode_probs_np(
+    mode_s: np.ndarray,
+    mode_n: np.ndarray,
+    mode_u: np.ndarray,
+    obs_s: float,
+    obs_n: float,
+    obs_u: float,
+    update_gain: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    sink = (1.0 - update_gain) * mode_s + update_gain * obs_s
+    neutral = (1.0 - update_gain) * mode_n + update_gain * obs_n
+    uplift = (1.0 - update_gain) * mode_u + update_gain * obs_u
+    floor = 1e-6
+    total = np.maximum(sink + neutral + uplift, floor * 3.0)
+    return np.maximum(sink, floor) / total, np.maximum(neutral, floor) / total, np.maximum(uplift, floor) / total
+
+
 def _normalize_modes(sink: float, neutral: float, uplift: float) -> tuple[float, float, float]:
     floor = 1e-6
     total = max(sink + neutral + uplift, floor * 3.0)
@@ -267,6 +705,14 @@ def _entropy(*probs: float) -> float:
     for prob in probs:
         if prob > 1e-9:
             total -= prob * math.log(prob, 2)
+    return total
+
+
+def _entropy_np(*probs: np.ndarray) -> np.ndarray:
+    total = np.zeros_like(probs[0])
+    for prob in probs:
+        safe = np.maximum(prob, 1e-12)
+        total = total - np.where(prob > 1e-9, prob * np.log2(safe), 0.0)
     return total
 
 
@@ -283,5 +729,13 @@ def _logistic(value: float) -> float:
     return exp_term / (1.0 + exp_term)
 
 
+def _logistic_np(value: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-value))
+
+
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _clamp01_np(value: np.ndarray) -> np.ndarray:
+    return np.clip(value, 0.0, 1.0)

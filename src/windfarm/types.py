@@ -12,9 +12,10 @@ class GridSpec:
 
 @dataclass(slots=True)
 class WindField:
-    u: list[list[list[float]]]
-    v: list[list[list[float]]]
-    w: list[list[list[float]]]
+    # Prefer (Z, H, W) ndarrays in hot paths; nested lists still work.
+    u: object
+    v: object
+    w: object
 
 
 @dataclass(slots=True)
@@ -31,6 +32,9 @@ class CoarseWindSample:
     u_km: float
     v_km: float
     w_km: float = 0.0
+    # Optional Open-Meteo 100 m wind (same km units as u_km/v_km).
+    u100_km: float | None = None
+    v100_km: float | None = None
 
 
 @dataclass(slots=True)
@@ -88,14 +92,17 @@ class Mission:
     climb_power_per_mps_w: float = 125.0
     descent_power_reduction_per_mps_w: float = 58.0
     reserve_energy_ratio: float = 0.22
-    altitude_step_m: float = 40.0
+    altitude_step_m: float = 50.0
     min_altitude_level: int = 0
     max_altitude_level: int = 4
-    climb_cost_per_level_j: float = 180.0
+    climb_cost_per_level_j: float = 225.0
     # z is AGL band index; this is the cruise safety floor (not a forced cruise height).
     clearance_agl_level: float = 1.0
-    # Planning grid for cruise AGL candidates (levels). 0.025 ≈ 1 m if altitude_step_m=40.
-    cruise_band_step: float = 0.025
+    # Planning grid for cruise AGL candidates (levels). 0.02 ≈ 1 m if altitude_step_m=50.
+    cruise_band_step: float = 0.02
+    # Lateral corridor gate: risk-adjusted energy must be ≤ margin * straight.
+    # None / ≤0 disables corridors; default 0.97 = require ~3% clear edge vs straight.
+    corridor_energy_margin: float | None = 0.97
     # Optional DEM (meters). When set, constant-AGL moves pay terrain climb energy.
     elevation: list[list[float]] | None = None
     # Sticky lateral via (cells) selected by an energy guide; avoids corridor flip-flops.
@@ -131,3 +138,6 @@ class BeliefMap:
     height: int
     levels: int = 1
     cells: list[list[list[BeliefCell]]] = field(default_factory=list)
+    # Optional (Z,H,W) float caches for fast trilinear sampling / snapshots.
+    # Populated by BeliefUpdater.apply_prediction; patched on observation updates.
+    field_arrays: dict[str, object] | None = None

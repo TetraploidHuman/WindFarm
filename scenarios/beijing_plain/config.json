@@ -18,7 +18,7 @@
     "n_jobs": 0
   },
   "belief": {
-    "observation_radius": 2,
+    "observation_radius": 7,
     "advection_gain": 0.25,
     "decay_per_step": 0.04,
     "process_noise": 0.18,
@@ -40,9 +40,9 @@
     "terminal_progress_weight": 24.0
   },
   "simulation": {
-    "width": 24,
-    "height": 18,
-    "resolution_m": 100.0,
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0,
     "time_steps": 120,
     "start_time": "2024-04-12T08:00:00",
     "sample_interval_seconds": 15,
@@ -50,15 +50,15 @@
   },
   "mission": {
     "start": [
-      4,
-      12
+      14,
+      42
     ],
     "goal": [
-      19,
-      5
+      64,
+      19
     ],
-    "max_steps": 40,
-    "step_distance_m": 100.0,
+    "max_steps": 131,
+    "step_distance_m": 30.0,
     "battery_capacity_j": 620000.0,
     "nominal_airspeed": 16.5,
     "hover_power_w": 105.0,
@@ -68,10 +68,12 @@
     "climb_power_per_mps_w": 125.0,
     "descent_power_reduction_per_mps_w": 58.0,
     "reserve_energy_ratio": 0.22,
-    "altitude_step_m": 40.0,
+    "altitude_step_m": 30.0,
     "min_altitude_level": 0,
     "max_altitude_level": 4,
-    "climb_cost_per_level_j": 180.0,
-    "cruise_band_step": 0.025
+    "climb_cost_per_level_j": 135.0,
+    "clearance_agl_level": 1.0,
+    "cruise_band_step": 0.03333333333333333,
+    "corridor_energy_margin": 0.95
   }
 }

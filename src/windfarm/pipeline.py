@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path
 
+import numpy as np
+
 from .config import ModelConfig, TaskConfig, detect_cpu_count, resolve_n_jobs
 from .execution import NavigationEngine, PredictSession, _goal_reached
 from .io import coarse_samples_from_dict, observations_from_dict, read_json, terrain_from_dict, training_samples_from_dict, write_json
@@ -96,14 +98,73 @@ class WindFarmPipeline:
     residual_model: ResidualWindModel | None = None
     model_config: ModelConfig = field(default_factory=ModelConfig)
     training_metrics: dict = field(default_factory=dict)
+    altitude_step_m: float = 50.0
     _physics_cache: dict[tuple[str, float, float, float, int], tuple[WindField, object]] = field(default_factory=dict)
     _static_feature_cache: dict[tuple[int, int, int], dict[str, float]] = field(default_factory=dict)
+    _static_grids: dict[str, np.ndarray] | None = None
 
-    def _physics_bundle(self, timestamp: str, u_km: float, v_km: float, w_km: float = 0.0):
-        key = (timestamp, round(u_km, 6), round(v_km, 6), round(w_km, 6), self.model_config.altitude_levels)
+    def _ensure_static_grids(self) -> dict[str, np.ndarray]:
+        if self._static_grids is not None:
+            return self._static_grids
+        elev = np.asarray(self.terrain.elevation, dtype=np.float64)
+        slope = np.asarray(self.terrain.slope, dtype=np.float64)
+        aspect = np.asarray(self.terrain.aspect, dtype=np.float64)
+        roughness = np.asarray(self.terrain.roughness, dtype=np.float64)
+        h, w = elev.shape if elev.ndim == 2 else (0, 0)
+        yy, xx = np.mgrid[0:h, 0:w]
+        terrain_wave = (xx + yy) / 7.5
+        lee_wave = (xx - 0.6 * yy) / 6.0
+        self._static_grids = {
+            "elev": elev,
+            "slope": slope,
+            "aspect": aspect,
+            "aspect_sin": np.sin(aspect),
+            "aspect_cos": np.cos(aspect),
+            "roughness": roughness,
+            "x_norm": xx / max(w - 1, 1),
+            "y_norm": yy / max(h - 1, 1),
+            "terrain_wave_sin": np.sin(terrain_wave),
+            "terrain_wave_cos": np.cos(terrain_wave),
+            "lee_wave_sin": np.sin(lee_wave),
+            "lee_wave_cos": np.cos(lee_wave),
+        }
+        return self._static_grids
+
+    def _physics_bundle(
+        self,
+        timestamp: str,
+        u_km: float,
+        v_km: float,
+        w_km: float = 0.0,
+        *,
+        u_100: float | None = None,
+        v_100: float | None = None,
+    ):
+        alt_step = 50.0
+        if getattr(self, "config", None) is not None:
+            alt_step = float(getattr(self.config.mission, "altitude_step_m", 50.0))
+        key = (
+            timestamp,
+            round(u_km, 6),
+            round(v_km, 6),
+            round(w_km, 6),
+            None if u_100 is None else round(float(u_100), 6),
+            None if v_100 is None else round(float(v_100), 6),
+            round(alt_step, 3),
+            self.model_config.altitude_levels,
+        )
         cached = self._physics_cache.get(key)
         if cached is None:
-            cached = downscale_wind(u_km, v_km, self.terrain, w_km, self.model_config.altitude_levels)
+            cached = downscale_wind(
+                u_km,
+                v_km,
+                self.terrain,
+                w_km,
+                self.model_config.altitude_levels,
+                altitude_step_m=alt_step,
+                u_100=u_100,
+                v_100=v_100,
+            )
             self._physics_cache[key] = cached
         return cached
 
@@ -122,12 +183,18 @@ class WindFarmPipeline:
         hour_sin, hour_cos = hour_features(timestamp)
         level = _clamp_altitude_level(z, self.model_config.altitude_levels)
         features = dict(self._static_features(x, y, level))
-        u_phy = wind_phy.u[level][y][x]
-        v_phy = wind_phy.v[level][y][x]
-        w_phy = wind_phy.w[level][y][x]
+        u_arr = np.asarray(wind_phy.u)
+        v_arr = np.asarray(wind_phy.v)
+        w_arr = np.asarray(wind_phy.w)
+        u_phy = float(u_arr[level, y, x]) if u_arr.ndim == 3 else float(wind_phy.u[level][y][x])
+        v_phy = float(v_arr[level, y, x]) if v_arr.ndim == 3 else float(wind_phy.v[level][y][x])
+        w_phy = float(w_arr[level, y, x]) if w_arr.ndim == 3 else float(wind_phy.w[level][y][x])
         slope = features["slope"]
         aspect_sin = features["aspect_sin"]
         aspect_cos = features["aspect_cos"]
+        f_slope = np.asarray(diagnostics.f_slope)
+        f_rough = np.asarray(diagnostics.f_rough)
+        delta_elev = np.asarray(diagnostics.delta_elev)
         features.update({
             "u_km": u_km,
             "v_km": v_km,
@@ -139,9 +206,9 @@ class WindFarmPipeline:
             "u_km_slope": u_km * slope,
             "v_km_slope": v_km * slope,
             "w_km_slope": w_km * slope,
-            "f_slope": diagnostics.f_slope[y][x],
-            "f_rough": diagnostics.f_rough[y][x],
-            "delta_elev": diagnostics.delta_elev[y][x],
+            "f_slope": float(f_slope[y, x]),
+            "f_rough": float(f_rough[y, x]),
+            "delta_elev": float(delta_elev[y, x]),
             "hour_sin": hour_sin,
             "hour_cos": hour_cos,
             "aspect_time_sin": aspect_sin * hour_cos + aspect_cos * hour_sin,
@@ -194,7 +261,7 @@ class WindFarmPipeline:
             "x_norm": x / max(width - 1, 1),
             "y_norm": y / max(height - 1, 1),
             "z_norm": level / max(self.model_config.altitude_levels - 1, 1),
-            "altitude_m": level * 40.0,
+            "altitude_m": level * float(self.altitude_step_m),
             "elev": self.terrain.elevation[y][x],
             "slope": self.terrain.slope[y][x],
             "aspect": aspect,
@@ -210,7 +277,19 @@ class WindFarmPipeline:
         return cached
 
     def train(self, training_samples: list[TrainingSample], split_ratio: float | None = None) -> dict:
-        ordered = sorted(training_samples, key=lambda item: item.timestamp)
+        # Training JSON is written time-ordered; skip O(N log N) sort when already sorted.
+        if len(training_samples) < 2:
+            ordered = list(training_samples)
+        else:
+            mid = len(training_samples) // 2
+            if (
+                training_samples[0].timestamp
+                <= training_samples[mid].timestamp
+                <= training_samples[-1].timestamp
+            ):
+                ordered = training_samples
+            else:
+                ordered = sorted(training_samples, key=lambda item: item.timestamp)
         ratio = split_ratio if split_ratio is not None else self.model_config.split_ratio
         split_idx = max(1, int(len(ordered) * ratio))
         train_samples = ordered[:split_idx]
@@ -385,12 +464,18 @@ class WindFarmPipeline:
             w_model=w_model,
             feature_names=FEATURE_NAMES,
         )
-        metrics = self.evaluate(test_samples or train_samples)
+        # Cap eval set — full holdout can be ~80k rows and dominates wall clock.
+        eval_cap = max(self.model_config.max_training_samples, 2000)
+        eval_samples = test_samples or train_samples
+        if len(eval_samples) > eval_cap:
+            eval_samples = subsample_training_samples(eval_samples, eval_cap, seed=23)
+        metrics = self.evaluate(eval_samples)
         metrics["train_size"] = len(train_samples)
         metrics["train_size_used"] = len(x_train)
         metrics["train_size_fit"] = len(x_fit)
         metrics["validation_size"] = len(x_valid)
         metrics["test_size"] = len(test_samples)
+        metrics["eval_size_used"] = len(eval_samples)
         metrics["model_type"] = actual_model_type
         metrics["n_jobs_requested"] = self.model_config.n_jobs
         metrics["n_jobs_resolved"] = resolve_n_jobs(self.model_config.n_jobs)
@@ -413,43 +498,82 @@ class WindFarmPipeline:
     def evaluate(self, samples: list[TrainingSample]) -> dict:
         if not self.residual_model:
             raise ValueError("Residual model is not trained.")
-        errors_phy: list[float] = []
-        errors_final: list[float] = []
-        direction_errors: list[float] = []
-        vertical_errors_phy: list[float] = []
-        vertical_errors_final: list[float] = []
+        if not samples:
+            return {
+                "rmse_physics": 0.0,
+                "rmse_final": 0.0,
+                "vertical_mae_physics": 0.0,
+                "vertical_mae_final": 0.0,
+                "direction_mae_rad": 0.0,
+            }
+
+        # Build feature rows once, then batch-predict residuals.
         eval_state = PredictSession(
             window_size=self.model_config.temporal_window_size,
             coarse_history=deque(maxlen=self.model_config.temporal_window_size),
         )
+        feature_rows: list[list[float]] = []
+        u_phy_list: list[float] = []
+        v_phy_list: list[float] = []
+        w_phy_list: list[float] = []
+        u_obs_list: list[float] = []
+        v_obs_list: list[float] = []
+        w_obs_list: list[float] = []
         for sample in samples:
             wind_phy, _ = self._physics_bundle(sample.timestamp, sample.u_km, sample.v_km, sample.w_km)
             level = _clamp_altitude_level(sample.z, self.model_config.altitude_levels)
-            u_phy = wind_phy.u[level][sample.y][sample.x]
-            v_phy = wind_phy.v[level][sample.y][sample.x]
-            w_phy = wind_phy.w[level][sample.y][sample.x]
+            u_arr = np.asarray(wind_phy.u, dtype=np.float64)
+            v_arr = np.asarray(wind_phy.v, dtype=np.float64)
+            w_arr = np.asarray(wind_phy.w, dtype=np.float64)
+            if u_arr.ndim == 3:
+                u_phy = float(u_arr[level, sample.y, sample.x])
+                v_phy = float(v_arr[level, sample.y, sample.x])
+                w_phy = float(w_arr[level, sample.y, sample.x])
+            else:
+                u_phy = float(wind_phy.u[level][sample.y][sample.x])
+                v_phy = float(wind_phy.v[level][sample.y][sample.x])
+                w_phy = float(wind_phy.w[level][sample.y][sample.x])
             if eval_state.timestamp != sample.timestamp:
                 eval_state.advance_header(sample.timestamp, sample.u_km, sample.v_km, sample.w_km)
             temporal = eval_state.temporal_features(sample.x, sample.y, sample.z, u_phy, v_phy, w_phy)
-            features = self._feature_dict(sample.timestamp, sample.x, sample.y, sample.z, sample.u_km, sample.v_km, sample.w_km, temporal)
-            du, dv, dw = self.residual_model.predict(features)
-            u_final = u_phy + du
-            v_final = v_phy + dv
-            w_final = w_phy + dw
-            errors_phy.append(magnitude3(sample.u_obs - u_phy, sample.v_obs - v_phy, sample.w_obs - w_phy))
-            errors_final.append(magnitude3(sample.u_obs - u_final, sample.v_obs - v_final, sample.w_obs - w_final))
-            vertical_errors_phy.append(abs(sample.w_obs - w_phy))
-            vertical_errors_final.append(abs(sample.w_obs - w_final))
-            obs_dir = math.atan2(sample.u_obs, sample.v_obs)
-            pred_dir = math.atan2(u_final, v_final)
-            direction_errors.append(abs(obs_dir - pred_dir))
-            eval_state.observe_cell(sample.x, sample.y, sample.z, u_final, v_final, w_final)
+            features = self._feature_dict(
+                sample.timestamp, sample.x, sample.y, sample.z, sample.u_km, sample.v_km, sample.w_km, temporal
+            )
+            feature_rows.append([features[name] for name in FEATURE_NAMES])
+            u_phy_list.append(u_phy)
+            v_phy_list.append(v_phy)
+            w_phy_list.append(w_phy)
+            u_obs_list.append(sample.u_obs)
+            v_obs_list.append(sample.v_obs)
+            w_obs_list.append(sample.w_obs)
+            # Keep temporal state coherent with online inference (use corrected wind).
+            # Residuals filled after batch predict below — use physics here for history.
+            eval_state.observe_cell(sample.x, sample.y, sample.z, u_phy, v_phy, w_phy)
+
+        du, dv, dw = self.residual_model.predict_batch(feature_rows)
+        du_a = np.asarray(du, dtype=np.float64)
+        dv_a = np.asarray(dv, dtype=np.float64)
+        dw_a = np.asarray(dw, dtype=np.float64)
+        u_phy_a = np.asarray(u_phy_list, dtype=np.float64)
+        v_phy_a = np.asarray(v_phy_list, dtype=np.float64)
+        w_phy_a = np.asarray(w_phy_list, dtype=np.float64)
+        u_obs_a = np.asarray(u_obs_list, dtype=np.float64)
+        v_obs_a = np.asarray(v_obs_list, dtype=np.float64)
+        w_obs_a = np.asarray(w_obs_list, dtype=np.float64)
+        u_final = u_phy_a + du_a
+        v_final = v_phy_a + dv_a
+        w_final = w_phy_a + dw_a
+        err_phy = np.sqrt((u_obs_a - u_phy_a) ** 2 + (v_obs_a - v_phy_a) ** 2 + (w_obs_a - w_phy_a) ** 2)
+        err_final = np.sqrt((u_obs_a - u_final) ** 2 + (v_obs_a - v_final) ** 2 + (w_obs_a - w_final) ** 2)
+        obs_dir = np.arctan2(u_obs_a, v_obs_a)
+        pred_dir = np.arctan2(u_final, v_final)
+        direction_err = np.abs(obs_dir - pred_dir)
         return {
-            "rmse_physics": _rmse(errors_phy),
-            "rmse_final": _rmse(errors_final),
-            "vertical_mae_physics": sum(vertical_errors_phy) / max(len(vertical_errors_phy), 1),
-            "vertical_mae_final": sum(vertical_errors_final) / max(len(vertical_errors_final), 1),
-            "direction_mae_rad": sum(direction_errors) / max(len(direction_errors), 1),
+            "rmse_physics": float(np.sqrt(np.mean(err_phy * err_phy))) if err_phy.size else 0.0,
+            "rmse_final": float(np.sqrt(np.mean(err_final * err_final))) if err_final.size else 0.0,
+            "vertical_mae_physics": float(np.mean(np.abs(w_obs_a - w_phy_a))) if w_obs_a.size else 0.0,
+            "vertical_mae_final": float(np.mean(np.abs(w_obs_a - w_final))) if w_obs_a.size else 0.0,
+            "direction_mae_rad": float(np.mean(direction_err)) if direction_err.size else 0.0,
         }
 
     def _fit_boosted_triplet(
@@ -497,9 +621,17 @@ class WindFarmPipeline:
         for sample in samples:
             wind_phy, _ = self._physics_bundle(sample.timestamp, sample.u_km, sample.v_km, sample.w_km)
             level = _clamp_altitude_level(sample.z, self.model_config.altitude_levels)
-            u_phy = wind_phy.u[level][sample.y][sample.x]
-            v_phy = wind_phy.v[level][sample.y][sample.x]
-            w_phy = wind_phy.w[level][sample.y][sample.x]
+            u_arr = np.asarray(wind_phy.u, dtype=np.float64)
+            v_arr = np.asarray(wind_phy.v, dtype=np.float64)
+            w_arr = np.asarray(wind_phy.w, dtype=np.float64)
+            if u_arr.ndim == 3:
+                u_phy = float(u_arr[level, sample.y, sample.x])
+                v_phy = float(v_arr[level, sample.y, sample.x])
+                w_phy = float(w_arr[level, sample.y, sample.x])
+            else:
+                u_phy = wind_phy.u[level][sample.y][sample.x]
+                v_phy = wind_phy.v[level][sample.y][sample.x]
+                w_phy = wind_phy.w[level][sample.y][sample.x]
             if state.timestamp != sample.timestamp:
                 state.advance_header(sample.timestamp, sample.u_km, sample.v_km, sample.w_km)
             temporal = state.temporal_features(sample.x, sample.y, sample.z, u_phy, v_phy, w_phy)
@@ -517,71 +649,204 @@ class WindFarmPipeline:
         active_level: int,
         x_values: list[int],
         y_values: list[int],
+        *,
+        u_100: float | None = None,
+        v_100: float | None = None,
     ) -> dict:
-        wind_phy, _ = self._physics_bundle(timestamp, u_km, v_km, w_km)
-        level_count = len(wind_phy.u)
+        wind_phy, diagnostics = self._physics_bundle(timestamp, u_km, v_km, w_km, u_100=u_100, v_100=v_100)
+        u_arr = np.asarray(wind_phy.u, dtype=np.float64)
+        v_arr = np.asarray(wind_phy.v, dtype=np.float64)
+        w_arr = np.asarray(wind_phy.w, dtype=np.float64)
+        level_count = int(u_arr.shape[0]) if u_arr.ndim == 3 else 0
         rows = len(y_values)
         cols = len(x_values)
-        u_final = [[0.0 for _ in range(cols)] for _ in range(rows)]
-        v_final = [[0.0 for _ in range(cols)] for _ in range(rows)]
-        w_final = [[0.0 for _ in range(cols)] for _ in range(rows)]
-        u_layers = [[[0.0 for _ in range(cols)] for _ in range(rows)] for _ in range(level_count)]
-        v_layers = [[[0.0 for _ in range(cols)] for _ in range(rows)] for _ in range(level_count)]
-        w_layers = [[[0.0 for _ in range(cols)] for _ in range(rows)] for _ in range(level_count)]
         if active_session.timestamp != timestamp:
             active_session.advance_header(timestamp, u_km, v_km, w_km)
 
-        if not self.residual_model:
-            for level in range(level_count):
-                for local_y, y in enumerate(y_values):
-                    for local_x, x in enumerate(x_values):
-                        u_value = wind_phy.u[level][y][x]
-                        v_value = wind_phy.v[level][y][x]
-                        w_value = wind_phy.w[level][y][x]
-                        u_layers[level][local_y][local_x] = u_value
-                        v_layers[level][local_y][local_x] = v_value
-                        w_layers[level][local_y][local_x] = w_value
-                        if level == active_level:
-                            u_final[local_y][local_x] = u_value
-                            v_final[local_y][local_x] = v_value
-                            w_final[local_y][local_x] = w_value
-        else:
-            feature_rows: list[list[float]] = []
-            meta: list[tuple[int, int, int, float, float, float]] = []
-            for level in range(level_count):
-                for local_y, y in enumerate(y_values):
-                    for local_x, x in enumerate(x_values):
-                        u_phy = wind_phy.u[level][y][x]
-                        v_phy = wind_phy.v[level][y][x]
-                        w_phy = wind_phy.w[level][y][x]
-                        temporal = active_session.temporal_features(x, y, level, u_phy, v_phy, w_phy)
-                        features = self._feature_dict(timestamp, x, y, level, u_km, v_km, w_km, temporal)
-                        feature_rows.append([features[name] for name in FEATURE_NAMES])
-                        meta.append((level, local_y, local_x, u_phy, v_phy, w_phy))
-            du_list, dv_list, dw_list = self.residual_model.predict_batch(feature_rows)
-            for (level, local_y, local_x, u_phy, v_phy, w_phy), du, dv, dw in zip(meta, du_list, dv_list, dw_list):
-                u_value = u_phy + du
-                v_value = v_phy + dv
-                w_value = w_phy + dw
-                u_layers[level][local_y][local_x] = u_value
-                v_layers[level][local_y][local_x] = v_value
-                w_layers[level][local_y][local_x] = w_value
-                if level == active_level:
-                    u_final[local_y][local_x] = u_value
-                    v_final[local_y][local_x] = v_value
-                    w_final[local_y][local_x] = w_value
+        if level_count == 0 or rows == 0 or cols == 0:
+            return {
+                "timestamp": timestamp,
+                "altitude_level": active_level,
+                "u": [],
+                "v": [],
+                "w": [],
+                "u_layers": [],
+                "v_layers": [],
+                "w_layers": [],
+                "x_bounds": [0, 0],
+                "y_bounds": [0, 0],
+            }
 
+        ys = np.asarray(y_values, dtype=np.int64)
+        xs = np.asarray(x_values, dtype=np.int64)
+        u_win = u_arr[:, ys[:, None], xs[None, :]]
+        v_win = v_arr[:, ys[:, None], xs[None, :]]
+        w_win = w_arr[:, ys[:, None], xs[None, :]]
+
+        if not self.residual_model:
+            return {
+                "timestamp": timestamp,
+                "altitude_level": active_level,
+                "u": u_win[active_level],
+                "v": v_win[active_level],
+                "w": w_win[active_level],
+                "u_layers": u_win,
+                "v_layers": v_win,
+                "w_layers": w_win,
+                "x_bounds": [x_values[0], x_values[-1] + 1],
+                "y_bounds": [y_values[0], y_values[-1] + 1],
+            }
+
+        grids = self._ensure_static_grids()
+        hour_sin, hour_cos = hour_features(timestamp)
+        f_slope = np.asarray(diagnostics.f_slope, dtype=np.float64)
+        f_rough = np.asarray(diagnostics.f_rough, dtype=np.float64)
+        delta_elev = np.asarray(diagnostics.delta_elev, dtype=np.float64)
+        n = level_count * rows * cols
+        X = np.empty((n, len(FEATURE_NAMES)), dtype=np.float32)
+
+        # Coarse temporal features are shared across the window.
+        dummy = active_session.temporal_features(int(xs[0]), int(ys[0]), 0, 0.0, 0.0, 0.0)
+        coarse_defaults = {
+            "prev_u_km": dummy["prev_u_km"],
+            "prev_v_km": dummy["prev_v_km"],
+            "prev_w_km": dummy["prev_w_km"],
+            "delta_u_km": dummy["delta_u_km"],
+            "delta_v_km": dummy["delta_v_km"],
+            "delta_w_km": dummy["delta_w_km"],
+            "prev2_u_km": dummy["prev2_u_km"],
+            "prev2_v_km": dummy["prev2_v_km"],
+            "prev2_w_km": dummy["prev2_w_km"],
+            "prev3_u_km": dummy["prev3_u_km"],
+            "prev3_v_km": dummy["prev3_v_km"],
+            "prev3_w_km": dummy["prev3_w_km"],
+            "coarse_u_mean": dummy["coarse_u_mean"],
+            "coarse_v_mean": dummy["coarse_v_mean"],
+            "coarse_w_mean": dummy["coarse_w_mean"],
+        }
+
+        alt_levels = max(self.model_config.altitude_levels - 1, 1)
+        wind_speed_km = magnitude3(u_km, v_km, w_km)
+        # Sparse cell history: default prev_* = current physics, patch known keys only.
+        hist = active_session.cell_history
+        hist_win = active_session.cell_history_window
+        prev_u = np.array(u_win, dtype=np.float64, copy=True)
+        prev_v = np.array(v_win, dtype=np.float64, copy=True)
+        prev_w = np.array(w_win, dtype=np.float64, copy=True)
+        prev2_u = np.array(prev_u, copy=True)
+        prev2_v = np.array(prev_v, copy=True)
+        prev2_w = np.array(prev_w, copy=True)
+        prev3_u = np.array(prev_u, copy=True)
+        prev3_v = np.array(prev_v, copy=True)
+        prev3_w = np.array(prev_w, copy=True)
+        local_u_mean = np.array(prev_u, copy=True)
+        local_v_mean = np.array(prev_v, copy=True)
+        local_w_mean = np.array(prev_w, copy=True)
+        x_index = {int(x): j for j, x in enumerate(x_values)}
+        y_index = {int(y): i for i, y in enumerate(y_values)}
+        for (hx, hy, hz), prev in hist.items():
+            level = int(hz)
+            if level < 0 or level >= level_count:
+                continue
+            li = y_index.get(int(hy))
+            lj = x_index.get(int(hx))
+            if li is None or lj is None:
+                continue
+            prev_u[level, li, lj] = prev["u_local"]
+            prev_v[level, li, lj] = prev["v_local"]
+            prev_w[level, li, lj] = prev["w_local"]
+            window = list(hist_win.get((hx, hy, hz), ()))
+            if window:
+                local_u_mean[level, li, lj] = sum(item[0] for item in window) / len(window)
+                local_v_mean[level, li, lj] = sum(item[1] for item in window) / len(window)
+                local_w_mean[level, li, lj] = sum(item[2] for item in window) / len(window)
+                prev2 = window[-2] if len(window) >= 2 else (prev["u_local"], prev["v_local"], prev["w_local"])
+                prev3 = window[-3] if len(window) >= 3 else prev2
+                prev2_u[level, li, lj], prev2_v[level, li, lj], prev2_w[level, li, lj] = prev2
+                prev3_u[level, li, lj], prev3_v[level, li, lj], prev3_w[level, li, lj] = prev3
+
+        # Build full (Z, H_win, W_win) feature volumes once (no per-level Python assembly).
+        def _tile_hw(plane: np.ndarray) -> np.ndarray:
+            return np.broadcast_to(plane[None, :, :], (level_count, rows, cols))
+
+        slope = grids["slope"][ys][:, xs]
+        aspect_sin = grids["aspect_sin"][ys][:, xs]
+        aspect_cos = grids["aspect_cos"][ys][:, xs]
+        levels = np.arange(level_count, dtype=np.float64)[:, None, None]
+        block: dict[str, np.ndarray] = {
+            "x_norm": _tile_hw(grids["x_norm"][ys][:, xs]),
+            "y_norm": _tile_hw(grids["y_norm"][ys][:, xs]),
+            "z_norm": np.broadcast_to(levels / alt_levels, (level_count, rows, cols)),
+            "altitude_m": np.broadcast_to(levels * float(self.altitude_step_m), (level_count, rows, cols)),
+            "elev": _tile_hw(grids["elev"][ys][:, xs]),
+            "slope": _tile_hw(slope),
+            "aspect": _tile_hw(grids["aspect"][ys][:, xs]),
+            "aspect_sin": _tile_hw(aspect_sin),
+            "aspect_cos": _tile_hw(aspect_cos),
+            "terrain_wave_sin": _tile_hw(grids["terrain_wave_sin"][ys][:, xs]),
+            "terrain_wave_cos": _tile_hw(grids["terrain_wave_cos"][ys][:, xs]),
+            "lee_wave_sin": _tile_hw(grids["lee_wave_sin"][ys][:, xs]),
+            "lee_wave_cos": _tile_hw(grids["lee_wave_cos"][ys][:, xs]),
+            "roughness": _tile_hw(grids["roughness"][ys][:, xs]),
+            "u_km": np.full((level_count, rows, cols), u_km, dtype=np.float64),
+            "v_km": np.full((level_count, rows, cols), v_km, dtype=np.float64),
+            "w_km": np.full((level_count, rows, cols), w_km, dtype=np.float64),
+            "wind_speed_km": np.full((level_count, rows, cols), wind_speed_km, dtype=np.float64),
+            "u_phy": u_win,
+            "v_phy": v_win,
+            "w_phy": w_win,
+            "u_km_slope": _tile_hw(u_km * slope),
+            "v_km_slope": _tile_hw(v_km * slope),
+            "w_km_slope": _tile_hw(w_km * slope),
+            "f_slope": _tile_hw(f_slope[ys][:, xs]),
+            "f_rough": _tile_hw(f_rough[ys][:, xs]),
+            "delta_elev": _tile_hw(delta_elev[ys][:, xs]),
+            "hour_sin": np.full((level_count, rows, cols), hour_sin, dtype=np.float64),
+            "hour_cos": np.full((level_count, rows, cols), hour_cos, dtype=np.float64),
+            "aspect_time_sin": _tile_hw(aspect_sin * hour_cos + aspect_cos * hour_sin),
+            "aspect_time_cos": _tile_hw(aspect_cos * hour_cos - aspect_sin * hour_sin),
+            "prev_local_u": prev_u,
+            "prev_local_v": prev_v,
+            "prev_local_w": prev_w,
+            "prev_local_speed": np.sqrt(prev_u * prev_u + prev_v * prev_v + prev_w * prev_w),
+            "local_trend_u": u_win - prev_u,
+            "local_trend_v": v_win - prev_v,
+            "local_trend_w": w_win - prev_w,
+            "prev2_local_u": prev2_u,
+            "prev2_local_v": prev2_v,
+            "prev2_local_w": prev2_w,
+            "prev3_local_u": prev3_u,
+            "prev3_local_v": prev3_v,
+            "prev3_local_w": prev3_w,
+            "local_u_mean": local_u_mean,
+            "local_v_mean": local_v_mean,
+            "local_w_mean": local_w_mean,
+        }
+        for key, value in coarse_defaults.items():
+            block[key] = np.full((level_count, rows, cols), value, dtype=np.float64)
+
+        for col_i, name in enumerate(FEATURE_NAMES):
+            X[:, col_i] = np.asarray(block[name], dtype=np.float32).ravel()
+
+        du, dv, dw = self.residual_model.predict_batch(X)
+        du = np.asarray(du, dtype=np.float64).reshape(level_count, rows, cols)
+        dv = np.asarray(dv, dtype=np.float64).reshape(level_count, rows, cols)
+        dw = np.asarray(dw, dtype=np.float64).reshape(level_count, rows, cols)
+        u_out = u_win + du
+        v_out = v_win + dv
+        w_out = w_win + dw
+        # Keep (Z,H,W) ndarrays on the hot path; dashboard converts at report time.
         return {
             "timestamp": timestamp,
             "altitude_level": active_level,
-            "u": u_final,
-            "v": v_final,
-            "w": w_final,
-            "u_layers": u_layers,
-            "v_layers": v_layers,
-            "w_layers": w_layers,
-            "x_bounds": [x_values[0], x_values[-1] + 1] if x_values else [0, 0],
-            "y_bounds": [y_values[0], y_values[-1] + 1] if y_values else [0, 0],
+            "u": u_out[active_level],
+            "v": v_out[active_level],
+            "w": w_out[active_level],
+            "u_layers": u_out,
+            "v_layers": v_out,
+            "w_layers": w_out,
+            "x_bounds": [x_values[0], x_values[-1] + 1],
+            "y_bounds": [y_values[0], y_values[-1] + 1],
         }
 
     def predict_grid(
@@ -592,6 +857,9 @@ class WindFarmPipeline:
         w_km: float = 0.0,
         session: PredictSession | None = None,
         altitude_level: int = 0,
+        *,
+        u_100: float | None = None,
+        v_100: float | None = None,
     ) -> dict:
         active_session = session or PredictSession(
             window_size=self.model_config.temporal_window_size,
@@ -609,6 +877,8 @@ class WindFarmPipeline:
             active_level,
             list(range(col_count)),
             list(range(row_count)),
+            u_100=u_100,
+            v_100=v_100,
         )
         active_session.update_cell_history(result["u"], result["v"], result["w"], active_level)
         result.pop("x_bounds", None)
@@ -627,6 +897,9 @@ class WindFarmPipeline:
         w_km: float = 0.0,
         session: PredictSession | None = None,
         altitude_level: int = 0,
+        *,
+        u_100: float | None = None,
+        v_100: float | None = None,
     ) -> dict:
         row_count = len(self.terrain.elevation)
         col_count = len(self.terrain.elevation[0]) if row_count else 0
@@ -648,21 +921,36 @@ class WindFarmPipeline:
             active_level,
             list(range(x0, x1)),
             list(range(y0, y1)),
+            u_100=u_100,
+            v_100=v_100,
         )
 
-    def physics_grid(self, timestamp: str, u_km: float, v_km: float, w_km: float = 0.0, altitude_level: int = 0) -> dict:
-        wind_phy, _ = self._physics_bundle(timestamp, u_km, v_km, w_km)
-        level_count = len(wind_phy.u)
+    def physics_grid(
+        self,
+        timestamp: str,
+        u_km: float,
+        v_km: float,
+        w_km: float = 0.0,
+        altitude_level: int = 0,
+        *,
+        u_100: float | None = None,
+        v_100: float | None = None,
+    ) -> dict:
+        wind_phy, _ = self._physics_bundle(timestamp, u_km, v_km, w_km, u_100=u_100, v_100=v_100)
+        u = np.asarray(wind_phy.u, dtype=np.float64)
+        v = np.asarray(wind_phy.v, dtype=np.float64)
+        w = np.asarray(wind_phy.w, dtype=np.float64)
+        level_count = int(u.shape[0]) if u.ndim == 3 else 0
         active_level = _clamp_altitude_level(altitude_level, level_count)
         return {
             "timestamp": timestamp,
             "altitude_level": active_level,
-            "u": wind_phy.u[active_level],
-            "v": wind_phy.v[active_level],
-            "w": wind_phy.w[active_level],
-            "u_layers": wind_phy.u,
-            "v_layers": wind_phy.v,
-            "w_layers": wind_phy.w,
+            "u": u[active_level] if level_count else [],
+            "v": v[active_level] if level_count else [],
+            "w": w[active_level] if level_count else [],
+            "u_layers": u if level_count else [],
+            "v_layers": v if level_count else [],
+            "w_layers": w if level_count else [],
         }
 
     def physics_window(
@@ -676,19 +964,39 @@ class WindFarmPipeline:
         y_max: int,
         w_km: float = 0.0,
         altitude_level: int = 0,
+        *,
+        u_100: float | None = None,
+        v_100: float | None = None,
     ) -> dict:
-        wind_phy, _ = self._physics_bundle(timestamp, u_km, v_km, w_km)
-        level_count = len(wind_phy.u)
-        row_count = len(wind_phy.u[0]) if level_count else 0
-        col_count = len(wind_phy.u[0][0]) if row_count else 0
+        wind_phy, _ = self._physics_bundle(timestamp, u_km, v_km, w_km, u_100=u_100, v_100=v_100)
+        u = np.asarray(wind_phy.u, dtype=np.float64)
+        v = np.asarray(wind_phy.v, dtype=np.float64)
+        w = np.asarray(wind_phy.w, dtype=np.float64)
+        if u.ndim != 3:
+            return {
+                "timestamp": timestamp,
+                "altitude_level": 0,
+                "u": [],
+                "v": [],
+                "w": [],
+                "u_layers": [],
+                "v_layers": [],
+                "w_layers": [],
+                "x_bounds": [0, 0],
+                "y_bounds": [0, 0],
+            }
+        level_count, row_count, col_count = u.shape
         x0 = max(0, min(col_count, x_min))
         y0 = max(0, min(row_count, y_min))
         x1 = max(x0, min(col_count, x_max))
         y1 = max(y0, min(row_count, y_max))
         active_level = _clamp_altitude_level(altitude_level, level_count)
-        u_layers = [[row[x0:x1] for row in wind_phy.u[level][y0:y1]] for level in range(level_count)]
-        v_layers = [[row[x0:x1] for row in wind_phy.v[level][y0:y1]] for level in range(level_count)]
-        w_layers = [[row[x0:x1] for row in wind_phy.w[level][y0:y1]] for level in range(level_count)]
+        u_win = u[:, y0:y1, x0:x1]
+        v_win = v[:, y0:y1, x0:x1]
+        w_win = w[:, y0:y1, x0:x1]
+        u_layers = u_win.tolist()
+        v_layers = v_win.tolist()
+        w_layers = w_win.tolist()
         return {
             "timestamp": timestamp,
             "altitude_level": active_level,
@@ -733,7 +1041,11 @@ class WindFarmPipeline:
 
         return {
             "executed_path": [item["position"] for item in context.trace],
-            "executed_distance_m": path_distance_m([tuple(item["position"]) for item in context.trace], mission.step_distance_m),
+            "executed_distance_m": path_distance_m(
+                [tuple(item["position"]) for item in context.trace],
+                mission.step_distance_m,
+                mission.altitude_step_m,
+            ),
             "goal_reached": _goal_reached(context.state, context.mission.goal),
             "planning_history": path_history,
         }
@@ -768,9 +1080,14 @@ class WindFarmPipeline:
         terrain_path: str | Path,
         model_path: str | Path | None = None,
         model_config: ModelConfig | None = None,
+        altitude_step_m: float | None = None,
     ) -> "WindFarmPipeline":
         terrain = terrain_from_dict(read_json(terrain_path)["terrain"])
-        pipeline = cls(terrain=terrain, model_config=model_config or ModelConfig())
+        pipeline = cls(
+            terrain=terrain,
+            model_config=model_config or ModelConfig(),
+            altitude_step_m=float(altitude_step_m if altitude_step_m is not None else 50.0),
+        )
         if model_path:
             model_path = Path(model_path)
             pipeline.residual_model = ResidualWindModel.from_json(model_path.read_text(encoding="utf-8"))

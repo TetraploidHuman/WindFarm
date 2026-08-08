@@ -21,3 +21,7 @@ runs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Heavy regenerable scenario products (rebuild via simulate/resample scripts)
+scenarios/*/training.json
+scenarios/*/truth.json

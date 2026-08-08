@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -153,7 +155,7 @@ def analyze_run(run_dir: Path) -> dict:
     max_level = float(mission.get("max_altitude_level", 4))
     min_level = float(mission.get("min_altitude_level", 0))
     clearance = float(mission.get("clearance_agl_level", 1.0))
-    step = float(mission.get("cruise_band_step", 0.025) or 0.025)
+    step = float(mission.get("cruise_band_step", 0.02) or 0.02)
     cruise_levels = cruise_agl_band_grid(
         clearance,
         min_level,
@@ -234,9 +236,10 @@ def analyze_run(run_dir: Path) -> dict:
     }
 
 
-def run_scenario(name: str, runs_dir: Path) -> Path:
+def run_scenario(name: str, runs_dir: Path, *, n_jobs: int | None = None) -> Path:
     stamp = datetime.now().strftime("%H%M%S")
-    run_name = f"eval-{name}-{stamp}"
+    # Unique across parallel workers (same-second collisions otherwise).
+    run_name = f"eval-{name}-{stamp}-{os.getpid()}"
     cmd = [
         str(ROOT / ".venv-linux" / "bin" / "python"),
         "-m",
@@ -251,11 +254,21 @@ def run_scenario(name: str, runs_dir: Path) -> Path:
         "--scenario",
         name,
     ]
-    env = dict(**{k: v for k, v in __import__("os").environ.items()})
+    env = dict(os.environ)
     env.setdefault(
         "LD_LIBRARY_PATH",
         "/nix/store/f7pc134264jj4id4jnqpadzl0nnnayj7-ld-library-path/share/nix-ld/lib",
     )
+    # Cap nested BLAS / XGB threads when many scenarios run concurrently.
+    if n_jobs is not None:
+        jobs = str(max(1, int(n_jobs)))
+        env["WINDFARM_N_JOBS"] = jobs
+        env["OMP_NUM_THREADS"] = jobs
+        env["MKL_NUM_THREADS"] = jobs
+        env["OPENBLAS_NUM_THREADS"] = jobs
+        env["NUMEXPR_NUM_THREADS"] = jobs
+    # Eval does not need 70MB+ HTML dashboards.
+    env.setdefault("WINDFARM_SKIP_DASHBOARD", "1")
     print(f"\n=== running {name} → {run_name} ===", flush=True)
     subprocess.run(cmd, cwd=str(ROOT), env=env, check=True)
     return runs_dir / run_name
@@ -288,25 +301,41 @@ def main() -> None:
                 flush=True,
             )
     else:
-        for name in SCENARIOS:
-            scenario_dir = ROOT / "scenarios" / name
-            if not (scenario_dir / "terrain.json").exists():
-                print(f"skip missing scenario: {name}")
-                continue
-            run_dir = run_scenario(name, runs_dir)
-            row = analyze_run(run_dir)
-            results.append(row)
-            print(
-                f"  reached={row['goal_reached']} model={row['path_model_kJ']:.2f} kJ "
-                f"agl={row['baseline_nominal_kJ']:.2f}({row['baseline_nominal_band']}) "
-                f"best={row['baseline_best_kJ']:.2f}({row['baseline_best_band']}) "
-                f"save_vs_agl={row['savings_vs_nominal_pct']:+.1f}% "
-                f"save_vs_best={row['savings_vs_best_pct']:+.1f}% "
-                f"bat_diag={row['savings_battery_vs_nominal_pct']:+.1f}% "
-                f"z=[{row['z_min']:.2f},{row['z_max']:.2f}] mean={row['z_mean']:.2f} "
-                f"terrain↑={row['path_terrain_climb_m']:.0f}m",
-                flush=True,
-            )
+        names = [name for name in SCENARIOS if (ROOT / "scenarios" / name / "terrain.json").exists()]
+        max_workers = min(len(names), max(1, os.cpu_count() or 4))
+        # Split cores across concurrent scenario processes to avoid XGB/OpenMP thrash.
+        per_proc_jobs = max(1, (os.cpu_count() or 4) // max(max_workers, 1))
+        print(
+            f"parallel scenarios: {len(names)} workers={max_workers} "
+            f"WINDFARM_N_JOBS={per_proc_jobs}",
+            flush=True,
+        )
+        run_dirs: dict[str, Path] = {}
+        # Thread pool is enough: each scenario already launches its own process.
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(run_scenario, name, runs_dir, n_jobs=per_proc_jobs): name for name in names
+            }
+            for fut in as_completed(futures):
+                name = futures[fut]
+                run_dir = fut.result()
+                run_dirs[name] = run_dir
+                row = analyze_run(run_dir)
+                results.append(row)
+                print(
+                    f"  [{name}] reached={row['goal_reached']} model={row['path_model_kJ']:.2f} kJ "
+                    f"agl={row['baseline_nominal_kJ']:.2f}({row['baseline_nominal_band']}) "
+                    f"best={row['baseline_best_kJ']:.2f}({row['baseline_best_band']}) "
+                    f"save_vs_agl={row['savings_vs_nominal_pct']:+.1f}% "
+                    f"save_vs_best={row['savings_vs_best_pct']:+.1f}% "
+                    f"bat_diag={row['savings_battery_vs_nominal_pct']:+.1f}% "
+                    f"z=[{row['z_min']:.2f},{row['z_max']:.2f}] mean={row['z_mean']:.2f} "
+                    f"terrain↑={row['path_terrain_climb_m']:.0f}m",
+                    flush=True,
+                )
+        # Stable scenario order in summary.
+        order = {name: i for i, name in enumerate(SCENARIOS)}
+        results.sort(key=lambda r: order.get(r["scenario"], 999))
 
     summary = {
         "built_at": datetime.now().isoformat(timespec="seconds"),

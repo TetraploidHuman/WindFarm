@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import math
 import random
 
+import numpy as np
+
 from .io import write_json
 from .physics import downscale_wind
 from .terrain_tools import prepare_terrain
@@ -78,21 +80,36 @@ class EnvironmentSimulator:
         minute_index: int,
         w_km: float = 0.0,
         altitude_levels: int = 5,
+        *,
+        altitude_step_m: float = 50.0,
+        u_100: float | None = None,
+        v_100: float | None = None,
     ) -> tuple[list[list[list[float]]], list[list[list[float]]], list[list[list[float]]]]:
         height = len(terrain.elevation)
         width = len(terrain.elevation[0]) if height else 0
-        baseline, _ = downscale_wind(u_km, v_km, terrain, w_km, altitude_levels)
+        baseline, _ = downscale_wind(
+            u_km,
+            v_km,
+            terrain,
+            w_km,
+            altitude_levels,
+            altitude_step_m=altitude_step_m,
+            u_100=u_100,
+            v_100=v_100,
+        )
+        u_arr = np.asarray(baseline.u, dtype=np.float64)
+        v_arr = np.asarray(baseline.v, dtype=np.float64)
+        w_arr = np.asarray(baseline.w, dtype=np.float64)
         truth_u = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(altitude_levels)]
         truth_v = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(altitude_levels)]
         truth_w = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(altitude_levels)]
         for level in range(altitude_levels):
-            level_ratio = 0.0 if altitude_levels == 1 else level / (altitude_levels - 1)
             for y in range(height):
                 for x in range(width):
                     du, dv, dw = self._truth_delta(terrain, u_km, v_km, minute_index, x, y, level, altitude_levels)
-                    truth_u[level][y][x] = baseline.u[level][y][x] + du
-                    truth_v[level][y][x] = baseline.v[level][y][x] + dv
-                    truth_w[level][y][x] = baseline.w[level][y][x] + dw
+                    truth_u[level][y][x] = float(u_arr[level, y, x]) + du
+                    truth_v[level][y][x] = float(v_arr[level, y, x]) + dv
+                    truth_w[level][y][x] = float(w_arr[level, y, x]) + dw
         return truth_u, truth_v, truth_w
 
     def truth_at_cell(
@@ -203,11 +220,27 @@ class EnvironmentSimulator:
                 u_km = float(sample["u_km"])
                 v_km = float(sample["v_km"])
                 w_km = float(sample.get("w_km", 0.0))
+                u_100 = float(sample["u100_km"]) if sample.get("u100_km") is not None else None
+                v_100 = float(sample["v100_km"]) if sample.get("v100_km") is not None else None
                 timestamp = str(sample.get("timestamp", timestamp))
             else:
                 u_km, v_km, w_km = self.coarse_wind_at(minute_index)
-            coarse_wind_out.append({"timestamp": timestamp, "u_km": u_km, "v_km": v_km, "w_km": w_km})
-            truth_u, truth_v, truth_w = self.truth_field(terrain, u_km, v_km, minute_index, w_km)
+                u_100 = v_100 = None
+            out_sample = {"timestamp": timestamp, "u_km": u_km, "v_km": v_km, "w_km": w_km}
+            if u_100 is not None and v_100 is not None:
+                out_sample["u100_km"] = u_100
+                out_sample["v100_km"] = v_100
+            coarse_wind_out.append(out_sample)
+            truth_u, truth_v, truth_w = self.truth_field(
+                terrain,
+                u_km,
+                v_km,
+                minute_index,
+                w_km,
+                altitude_step_m=resolution_m,
+                u_100=u_100,
+                v_100=v_100,
+            )
             altitude_levels = len(truth_u)
             for z in range(altitude_levels):
                 for y in range(height):

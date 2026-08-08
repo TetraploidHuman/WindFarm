@@ -1,23 +1,51 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import heapq
 import math
+import os
+
+import numpy as np
 
 from .altitude import (
     cruise_agl_band_grid,
     cruise_agl_floor,
     format_agl_band_token,
+    sample_elevation,
     snap_cruise_agl,
+    straight_agl_guide_polyline,
+    terrain_climb_along_line_batch,
     terrain_climb_along_line_m,
     terrain_delta_m,
+    terrain_delta_m_batch,
 )
-from .controller import DEFAULT_ENVELOPE, best_thermalling_bank, clamp_airspeed, propagate_control, transition_energy_j
-from .mathutils import clamp
+from .belief import ensure_belief_field_arrays, pack_belief_field
+from .controller import (
+    DEFAULT_ENVELOPE,
+    best_thermalling_bank,
+    clamp_airspeed,
+    propagate_control,
+    transition_energy_batch,
+    transition_energy_j,
+)
+from .mathutils import clamp, trilinear_sample, trilinear_sample_batch
 from .types import BeliefMap, DroneState, Mission
 
 
 State3D = tuple[int, int, int]
+
+_BELIEF_SAMPLE_ATTRS = (
+    "wind_u",
+    "wind_v",
+    "wind_w",
+    "expected_energy_gain",
+    "uncertainty",
+    "safety_penalty",
+    "mode_prob_uplift",
+    "mode_prob_sink",
+)
+_WIND_ATTRS = ("wind_u", "wind_v", "wind_w")
 
 
 @dataclass(slots=True)
@@ -80,14 +108,14 @@ def transition_cost_breakdown(
 ) -> CostBreakdown:
     cx, cy, cz = current
     nx, ny, nz = nxt
-    cell = belief_map.cells[nz][ny][nx]
+    cell = _sample_belief_state(belief_map, float(nx), float(ny), float(nz))
     move_dx = nx - cx
     move_dy = ny - cy
     move_dz = nz - cz
     move_norm = max(math.hypot(move_dx, move_dy), 1e-6)
-    tailwind = (cell.wind_u * (move_dx / move_norm)) + (cell.wind_v * (move_dy / move_norm))
+    tailwind = (cell["wind_u"] * (move_dx / move_norm)) + (cell["wind_v"] * (move_dy / move_norm))
     wind_reward = max(-8.0, min(8.0, tailwind))
-    vertical_reward = 2.2 * cell.wind_w - 0.6 * max(move_dz, 0)
+    vertical_reward = 2.2 * cell["wind_w"] - 0.6 * max(move_dz, 0)
     horizontal_to_goal = math.hypot(mission.goal[0] - nx, mission.goal[1] - ny)
     altitude_bias_reward = _altitude_bonus(nz, mission, x=nx, y=ny, belief_cell=cell, move_dx=move_dx, move_dy=move_dy)
     # Only push toward goal altitude on final approach; cruise focuses on wind-efficient bands.
@@ -100,9 +128,9 @@ def transition_cost_breakdown(
         airspeed=mission.nominal_airspeed,
         current=current,
         nxt=nxt,
-        local_u=cell.wind_u,
-        local_v=cell.wind_v,
-        local_w=cell.wind_w,
+        local_u=cell["wind_u"],
+        local_v=cell["wind_v"],
+        local_w=cell["wind_w"],
         step_distance_m=mission.step_distance_m,
         altitude_step_m=mission.altitude_step_m,
         climb_cost_per_level_j=mission.climb_cost_per_level_j,
@@ -115,10 +143,10 @@ def transition_cost_breakdown(
         terrain_dz_m=_mission_terrain_dz(mission, cx, cy, nx, ny),
     )
     progress_reward = 18.0 * (
-        cell.expected_energy_gain + 0.35 * wind_reward + vertical_reward + altitude_goal_reward
+        cell["expected_energy_gain"] + 0.35 * wind_reward + vertical_reward + altitude_goal_reward
     )
-    uncertainty_cost = 22.0 * risk_weight * max(cell.uncertainty, 0.0)
-    safety_cost = 28.0 * safety_weight * cell.safety_penalty
+    uncertainty_cost = 22.0 * risk_weight * max(cell["uncertainty"], 0.0)
+    safety_cost = 28.0 * safety_weight * cell["safety_penalty"]
     altitude_bias_cost = -22.0 * altitude_bias_reward
     vertical_maneuver_cost = mission.climb_cost_per_level_j * max(move_dz, 0) + 0.2 * mission.climb_cost_per_level_j * max(-move_dz, 0)
     goal_altitude_direction = goal_altitude_gap(current, mission) - goal_altitude_gap(nxt, mission)
@@ -129,7 +157,7 @@ def transition_cost_breakdown(
             vertical_maneuver_cost -= 0.9 * mission.climb_cost_per_level_j * abs(goal_altitude_direction)
     else:
         # Cruise: climbing into helpful wind is cheap; climbing into headwind/sink is expensive.
-        if move_dz > 0 and (cell.wind_w > 0.15 or wind_reward > 0.5):
+        if move_dz > 0 and (cell["wind_w"] > 0.15 or wind_reward > 0.5):
             vertical_maneuver_cost *= 0.35
         elif move_dz > 0 and wind_reward < -0.5:
             vertical_maneuver_cost *= 1.4
@@ -164,80 +192,147 @@ def estimate_energy_to_goal_j(
     When probe_corridors=True and a belief map is available, also scores mild
     lateral offsets and returns the cheapest option.
     """
-    dx = goal[0] - point[0]
-    dy = goal[1] - point[1]
-    horiz_cells = math.hypot(dx, dy)
+    energies = estimate_energies_to_goal_batch(
+        [point],
+        goal,
+        mission,
+        belief_map=belief_map,
+        local_winds=[local_wind] if local_wind is not None else None,
+        probe_corridors=probe_corridors,
+    )
+    return float(energies[0])
 
-    def _segment_energy(x0: float, y0: float, x1: float, y1: float, z: float) -> float:
-        horizontal_dist_m = math.hypot(x1 - x0, y1 - y0) * mission.step_distance_m
-        if horizontal_dist_m <= 1e-6:
-            return 0.0
-        airspeed = max(mission.nominal_airspeed, 4.0)
-        bearing = math.atan2(y1 - y0, x1 - x0)
-        tailwind = 0.0
+
+def estimate_energies_to_goal_batch(
+    points: list[tuple[float, float, float]],
+    goal: State3D,
+    mission: Mission,
+    belief_map: BeliefMap | None = None,
+    local_winds: list[dict[str, float] | None] | None = None,
+    probe_corridors: bool = False,
+) -> list[float]:
+    """Batch residual energy-to-goal for many points (same goal)."""
+    if not points:
+        return []
+    gx, gy, gz = float(goal[0]), float(goal[1]), float(goal[2])
+    n = len(points)
+    # Light path: no belief → closed form from local wind / nominal.
+    if belief_map is None:
+        out: list[float] = []
+        for i, point in enumerate(points):
+            local = None if local_winds is None else local_winds[i]
+            out.append(_segment_energy_closed(point, (gx, gy, gz), mission, local))
+        return out
+
+    fracs = (0.2, 0.55, 0.85)
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
+    meta: list[tuple[float, float, float, float, float]] = []  # x0,y0,x1,y1,z
+    for point in points:
+        x0, y0, z = float(point[0]), float(point[1]), float(point[2])
+        meta.append((x0, y0, gx, gy, z))
+        for f in fracs:
+            xs.append(x0 + f * (gx - x0))
+            ys.append(y0 + f * (gy - y0))
+            zs.append(z)
+    wind = _sample_wind_batch(belief_map, xs, ys, zs)
+    wu = np.asarray(wind["wind_u"], dtype=np.float64).reshape(n, 3)
+    wv = np.asarray(wind["wind_v"], dtype=np.float64).reshape(n, 3)
+    ww = np.asarray(wind["wind_w"], dtype=np.float64).reshape(n, 3)
+    xs0 = np.asarray([m[0] for m in meta], dtype=np.float64)
+    ys0 = np.asarray([m[1] for m in meta], dtype=np.float64)
+    xs1 = np.asarray([m[2] for m in meta], dtype=np.float64)
+    ys1 = np.asarray([m[3] for m in meta], dtype=np.float64)
+    zs_arr = np.asarray([m[4] for m in meta], dtype=np.float64)
+    dx = xs1 - xs0
+    dy = ys1 - ys0
+    horiz_m = np.hypot(dx, dy) * mission.step_distance_m
+    bearings = np.arctan2(dy, dx)
+    cos_b = np.cos(bearings)
+    sin_b = np.sin(bearings)
+    tw = np.mean(wu * cos_b[:, None] + wv * sin_b[:, None], axis=1)
+    uplift = np.mean(ww, axis=1)
+    airspeed = max(mission.nominal_airspeed, 4.0)
+    groundspeed = np.maximum(4.0, airspeed + tw)
+    time_s = np.where(horiz_m > 1e-6, horiz_m / groundspeed, 0.0)
+    headwind = np.maximum(0.0, -tw)
+    nominal_power_w = (
+        mission.cruise_power_w
+        + mission.hotel_power_w
+        + mission.headwind_power_per_mps_w * headwind
+        - 18.0 * np.maximum(0.0, uplift)
+    )
+    base = time_s * np.maximum(40.0, nominal_power_w)
+    dz_levels = gz - zs_arr
+    climb = np.where(
+        dz_levels >= 0.0,
+        dz_levels * mission.climb_cost_per_level_j,
+        dz_levels * mission.altitude_step_m * mission.descent_power_reduction_per_mps_w,
+    )
+    base = base + climb
+    elev = getattr(mission, "elevation", None)
+    if elev is not None:
+        rises = terrain_climb_along_line_batch(elev, xs0, ys0, xs1, ys1, samples=3)
+        climb_scale = mission.climb_cost_per_level_j / max(mission.altitude_step_m, 1e-6)
+        base = base + np.where(horiz_m > 1e-6, rises * climb_scale, 0.0)
+    out = base.tolist()
+
+    if probe_corridors and belief_map is not None:
+        for i, (x0, y0, x1, y1, z) in enumerate(meta):
+            horiz_cells = math.hypot(gx - x0, gy - y0)
+            if horiz_cells <= 6.0:
+                continue
+            px, py = -(gy - y0) / horiz_cells, (gx - x0) / horiz_cells
+            for sign in (-1.0, 1.0):
+                via = (x0 + 0.5 * (gx - x0) + sign * 1.5 * px, y0 + 0.5 * (gy - y0) + sign * 1.5 * py, z)
+                via_e = estimate_energy_to_goal_j(via, goal, mission, belief_map=belief_map, probe_corridors=False)
+                out[i] = min(
+                    out[i],
+                    via_e + 35.0 * 1.5 * mission.step_distance_m / max(mission.nominal_airspeed, 4.0),
+                )
+    return out
+
+
+def _segment_energy_closed(
+    point: tuple[float, float, float],
+    goal: tuple[float, float, float],
+    mission: Mission,
+    local_wind: dict[str, float] | None,
+) -> float:
+    x0, y0, z = float(point[0]), float(point[1]), float(point[2])
+    gx, gy, gz = goal
+    horiz_m = math.hypot(gx - x0, gy - y0) * mission.step_distance_m
+    if horiz_m <= 1e-6:
+        base = 0.0
+    else:
+        bearing = math.atan2(gy - y0, gx - x0)
+        tw = 0.0
         uplift = 0.0
-        if belief_map is not None:
-            # Along-track wind samples for residual energy (kept light for the MPC loop).
-            for frac in (0.2, 0.55, 0.85):
-                sx = x0 + frac * (x1 - x0)
-                sy = y0 + frac * (y1 - y0)
-                local = _sample_belief_state(belief_map, sx, sy, z)
-                tw = local["wind_u"] * math.cos(bearing) + local["wind_v"] * math.sin(bearing)
-                tailwind += tw
-                uplift += local["wind_w"]
-            tailwind /= 3.0
-            uplift /= 3.0
-        elif local_wind is not None:
-            tailwind = local_wind.get("wind_u", 0.0) * math.cos(bearing) + local_wind.get("wind_v", 0.0) * math.sin(bearing)
+        if local_wind is not None:
+            tw = local_wind.get("wind_u", 0.0) * math.cos(bearing) + local_wind.get("wind_v", 0.0) * math.sin(bearing)
             uplift = float(local_wind.get("wind_w", 0.0))
-        groundspeed = max(4.0, airspeed + tailwind)
-        time_s = horizontal_dist_m / groundspeed
-        headwind = max(0.0, -tailwind)
+        airspeed = max(mission.nominal_airspeed, 4.0)
+        groundspeed = max(4.0, airspeed + tw)
+        time_s = horiz_m / groundspeed
+        headwind = max(0.0, -tw)
         nominal_power_w = (
             mission.cruise_power_w
             + mission.hotel_power_w
             + mission.headwind_power_per_mps_w * headwind
             - 18.0 * max(0.0, uplift)
         )
-        energy_horizontal_j = time_s * max(40.0, nominal_power_w)
+        base = time_s * max(40.0, nominal_power_w)
         terrain_rise_m = terrain_climb_along_line_m(
-            getattr(mission, "elevation", None),
-            x0,
-            y0,
-            x1,
-            y1,
-            samples=4,
+            getattr(mission, "elevation", None), x0, y0, gx, gy, samples=3
         )
-        energy_vertical_j = (terrain_rise_m / max(mission.altitude_step_m, 1e-6)) * mission.climb_cost_per_level_j
-        return energy_horizontal_j + energy_vertical_j
-
-    # Straight residual + AGL align.
-    straight = _segment_energy(point[0], point[1], goal[0], goal[1], point[2])
-    dz_levels = goal[2] - point[2]
+        base += (terrain_rise_m / max(mission.altitude_step_m, 1e-6)) * mission.climb_cost_per_level_j
+    dz_levels = gz - z
     if dz_levels >= 0:
-        straight += dz_levels * mission.climb_cost_per_level_j
+        base += dz_levels * mission.climb_cost_per_level_j
     else:
-        straight += dz_levels * mission.altitude_step_m * mission.descent_power_reduction_per_mps_w
-
-    best = straight
-    if probe_corridors and belief_map is not None and horiz_cells > 6.0:
-        px, py = -dy / horiz_cells, dx / horiz_cells
-        for sign in (-1.0, 1.0):
-            mx = clamp(point[0] + 0.5 * dx + sign * 2.0 * px, 0.0, belief_map.width - 1)
-            my = clamp(point[1] + 0.5 * dy + sign * 2.0 * py, 0.0, belief_map.height - 1)
-            via = (
-                _segment_energy(point[0], point[1], mx, my, point[2])
-                + _segment_energy(mx, my, goal[0], goal[1], point[2])
-            )
-            if dz_levels >= 0:
-                via += dz_levels * mission.climb_cost_per_level_j
-            else:
-                via += dz_levels * mission.altitude_step_m * mission.descent_power_reduction_per_mps_w
-            detour = (math.hypot(mx - point[0], my - point[1]) + math.hypot(goal[0] - mx, goal[1] - my)) - horiz_cells
-            via += 35.0 * max(0.0, detour) * mission.step_distance_m / max(mission.nominal_airspeed, 4.0)
-            best = min(best, via)
-
-    return max(0.0, best)
+        base += dz_levels * mission.altitude_step_m * mission.descent_power_reduction_per_mps_w
+    return base
 
 
 def plan_path(
@@ -286,66 +381,128 @@ def plan_path_details(
     branch_width: int = 10,
     discount_factor: float = 0.93,
     terminal_progress_weight: float = 24.0,
+    return_cost_map_cache: object | None = None,
 ) -> dict:
+    # Prefer ndarray elevation for vectorized terrain queries during this plan.
+    # Mutate in place — do not replace(mission): sticky fields (preferred_cruise_agl,
+    # guide_via) must remain on the caller-owned Mission object.
+    elev_src = getattr(mission, "elevation", None)
+    if elev_src is not None and not isinstance(elev_src, np.ndarray):
+        mission.elevation = np.asarray(elev_src, dtype=np.float64)
+
     start = _continuous_state_tuple(mission.start)
     goal = normalize_state(mission.goal)
     horizontal_to_goal = math.hypot(goal[0] - start[0], goal[1] - start[1])
-    # Near the goal, prioritize finishing the approach over strict return feasibility.
-    use_return_map = mission.home is not None and mission.max_return_cost_j is not None and horizontal_to_goal > 8.0
-    return_cost_map = compute_return_cost_map(belief_map, mission) if use_return_map else None
-    strict_result = _run_anytime_continuous_mpc(
-        belief_map=belief_map,
-        mission=mission,
-        risk_weight=risk_weight,
-        safety_weight=safety_weight,
-        anytime_rounds=anytime_rounds,
-        heuristic_weight_start=heuristic_weight_start,
-        heuristic_weight_end=heuristic_weight_end,
-        search_node_budget=search_node_budget,
-        horizon_steps=horizon_steps,
-        beam_width=beam_width,
-        branch_width=branch_width,
-        discount_factor=discount_factor,
-        terminal_progress_weight=terminal_progress_weight,
-        return_cost_map=return_cost_map,
-        candidate_mode="strict_return",
+    guide_horizon_cells = 50.0 / max(float(mission.step_distance_m), 1e-6)
+    # Overlap independent subtasks (shared read-only belief): guides ∥ return-map, then MPC.
+    # Full Dijkstra is expensive on fine grids — only when the return budget is actually tight.
+    use_return_map = (
+        mission.home is not None
+        and mission.max_return_cost_j is not None
+        and horizontal_to_goal > 8.0
+        and _return_budget_is_tight(mission, start, goal)
     )
-    best_path = strict_result["path"]
-    candidates = strict_result["candidates"]
-    planning_mode = "mpc_strict_return"
+    want_guides = horizontal_to_goal > guide_horizon_cells
+    sticky_cruise = getattr(mission, "preferred_cruise_agl", None)
+    # After the first guide commit, energy guides dominate open-cruise legs — seed with
+    # greedy progress instead of multi-round MPC (guides still override below).
+    sticky_open_cruise = (
+        sticky_cruise is not None
+        and want_guides
+        and not use_return_map
+        and horizontal_to_goal > max(guide_horizon_cells, 8.0)
+    )
+    guide_future = None
+    return_future = None
+    pool: ThreadPoolExecutor | None = None
+    return_cost_map = return_cost_map_cache if (use_return_map and return_cost_map_cache is not None) else None
+    need_return_compute = use_return_map and return_cost_map is None
+    workers = int(want_guides) + int(need_return_compute)
+    # Under parallel multi-scenario eval, prefer single-threaded planner helpers
+    # (parent already saturates cores with several run-demo processes).
+    if os.environ.get("WINDFARM_N_JOBS") and workers > 1:
+        workers = 1
+    if workers > 0:
+        pool = ThreadPoolExecutor(max_workers=workers)
+        if want_guides:
+            guide_future = pool.submit(_energy_guide_paths, start, goal, belief_map, mission)
+        if need_return_compute:
+            if workers == 1 and want_guides:
+                # Guides already submitted; compute return map on this thread after/with overlap via result order.
+                return_future = None
+                return_cost_map = compute_return_cost_map(belief_map, mission)
+            else:
+                return_future = pool.submit(compute_return_cost_map, belief_map, mission)
 
-    needs_relaxed = return_cost_map is not None and (
-        not best_path
-        or len(best_path) <= 1
-        or not _continuous_goal_reached(best_path[-1], goal)
-    )
-    if needs_relaxed or horizontal_to_goal <= 8.0:
-        relaxed_result = _run_anytime_continuous_mpc(
+    if return_future is not None:
+        return_cost_map = return_future.result()
+
+    candidates: list[dict] = []
+    if sticky_open_cruise:
+        best_path = _greedy_progress_path(start, goal, belief_map, mission)
+        planning_mode = "greedy_progress"
+        candidates.append(
+            {
+                "mode": planning_mode,
+                "path": best_path,
+                "path_cost": 0.0,
+                "note": "sticky_cruise_skip_mpc",
+            }
+        )
+    else:
+        strict_result = _run_anytime_continuous_mpc(
             belief_map=belief_map,
             mission=mission,
             risk_weight=risk_weight,
             safety_weight=safety_weight,
-            anytime_rounds=max(2, anytime_rounds),
+            anytime_rounds=anytime_rounds,
             heuristic_weight_start=heuristic_weight_start,
             heuristic_weight_end=heuristic_weight_end,
-            search_node_budget=max(search_node_budget // 2, 2000),
+            search_node_budget=search_node_budget,
             horizon_steps=horizon_steps,
-            beam_width=max(beam_width // 2, 8),
+            beam_width=beam_width,
             branch_width=branch_width,
             discount_factor=discount_factor,
-            terminal_progress_weight=terminal_progress_weight * 1.35,
-            return_cost_map=None,
-            candidate_mode="relaxed_return",
+            terminal_progress_weight=terminal_progress_weight,
+            return_cost_map=return_cost_map,
+            candidate_mode="strict_return",
         )
-        candidates.extend(relaxed_result["candidates"])
-        if relaxed_result["path"] and (
-            _continuous_goal_reached(relaxed_result["path"][-1], goal)
+        best_path = strict_result["path"]
+        candidates = strict_result["candidates"]
+        planning_mode = "mpc_strict_return"
+
+        needs_relaxed = return_cost_map is not None and (
+            not best_path
             or len(best_path) <= 1
-            or heuristic(_continuous_state_tuple(relaxed_result["path"][-1]), goal, mission)
-            < heuristic(_continuous_state_tuple(best_path[-1]), goal, mission)
-        ):
-            best_path = relaxed_result["path"]
-            planning_mode = "mpc_relaxed_return"
+            or not _continuous_goal_reached(best_path[-1], goal)
+        )
+        if needs_relaxed or horizontal_to_goal <= 8.0:
+            relaxed_result = _run_anytime_continuous_mpc(
+                belief_map=belief_map,
+                mission=mission,
+                risk_weight=risk_weight,
+                safety_weight=safety_weight,
+                anytime_rounds=max(2, anytime_rounds),
+                heuristic_weight_start=heuristic_weight_start,
+                heuristic_weight_end=heuristic_weight_end,
+                search_node_budget=max(search_node_budget // 2, 2000),
+                horizon_steps=horizon_steps,
+                beam_width=max(beam_width // 2, 8),
+                branch_width=branch_width,
+                discount_factor=discount_factor,
+                terminal_progress_weight=terminal_progress_weight * 1.35,
+                return_cost_map=None,
+                candidate_mode="relaxed_return",
+            )
+            candidates.extend(relaxed_result["candidates"])
+            if relaxed_result["path"] and (
+                _continuous_goal_reached(relaxed_result["path"][-1], goal)
+                or len(best_path) <= 1
+                or heuristic(_continuous_state_tuple(relaxed_result["path"][-1]), goal, mission)
+                < heuristic(_continuous_state_tuple(best_path[-1]), goal, mission)
+            ):
+                best_path = relaxed_result["path"]
+                planning_mode = "mpc_relaxed_return"
 
     best_path = best_path[: mission.max_steps + 1]
     if len(best_path) <= 1:
@@ -353,13 +510,13 @@ def plan_path_details(
         planning_mode = "greedy_progress"
 
     # Energy floor: multi-band straight AGL + lateral corridors vs MPC, same transition model.
-    # Keep guides through the baseline descent window (last ~12% of the mission).
-    guide_horizon_cells = 0.5
-    guide_paths = (
-        _energy_guide_paths(start, goal, belief_map, mission)
-        if horizontal_to_goal > guide_horizon_cells
-        else []
-    )
+    guide_paths: list[tuple[str, list[tuple[float, float, float]]]] = []
+    try:
+        if guide_future is not None:
+            guide_paths = guide_future.result()
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False)
     ranked = []
     mpc_completed_energy = math.inf
     if best_path and len(best_path) > 1:
@@ -371,55 +528,101 @@ def plan_path_details(
     best_label = planning_mode
     chosen = best_path
     clearance = float(getattr(mission, "clearance_agl_level", 1.0))
-    straight_energies: dict[float, float] = {}
-    straight_paths: dict[float, tuple[str, list[tuple[float, float, float]]]] = {}
+    straight_items: list[tuple[float, str, list[tuple[float, float, float]]]] = []
     for label, path in guide_paths:
         if not label.startswith("guide_straight_agl") or not path or len(path) <= 1:
             continue
         cruise_z = _cruise_z_from_guide_label(label, clearance, mission)
-        energy = _completed_plan_energy_j(path, goal, belief_map, mission)
-        straight_energies[cruise_z] = energy
-        straight_paths[cruise_z] = (label, path)
+        straight_items.append((cruise_z, label, path))
+    straight_energies: dict[float, float] = {}
+    straight_paths: dict[float, tuple[str, list[tuple[float, float, float]]]] = {}
+    if straight_items:
+        energies = _completed_plans_energy_j([p for _, _, p in straight_items], goal, belief_map, mission)
+        for (cruise_z, label, path), energy in zip(straight_items, energies):
+            straight_energies[cruise_z] = energy
+            straight_paths[cruise_z] = (label, path)
     straight_guide_energy = min(straight_energies.values()) if straight_energies else math.inf
     bands = list(straight_energies.keys()) if straight_energies else _cruise_band_candidates(belief_map, mission)
-    cruise_fair = _band_selection_scores(start, goal, belief_map, mission, bands)
+    sticky_for_scores = getattr(mission, "preferred_cruise_agl", None)
+    if sticky_for_scores is not None and bands:
+        # Keep sticky/clearance fine patches and any coarse-span probes (layer discovery).
+        coarse = 0.25
+        near = []
+        for z in bands:
+            zf = float(z)
+            on_coarse = abs(zf / coarse - round(zf / coarse)) <= 1e-9
+            if (
+                abs(zf - float(sticky_for_scores)) <= 0.40 + 1e-9
+                or abs(zf - clearance) <= 0.15 + 1e-9
+                or on_coarse
+            ):
+                near.append(z)
+        if near:
+            bands = near
     step = _cruise_band_step(mission)
-    select_scores = straight_energies if straight_energies else cruise_fair
-    # Fine grids: mild prior against climbing — each level above clearance must
-    # beat the floor band by ~1.5% of floor energy on the same path model.
+    # Primary selector: full-path straight energies (same transition model as eval).
+    # Mid-cruise descent thrash is handled by asymmetric sticky margins below — not by
+    # switching to cruise-fair (that under-penalizes climb and re-locks ~AGL3).
+    if straight_energies:
+        select_scores = {z: straight_energies[z] for z in bands if z in straight_energies}
+        if not select_scores:
+            select_scores = dict(straight_energies)
+        cruise_fair: dict[float, float] = {}
+    else:
+        cruise_fair = _band_selection_scores(start, goal, belief_map, mission, bands)
+        select_scores = cruise_fair
+    # Tiny climb prior — break exact ties toward clearance (not a hard preference).
     if select_scores and step <= 0.26 + 1e-12:
         floor_z = min(select_scores.keys(), key=lambda z: abs(z - clearance))
         floor_e = max(select_scores[floor_z], 1.0)
-        pen = 0.015 * floor_e
+        pen = 0.002 * floor_e
         select_scores = {
             z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
+        }
+    sticky_now = getattr(mission, "preferred_cruise_agl", None)
+    sz_now = float(start[2])
+    # Cancel aero-descent optimism when already established in cruise.
+    if sticky_now is not None and sz_now >= clearance + 0.25 and select_scores and horizontal_to_goal > 8.0:
+        climb_cost = float(getattr(mission, "climb_cost_per_level_j", 180.0))
+        hold = min(sz_now, float(sticky_now))
+        select_scores = {
+            z: e + climb_cost * max(0.0, hold - float(z))
+            for z, e in select_scores.items()
         }
     selected_band = _select_preferred_cruise_band(
         select_scores,
         sticky=getattr(mission, "preferred_cruise_agl", None),
         clearance=clearance,
         remaining_horiz=horizontal_to_goal,
-        tiebreak_scores=cruise_fair,
+        tiebreak_scores=straight_energies if straight_energies else cruise_fair,
         band_step=step,
     )
-    # Keep preferred near the selection-score argmin (includes fine-grid climb prior).
-    if selected_band is not None and select_scores:
-        argmin_z = float(min(select_scores.keys(), key=lambda z: select_scores[z]))
-        argmin_e = select_scores[argmin_z]
-        sel_e = select_scores.get(selected_band, math.inf)
-        if sel_e > argmin_e * 1.008:
-            selected_band = argmin_z
-        elif selected_band > argmin_z + step + 1e-9:
-            if sel_e > argmin_e * 1.004:
-                selected_band = argmin_z
-            else:
-                selected_band = float(min(selected_band, argmin_z + step))
+    # Soft rate-limit only — evidence gates live in _select_preferred_cruise_band.
+    sticky_now = getattr(mission, "preferred_cruise_agl", None)
+    if sticky_now is not None and selected_band is not None and horizontal_to_goal > 10.0:
+        lo = float(sticky_now) - 0.35
+        hi = float(sticky_now) + 0.35
+        selected_band = float(min(max(float(selected_band), lo), hi))
+    elif sticky_now is not None and selected_band is not None:
+        # Approach: allow faster descent than climb.
+        selected_band = float(min(float(selected_band), float(sticky_now)))
+        selected_band = float(max(float(selected_band), float(sticky_now) - 0.50))
     preferred_straight_energy = (
         straight_energies.get(selected_band, straight_guide_energy)
         if selected_band is not None
         else straight_guide_energy
     )
+    # If selected band is missing from path table (shouldn't), rebuild from fair z.
+    if selected_band is not None and selected_band not in straight_paths:
+        label = _straight_guide_label(selected_band, clearance, step=step)
+        path = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=selected_band)
+        if len(path) > 1:
+            straight_paths[selected_band] = (label, path)
+            e = _completed_plan_energy_j(path, goal, belief_map, mission)
+            straight_energies[selected_band] = e
+            preferred_straight_energy = e
     band_eps = max(1e-6, 0.51 * step)
+    ranked_candidates: list[tuple[str, list[tuple[float, float, float]]]] = []
     for label, path in ranked:
         if not path or len(path) <= 1:
             continue
@@ -430,18 +633,28 @@ def plan_path_details(
             goal,
         ) < 0.05 and math.hypot(goal[0] - start[0], goal[1] - start[1]) > 1.0:
             continue
-        energy = _completed_plan_energy_j(path, goal, belief_map, mission)
+        ranked_candidates.append((label, path))
+    ranked_energies = (
+        _completed_plans_energy_j([path for _, path in ranked_candidates], goal, belief_map, mission)
+        if ranked_candidates
+        else []
+    )
+    for (label, path), energy in zip(ranked_candidates, ranked_energies):
         floor_e = preferred_straight_energy if preferred_straight_energy < math.inf else straight_guide_energy
         # Universal hard floor: never commit below the preferred straight AGL band.
         if not label.startswith("guide_straight_agl") and floor_e < math.inf and energy > floor_e * 1.001:
             continue
         if label.startswith("guide_corridor_"):
-            # Elevated-cruise corridors still need a clear edge vs straight.
-            if floor_e < math.inf and energy > floor_e * 0.90:
+            # Same margin knob as generation (default 0.95); no extra 10%+ deadweight.
+            corr_m = getattr(mission, "corridor_energy_margin", None)
+            corr_m = 0.97 if corr_m is None else float(corr_m)
+            if corr_m <= 0.0:
                 continue
-            if mpc_completed_energy < math.inf and energy > mpc_completed_energy * 0.90:
+            if floor_e < math.inf and energy > floor_e * corr_m:
                 continue
-            energy += 0.05 * max(floor_e, energy)
+            if mpc_completed_energy < math.inf and energy > mpc_completed_energy * corr_m:
+                continue
+            energy += 0.01 * max(floor_e, energy)
         elif label.startswith("guide_straight_agl"):
             band = _cruise_z_from_guide_label(label, clearance, mission)
             if selected_band is not None and abs(band - selected_band) <= band_eps:
@@ -478,7 +691,7 @@ def plan_path_details(
             mission,
             cruise_ref,
             clearance,
-            band_energies=straight_energies,
+            band_energies=select_scores if select_scores else straight_energies,
         )
         if best_label.startswith("guide_corridor_"):
             via = None
@@ -507,7 +720,12 @@ def plan_path_details(
             }
         )
     elif selected_band is not None:
-        _commit_preferred_cruise(mission, selected_band, clearance, band_energies=straight_energies)
+        _commit_preferred_cruise(
+            mission,
+            selected_band,
+            clearance,
+            band_energies=select_scores if select_scores else straight_energies,
+        )
         if not str(best_label).startswith("guide_corridor_"):
             mission.guide_via = None
 
@@ -581,32 +799,76 @@ def _polyline_model_energy_j(
     mission: Mission,
 ) -> float:
     """Same accounting family as eval baselines: transition_energy_j + uplift discount."""
-    if len(path) <= 1:
-        return 0.0
-    total = 0.0
-    for cur, nxt in zip(path, path[1:]):
-        local = _sample_belief_state(belief_map, cur[0], cur[1], cur[2])
-        step = transition_energy_j(
-            airspeed=mission.nominal_airspeed,
-            current=cur,
-            nxt=nxt,
-            local_u=local["wind_u"],
-            local_v=local["wind_v"],
-            local_w=local["wind_w"],
-            step_distance_m=mission.step_distance_m,
-            altitude_step_m=mission.altitude_step_m,
-            climb_cost_per_level_j=mission.climb_cost_per_level_j,
-            hover_power_w=mission.hover_power_w,
-            cruise_power_w=mission.cruise_power_w,
-            hotel_power_w=mission.hotel_power_w,
-            headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
-            climb_power_per_mps_w=mission.climb_power_per_mps_w,
-            descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
-            terrain_dz_m=_mission_terrain_dz(mission, cur[0], cur[1], nxt[0], nxt[1]),
+    energies = _polylines_model_energy_j([path], belief_map, mission)
+    return energies[0] if energies else 0.0
+
+
+def _polylines_model_energy_j(
+    paths: list[list[tuple[float, float, float]]],
+    belief_map: BeliefMap,
+    mission: Mission,
+) -> list[float]:
+    """Batch-score many polylines in one transition_energy_batch call."""
+    if not paths:
+        return []
+    counts: list[int] = []
+    cur_rows: list[tuple[float, float, float]] = []
+    nxt_rows: list[tuple[float, float, float]] = []
+    for path in paths:
+        if len(path) <= 1:
+            counts.append(0)
+            continue
+        n = len(path) - 1
+        counts.append(n)
+        for a, b in zip(path, path[1:]):
+            cur_rows.append((float(a[0]), float(a[1]), float(a[2])))
+            nxt_rows.append((float(b[0]), float(b[1]), float(b[2])))
+    if not cur_rows:
+        return [0.0 for _ in paths]
+
+    currents = np.asarray(cur_rows, dtype=np.float64)
+    nexts = np.asarray(nxt_rows, dtype=np.float64)
+    samples = _sample_belief_states_batch(belief_map, currents[:, 0], currents[:, 1], currents[:, 2])
+    elev = getattr(mission, "elevation", None)
+    if elev is not None:
+        terrain_dz = terrain_delta_m_batch(
+            elev,
+            currents[:, 0],
+            currents[:, 1],
+            nexts[:, 0],
+            nexts[:, 1],
         )
-        step *= max(0.5, min(1.4, 1.0 - 0.20 * max(local["wind_w"], 0.0)))
-        total += step
-    return total
+    else:
+        terrain_dz = np.zeros(currents.shape[0], dtype=np.float64)
+    step_e = transition_energy_batch(
+        airspeed=mission.nominal_airspeed,
+        currents=currents,
+        nexts=nexts,
+        local_u=samples["wind_u"],
+        local_v=samples["wind_v"],
+        local_w=samples["wind_w"],
+        step_distance_m=mission.step_distance_m,
+        altitude_step_m=mission.altitude_step_m,
+        climb_cost_per_level_j=mission.climb_cost_per_level_j,
+        hover_power_w=mission.hover_power_w,
+        cruise_power_w=mission.cruise_power_w,
+        hotel_power_w=mission.hotel_power_w,
+        headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
+        climb_power_per_mps_w=mission.climb_power_per_mps_w,
+        descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
+        terrain_dz_m=terrain_dz,
+    )
+    uplift = np.clip(1.0 - 0.20 * np.maximum(samples["wind_w"], 0.0), 0.5, 1.4)
+    seg = step_e * uplift
+    out: list[float] = []
+    offset = 0
+    for n in counts:
+        if n <= 0:
+            out.append(0.0)
+        else:
+            out.append(float(np.sum(seg[offset : offset + n])))
+            offset += n
+    return out
 
 
 def _path_mean_uncertainty(
@@ -615,10 +877,9 @@ def _path_mean_uncertainty(
 ) -> float:
     if len(path) <= 1:
         return 1.0
-    total = 0.0
-    for cur in path[:-1]:
-        total += float(_sample_belief_state(belief_map, cur[0], cur[1], cur[2])["uncertainty"])
-    return total / float(len(path) - 1)
+    pts = np.asarray(path[:-1], dtype=np.float64)
+    samples = _sample_belief_states_batch(belief_map, pts[:, 0], pts[:, 1], pts[:, 2])
+    return float(np.mean(samples["uncertainty"]))
 
 
 def _polyline_risk_adjusted_energy_j(
@@ -649,24 +910,42 @@ def _completed_plan_energy_j(
     mission: Mission,
 ) -> float:
     """Polyline energy of path, finishing to goal with a constant-AGL guide if needed."""
-    energy = _polyline_model_energy_j(path, belief_map, mission)
-    if not path:
-        return energy
-    if _continuous_goal_reached(path[-1], goal):
-        return energy
+    return _completed_plans_energy_j([path], goal, belief_map, mission)[0]
+
+
+def _completed_plans_energy_j(
+    paths: list[list[tuple[float, float, float]]],
+    goal: State3D,
+    belief_map: BeliefMap,
+    mission: Mission,
+) -> list[float]:
+    """Batch version of _completed_plan_energy_j."""
+    if not paths:
+        return []
     clearance = float(getattr(mission, "clearance_agl_level", 1.0))
     cruise_z = getattr(mission, "preferred_cruise_agl", None)
-    finish = _agl_guide_polyline(
-        _continuous_state_tuple(path[-1]),
-        goal,
-        belief_map,
-        mission,
-        via_xy=None,
-        cruise_z=float(cruise_z) if cruise_z is not None else clearance,
-    )
-    if len(finish) > 1:
-        energy += _polyline_model_energy_j(finish, belief_map, mission)
-    return energy
+    cruise = float(cruise_z) if cruise_z is not None else clearance
+    extended: list[list[tuple[float, float, float]]] = []
+    for path in paths:
+        if not path:
+            extended.append([])
+            continue
+        if _continuous_goal_reached(path[-1], goal):
+            extended.append(path)
+            continue
+        finish = _agl_guide_polyline(
+            _continuous_state_tuple(path[-1]),
+            goal,
+            belief_map,
+            mission,
+            via_xy=None,
+            cruise_z=cruise,
+        )
+        if len(finish) > 1:
+            extended.append(list(path) + list(finish[1:]))
+        else:
+            extended.append(path)
+    return _polylines_model_energy_j(extended, belief_map, mission)
 
 
 def _agl_guide_polyline(
@@ -677,7 +956,11 @@ def _agl_guide_polyline(
     via_xy: tuple[float, float] | None = None,
     cruise_z: float | None = None,
 ) -> list[tuple[float, float, float]]:
-    """Constant-AGL guide: climb → (optional via) cruise → descend to goal."""
+    """Constant-AGL guide packed like eval `straight_agl_baseline`.
+
+    Coarse waypoint packing biases band ranking (elevated cruise looks worse than
+    it is). Use the same climb/hold/descend discretization as the energy metric.
+    """
     clearance = float(getattr(mission, "clearance_agl_level", 1.0))
     min_level, max_level = _search_level_bounds(belief_map, mission)
     if cruise_z is None:
@@ -685,73 +968,42 @@ def _agl_guide_polyline(
     cruise_z = clamp(float(cruise_z), float(min_level), float(max_level))
     sx, sy, sz = float(start[0]), float(start[1]), float(start[2])
     gx, gy, gz = float(goal[0]), float(goal[1]), float(goal[2])
-    dx, dy = gx - sx, gy - sy
-    horiz = math.hypot(dx, dy)
-    if horiz < 1e-6:
-        return [start, (gx, gy, gz)]
+    width = max(belief_map.width - 1, 0)
+    height = max(belief_map.height - 1, 0)
 
-    pts: list[tuple[float, float, float]] = [start]
-    # Climb while covering ~10% of XY.
-    if abs(cruise_z - sz) > 0.12 and horiz > 2.5:
-        t = min(0.12, 1.5 / horiz)
-        pts.append(
-            (
-                clamp(sx + dx * t, 0.0, belief_map.width - 1),
-                clamp(sy + dy * t, 0.0, belief_map.height - 1),
-                cruise_z,
+    def _clamp_path(pts: list[tuple[float, float, float]]) -> list[tuple[float, float, float]]:
+        out: list[tuple[float, float, float]] = []
+        for x, y, z in pts:
+            p = (
+                clamp(float(x), 0.0, float(width)),
+                clamp(float(y), 0.0, float(height)),
+                clamp(float(z), float(min_level), float(max_level)),
             )
-        )
-    if via_xy is not None and horiz > 5.0:
-        vx = clamp(via_xy[0], 0.0, belief_map.width - 1)
-        vy = clamp(via_xy[1], 0.0, belief_map.height - 1)
-        pts.append((vx, vy, cruise_z))
-        # Continue from the via toward the goal (do not snap back to the direct ray).
-        pts.append(
-            (
-                clamp(0.35 * vx + 0.65 * gx, 0.0, belief_map.width - 1),
-                clamp(0.35 * vy + 0.65 * gy, 0.0, belief_map.height - 1),
-                cruise_z,
-            )
-        )
-    else:
-        # Dense cruise samples so followers stay near the straight AGL ray.
-        # Hold cruise_z until the last ~12% (matches eval baseline descent window).
-        desc_frac = 0.12 if horiz > 4.0 else min(0.25, 1.5 / max(horiz, 1e-6))
-        cruise_end = max(0.2, 1.0 - desc_frac)
-        for frac in (0.22, 0.38, 0.52, 0.66, cruise_end):
-            if frac * horiz < 1.0:
+            if not out:
+                out.append(p)
                 continue
-            pts.append(
-                (
-                    clamp(sx + dx * frac, 0.0, belief_map.width - 1),
-                    clamp(sy + dy * frac, 0.0, belief_map.height - 1),
-                    cruise_z,
-                )
-            )
-    # Final approach / landing only after cruise_end (never insert a mid-path descent).
-    desc_frac = 0.12 if horiz > 4.0 else min(0.25, 1.5 / max(horiz, 1e-6))
-    cruise_end = max(0.2, 1.0 - desc_frac)
-    if horiz > 2.5 and desc_frac > 0.02:
-        t_mid = min(1.0, cruise_end + 0.5 * desc_frac)
-        pts.append(
-            (
-                clamp(sx + dx * t_mid, 0.0, belief_map.width - 1),
-                clamp(sy + dy * t_mid, 0.0, belief_map.height - 1),
-                clamp(0.55 * cruise_z + 0.45 * gz, float(min_level), float(max_level)),
-            )
-        )
-    pts.append((gx, gy, gz))
-    # Deduplicate near-identical consecutive points.
-    cleaned = [pts[0]]
-    for p in pts[1:]:
-        prev = cleaned[-1]
-        if math.hypot(p[0] - prev[0], p[1] - prev[1]) > 0.15 or abs(p[2] - prev[2]) > 0.1:
-            cleaned.append(p)
-    return cleaned
+            prev = out[-1]
+            if math.hypot(p[0] - prev[0], p[1] - prev[1]) > 0.02 or abs(p[2] - prev[2]) > 0.02:
+                out.append(p)
+        return out if out else [(sx, sy, sz)]
+
+    if via_xy is None or math.hypot(gx - sx, gy - sy) < 5.0:
+        return _clamp_path(straight_agl_guide_polyline((sx, sy, sz), (gx, gy, gz), agl_cruise=cruise_z))
+
+    vx = clamp(float(via_xy[0]), 0.0, float(width))
+    vy = clamp(float(via_xy[1]), 0.0, float(height))
+    # Two constant-AGL legs: start → via (hold cruise) → goal (descend).
+    leg1 = straight_agl_guide_polyline((sx, sy, sz), (vx, vy, cruise_z), agl_cruise=cruise_z)
+    leg2 = straight_agl_guide_polyline((vx, vy, cruise_z), (gx, gy, gz), agl_cruise=cruise_z)
+    merged = list(leg1) + list(leg2[1:] if leg2 else [])
+    return _clamp_path(merged)
 
 
 def _cruise_band_step(mission: Mission) -> float:
-    return max(float(getattr(mission, "cruise_band_step", 0.025) or 0.025), 0.01)
+    # Floor at ~0.5 m physical resolution so fine grids stay usable.
+    alt = max(float(getattr(mission, "altitude_step_m", 50.0) or 50.0), 1e-6)
+    configured = float(getattr(mission, "cruise_band_step", 0.02) or 0.02)
+    return max(configured, 0.5 / alt)
 
 
 def _cruise_band_span(mission: Mission) -> float:
@@ -797,6 +1049,19 @@ def _cruise_band_candidates(belief_map: BeliefMap, mission: Mission) -> list[flo
             clearance, float(min_level), float(max_level), step=fine, span_levels=span, sticky=sticky
         )
     coarse = 0.25
+    # Sticky cruise: keep a fine neighborhood for tracking, plus the coarse span so
+    # better wind layers remain discoverable (no map-specific height lock-in).
+    if sticky is not None and fine < 0.2 - 1e-12:
+        bands = [clearance, float(sticky)]
+        bands.extend(_local_agl_bands(float(sticky), lo=lo, hi=hi, step=fine, radius=0.35))
+        bands.extend(_local_agl_bands(clearance, lo=lo, hi=hi, step=fine, radius=0.15))
+        bands.extend(
+            cruise_agl_band_grid(
+                clearance, float(min_level), float(max_level), step=coarse, span_levels=span, sticky=sticky
+            )
+        )
+        uniq = sorted(set(round(float(z), 10) for z in bands if lo - 1e-12 <= z <= hi + 1e-12))
+        return [clamp(z, float(min_level), float(max_level)) for z in uniq]
     bands = cruise_agl_band_grid(
         clearance, float(min_level), float(max_level), step=coarse, span_levels=span, sticky=sticky
     )
@@ -835,11 +1100,10 @@ def _commit_preferred_cruise(
     clearance: float,
     band_energies: dict[float, float] | None = None,
 ) -> float:
-    """Update preferred cruise AGL with mild upward ratchet.
+    """Update preferred cruise AGL.
 
-    May step down when the newly selected band is clearly cheaper on the same
-    full-path model (important for fine grids where an early high sticky locks in).
-    Descent to goal still uses the progress profile, not preferred_cruise_agl.
+    Follows the newly selected band when band_energies show a clear improvement
+    either up or down. Only ratchet upward when scores are nearly tied.
     """
     step = _cruise_band_step(mission)
     max_level = float(getattr(mission, "max_altitude_level", 4))
@@ -852,31 +1116,40 @@ def _commit_preferred_cruise(
         step=step,
     )
     prev = getattr(mission, "preferred_cruise_agl", None)
-    if prev is not None:
+    if prev is not None and band_energies:
         prev = float(prev)
-        if band_energies:
-            # Snap keys to nearest grid entries for lookup.
-            def _lookup(level: float) -> float:
-                if not band_energies:
-                    return math.inf
-                key = min(band_energies.keys(), key=lambda k: abs(k - level))
-                return band_energies[key]
 
-            prev_e = _lookup(prev)
-            new_e = _lookup(z)
-            if z + 1e-9 < prev and new_e <= prev_e * 0.985:
-                pass  # allow clear improvement by descending a band
-            elif z > prev + 1e-9 and new_e > prev_e * 1.012:
-                z = prev  # refuse a clearly worse climb
-            else:
-                z = max(prev, z)
-            argmin_z = float(min(band_energies.keys(), key=lambda k: band_energies[k]))
-            if z > argmin_z + step + 1e-9 and _lookup(z) > _lookup(argmin_z) * 1.004:
-                z = argmin_z
-            elif z > argmin_z + step + 1e-9:
-                z = argmin_z + step
+        def _lookup(level: float) -> float:
+            key = min(band_energies.keys(), key=lambda k: abs(k - level))
+            return band_energies[key]
+
+        prev_e = _lookup(prev)
+        new_e = _lookup(z)
+        argmin_z = float(min(band_energies.keys(), key=lambda k: band_energies[k]))
+        argmin_e = band_energies[argmin_z]
+        # Align with band selector: climb needs ~1.5%, dump needs ~2.5%.
+        if z + 1e-9 < prev:
+            if new_e > prev_e * 0.975:
+                z = prev
+            elif z < prev - 0.35 - 1e-9:
+                z = prev - 0.35
+        elif z > prev + 1e-9 and new_e <= prev_e * 0.985:
+            pass  # earned climb
+        elif z > prev + 1e-9 and new_e > prev_e * 0.985:
+            z = prev
         else:
-            z = max(prev, z)
+            if abs(new_e - prev_e) <= prev_e * 0.015:
+                z = prev
+        if z > argmin_z + 2.0 * step + 1e-9 and _lookup(z) > argmin_e * 1.05 and z >= prev - 1e-9:
+            if argmin_z + 1e-9 >= prev and argmin_e <= prev_e * 0.985:
+                z = min(argmin_z, prev + 0.35)
+        if z > prev + 0.35 + 1e-9:
+            z = prev + 0.35
+        if z + 1e-9 < prev - 0.35:
+            z = prev - 0.35
+    elif prev is not None:
+        # No scores: allow free update toward newly selected cruise.
+        pass
     z = max(z, float(clearance))
     z = snap_cruise_agl(
         z,
@@ -905,14 +1178,23 @@ def _band_selection_scores(
     """
     sz = float(start[2])
     climb_cost = float(getattr(mission, "climb_cost_per_level_j", 180.0))
-    scores: dict[float, float] = {}
-    for z in bands:
-        z = float(z)
+    if not bands:
+        return {}
+    paths: list[list[tuple[float, float, float]]] = []
+    zs: list[float] = []
+    for raw_z in bands:
+        z = float(raw_z)
         alt_start = (float(start[0]), float(start[1]), z)
         path = _agl_guide_polyline(alt_start, goal, belief_map, mission, via_xy=None, cruise_z=z)
-        cruise_e = _polyline_model_energy_j(path, belief_map, mission) if len(path) > 1 else math.inf
-        climb_e = climb_cost * max(0.0, z - sz)
-        scores[z] = cruise_e + climb_e
+        paths.append(path)
+        zs.append(z)
+    energies = _polylines_model_energy_j(paths, belief_map, mission)
+    scores: dict[float, float] = {}
+    for z, path, cruise_e in zip(zs, paths, energies):
+        if len(path) <= 1:
+            scores[z] = math.inf
+        else:
+            scores[z] = float(cruise_e) + climb_cost * max(0.0, z - sz)
     return scores
 
 
@@ -924,38 +1206,66 @@ def _select_preferred_cruise_band(
     tiebreak_scores: dict[float, float] | None = None,
     band_step: float = 0.5,
 ) -> float | None:
-    """Pick cruise AGL from full-path band energies (terrain-agnostic).
+    """Pick cruise AGL from full-path band scores with evidence-gated changes.
 
-    - Sticky hysteresis keeps a committed band unless another is clearly better.
-    - Fine grids (step ≤ 0.15): strict full-path argmin — near-tie "prefer higher"
-      over-climbs when many bands sit inside a few percent.
-    - Coarser grids: among near-ties, cruise-fair may break ties.
+    Universal rules (no map-specific thresholds):
+    - Leave clearance / climb only if the winner beats the reference by ~1.5%.
+    - Dump a sticky layer only with a stronger ~2.5% edge (asymmetric).
+    - Rate-limit is applied by the caller; this function picks the evidence target.
     """
     if not band_scores:
         return None
     step = max(float(band_step), 0.01)
+    climb_need = 0.985  # ≥1.5% savings to climb
+    dump_need = 0.975  # ≥2.5% savings to dump mid-cruise
     best_z = float(min(band_scores.keys(), key=lambda z: band_scores[z]))
     best_e = band_scores[best_z]
-    sticky_margin = 1.0 + max(0.012, 0.04 * step)
-    if sticky is not None:
-        sticky_key = min(band_scores.keys(), key=lambda z: abs(z - float(sticky)))
-        sticky_e = band_scores[sticky_key]
-        # Drop a sticky that climbed far above the live argmin (fine-grid ratchet trap).
-        if sticky_key > best_z + 2.0 * step + 1e-9 and sticky_e > best_e * 1.005:
-            pass
-        elif sticky_e <= best_e * sticky_margin:
-            return float(sticky_key)
-    if step <= 0.15 + 1e-12:
-        # Strict-ish argmin: among bands within 1% of best, take the lowest.
-        near = [z for z, e in band_scores.items() if e <= best_e * 1.01]
-        return float(min(near)) if near else best_z
-    near_margin = 1.0 + max(0.008, 0.04 * step)
-    near = [z for z, e in band_scores.items() if e <= best_e * near_margin]
-    if not near:
-        return best_z
-    if tiebreak_scores:
-        return float(min(near, key=lambda z: (tiebreak_scores.get(z, math.inf), -z)))
-    return best_z
+    clearance_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance))))
+    clearance_e = band_scores[clearance_key]
+
+    if sticky is None or remaining_horiz <= 6.0:
+        # Cold start / final approach: stay at clearance unless climb is clearly earned.
+        if remaining_horiz <= 6.0:
+            if best_z + 1e-9 < clearance_key and best_e <= clearance_e * 0.98:
+                return best_z
+            if remaining_horiz <= 3.5:
+                return float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance_key))))
+        if best_e <= clearance_e * climb_need:
+            return best_z
+        return clearance_key
+
+    sticky_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(sticky))))
+    sticky_e = band_scores[sticky_key]
+
+    # Approach: gentle descent only.
+    if remaining_horiz <= 10.0:
+        if best_z + 1e-9 < sticky_key and best_e <= sticky_e * 0.98:
+            return float(min(sticky_key, max(best_z, sticky_key - 0.35)))
+        return sticky_key
+
+    # Late cruise: hold unless a strong correction is available (wrong-layer recovery).
+    if remaining_horiz <= 16.0:
+        if best_e <= sticky_e * dump_need and abs(best_z - sticky_key) > 0.5 * step:
+            if best_z > sticky_key:
+                return float(min(best_z, sticky_key + 0.35))
+            return float(max(best_z, sticky_key - 0.35))
+        return sticky_key
+
+    # Early/mid cruise: evidence-gated climb or corrective dump; else hold.
+    if best_z >= sticky_key + 0.5 * step and best_e <= sticky_e * climb_need:
+        return float(min(best_z, sticky_key + 0.35))
+    if best_z + 1e-9 < sticky_key - 0.5 * step and best_e <= sticky_e * dump_need:
+        return float(max(best_z, sticky_key - 0.35))
+    # Also compare against clearance when sticky is only slightly elevated — blocks
+    # noise climbs that never beat clearance by climb_need.
+    if sticky_key <= clearance_key + 0.40 + 1e-9:
+        if best_z > sticky_key + 1e-9 and best_e > clearance_e * climb_need:
+            return sticky_key
+        if best_z <= clearance_key + 1e-9 and sticky_e > clearance_e * (1.0 / climb_need):
+            # Sticky worse than clearance without having earned the layer → ease down.
+            if best_e <= sticky_e * dump_need or best_z <= clearance_key + 1e-9:
+                return float(max(clearance_key, sticky_key - 0.35))
+    return sticky_key
 
 
 def _energy_guide_paths(
@@ -978,47 +1288,81 @@ def _energy_guide_paths(
     bands = _cruise_band_candidates(belief_map, mission)
     guides: list[tuple[str, list[tuple[float, float, float]]]] = []
     straight_energy_by_band: dict[float, float] = {}
+    pending_zs: list[float] = []
+    pending_paths: list[list[tuple[float, float, float]]] = []
+    pending_labels: list[str] = []
+
+    def _flush_pending() -> None:
+        if not pending_paths:
+            return
+        energies = _polylines_model_energy_j(pending_paths, belief_map, mission)
+        for z, label, path, energy in zip(pending_zs, pending_labels, pending_paths, energies):
+            guides.append((label, path))
+            if path and len(path) > 1:
+                straight_energy_by_band[z] = energy
+        pending_zs.clear()
+        pending_paths.clear()
+        pending_labels.clear()
 
     def _add_straight(cruise_z: float) -> None:
         z = round(float(cruise_z), 10)
-        if z in straight_energy_by_band:
+        if z in straight_energy_by_band or z in pending_zs:
             return
         label = _straight_guide_label(z, clearance, step=fine)
         path = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=z)
-        guides.append((label, path))
-        if path and len(path) > 1:
-            straight_energy_by_band[z] = _polyline_model_energy_j(path, belief_map, mission)
+        pending_zs.append(z)
+        pending_labels.append(label)
+        pending_paths.append(path)
 
     for cruise_z in bands:
         _add_straight(cruise_z)
+    _flush_pending()
 
-    # Hierarchical refine: after coarse(+seed) scores, densify around the best few.
+    # Hierarchical refine: densify around cheapest full-path bands (not cruise-fair).
+    sticky = getattr(mission, "preferred_cruise_agl", None)
     if fine < 0.2 - 1e-12 and straight_energy_by_band:
-        ranked = sorted(straight_energy_by_band.keys(), key=lambda z: straight_energy_by_band[z])
-        centers = list(ranked[:2])
-        sticky = getattr(mission, "preferred_cruise_agl", None)
+        path_ranked = sorted(straight_energy_by_band.keys(), key=lambda z: straight_energy_by_band[z])
         if sticky is not None:
-            centers.append(float(sticky))
+            centers = [float(sticky), clearance]
+            # Keep coarse-span winners discoverable while sticky (layer search).
+            coarse = 0.25
+            for z in path_ranked:
+                zf = float(z)
+                if abs(zf / coarse - round(zf / coarse)) <= 1e-9:
+                    centers.append(zf)
+                if len([c for c in centers if abs(c / coarse - round(c / coarse)) <= 1e-9]) >= 4:
+                    break
+        else:
+            centers = [float(z) for z in path_ranked[:5]]
+            # Seed mid-span so intermediate bands remain reachable from coarse cells.
+            for z in (clearance + 0.25, clearance + 0.5, clearance + 0.75, clearance + 1.0):
+                if lo - 1e-12 <= z <= hi + 1e-12:
+                    centers.append(float(z))
         for center in centers:
-            for z in _local_agl_bands(center, lo=lo, hi=hi, step=fine, radius=0.25):
+            for z in _local_agl_bands(center, lo=lo, hi=hi, step=fine, radius=0.35 if sticky is None else 0.25):
                 _add_straight(z)
+        _flush_pending()
 
     if horiz < 6.0 or getattr(mission, "elevation", None) is None:
         return guides
 
+    # Corridor cruise follows the cheapest full-path straight band.
     best_band = min(straight_energy_by_band, key=straight_energy_by_band.get) if straight_energy_by_band else bands[0]
-    sticky = getattr(mission, "preferred_cruise_agl", None)
-    if sticky is not None:
+    if sticky is not None and straight_energy_by_band:
         sticky_key = min(straight_energy_by_band.keys(), key=lambda z: abs(z - float(sticky)))
-        # Only keep sticky for corridor height if it remains near-optimal.
-        if straight_energy_by_band[sticky_key] <= straight_energy_by_band[best_band] * 1.02:
+        if straight_energy_by_band[sticky_key] <= straight_energy_by_band[best_band] * 1.012:
             best_band = sticky_key
     straight_floor = straight_energy_by_band.get(best_band, math.inf)
+    if not math.isfinite(straight_floor) and straight_energy_by_band:
+        straight_floor = min(straight_energy_by_band.values())
 
     # Sticky via competes with straights; drop it if it no longer beats the floor.
     locked = getattr(mission, "guide_via", None)
+    cell_m = max(float(mission.step_distance_m), 1e-6)
+    # Risk-adjusted corridor gate (belief noise tax). Off unless explicitly enabled.
+    corridor_margin = getattr(mission, "corridor_energy_margin", None)
     if locked is not None:
-        if math.hypot(float(locked[0]) - sx, float(locked[1]) - sy) < 1.25:
+        if math.hypot(float(locked[0]) - sx, float(locked[1]) - sy) < (125.0 / cell_m):
             mission.guide_via = None
         else:
             locked_path = _agl_guide_polyline(
@@ -1029,16 +1373,25 @@ def _energy_guide_paths(
                 via_xy=(float(locked[0]), float(locked[1])),
                 cruise_z=best_band,
             )
-            locked_e = _polyline_model_energy_j(locked_path, belief_map, mission) if len(locked_path) > 1 else math.inf
-            if locked_e <= straight_floor * 0.98:
-                guides.append(("guide_corridor_locked", locked_path))
+            if corridor_margin is not None and len(locked_path) > 1:
+                locked_e = _polyline_risk_adjusted_energy_j(locked_path, belief_map, mission, uncertainty_gain=0.12)
+                if locked_e <= straight_floor * float(corridor_margin):
+                    guides.append(("guide_corridor_locked", locked_path))
+                else:
+                    mission.guide_via = None
             else:
                 mission.guide_via = None
 
+    # Lateral corridors: risk-adjusted belief energy must beat straight by a clear margin.
+    if corridor_margin is None or float(corridor_margin) <= 0.0:
+        return guides
+    corridor_margin = float(corridor_margin)
     ux, uy = dx / horiz, dy / horiz
     px, py = -uy, ux
     direct_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, gx, gy, samples=8)
-    offsets = (1.5, 2.5, 3.5)
+    offsets = tuple(offset_m / cell_m for offset_m in (150.0, 250.0, 350.0))
+    detour_max_cells = 250.0 / cell_m
+    corridor_candidates: list[tuple[str, list[tuple[float, float, float]]]] = []
     for sign in (-1.0, 1.0):
         for offset in offsets:
             mx = clamp(sx + 0.5 * dx + sign * offset * px, 0.0, belief_map.width - 1)
@@ -1048,15 +1401,22 @@ def _energy_guide_paths(
             if direct_rise > 1.0 and via_rise > direct_rise * 1.05:
                 continue
             detour = (math.hypot(mx - sx, my - sy) + math.hypot(gx - mx, gy - my)) - horiz
-            if detour > 2.5:
+            if detour > detour_max_cells:
                 continue
             path = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=(mx, my), cruise_z=best_band)
             if len(path) <= 1:
                 continue
-            energy = _polyline_model_energy_j(path, belief_map, mission)
-            if straight_floor < math.inf and energy > straight_floor * 0.95:
-                continue
             label = f"guide_corridor_{sign:+.0f}_{offset:.1f}"
+            corridor_candidates.append((label, path))
+    if corridor_candidates:
+        for label, path in corridor_candidates:
+            energy = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.12)
+            if straight_floor < math.inf and energy > straight_floor * corridor_margin:
+                continue
+            # Raw model energy must not exceed straight (blocks pure uncertainty gaming).
+            raw = _polyline_model_energy_j(path, belief_map, mission)
+            if straight_floor < math.inf and raw > straight_floor * 1.0:
+                continue
             guides.append((label, path))
     return guides
 
@@ -1280,12 +1640,20 @@ def _terminal_bonus(point: State3D, goal: State3D, mission: Mission, terminal_pr
     return terminal_progress_weight / (1.0 + distance / max(mission.step_distance_m, 1e-6))
 
 
-def path_distance_m(path: list[tuple[int, int] | tuple[int, int, int] | tuple[float, float, float]], step_distance_m: float) -> float:
+def path_distance_m(
+    path: list[tuple[int, int] | tuple[int, int, int] | tuple[float, float, float]],
+    step_distance_m: float,
+    altitude_step_m: float | None = None,
+) -> float:
     distance = 0.0
-    altitude_step_m = step_distance_m * 0.4
-    for (x1, y1, z1), (x2, y2, z2) in zip([_continuous_state_tuple(point) for point in path], [_continuous_state_tuple(point) for point in path[1:]]):
+    # Default: isotropic cube (Z step matches XY) when altitude_step_m omitted.
+    alt_m = float(step_distance_m if altitude_step_m is None else altitude_step_m)
+    for (x1, y1, z1), (x2, y2, z2) in zip(
+        [_continuous_state_tuple(point) for point in path],
+        [_continuous_state_tuple(point) for point in path[1:]],
+    ):
         horizontal = math.hypot(x2 - x1, y2 - y1) * step_distance_m
-        vertical = abs(z2 - z1) * altitude_step_m
+        vertical = abs(z2 - z1) * alt_m
         distance += math.hypot(horizontal, vertical)
     return distance
 
@@ -1420,9 +1788,13 @@ def _rank_continuous_successors(
         preferred_z=preferred_z,
         belief_map=belief_map,
     )
-    scored: list[dict] = []
     bearing = math.atan2(goal[1] - current.y, goal[0] - current.x) if math.hypot(goal[0] - current.x, goal[1] - current.y) > 1e-6 else current.heading_rad
     horizontal = math.hypot(goal[0] - current.x, goal[1] - current.y)
+    level_lo = float(effective_min if horizontal > 5.0 else min_level)
+    level_hi = float(max_level)
+
+    # Phase 1: propagate controls (control-flow stays Python).
+    proposals: list[dict] = []
     for control in controls:
         next_state, aero_energy = propagate_control(
             current,
@@ -1439,82 +1811,129 @@ def _rank_continuous_successors(
         point = (
             clamp(next_state.x, 0.0, belief_map.width - 1),
             clamp(next_state.y, 0.0, belief_map.height - 1),
-            clamp(next_state.z, float(effective_min if horizontal > 5.0 else min_level), float(max_level)),
+            clamp(next_state.z, level_lo, level_hi),
         )
-        # Reject runaway climbs above the cruise band (except elevated goals).
         if horizontal > 5.0 and goal[2] <= current.z + 0.25 and point[2] > preferred_z + 0.85:
             continue
-        next_local = _sample_belief_state(belief_map, point[0], point[1], point[2])
-        terrain_rise_m = terrain_climb_along_line_m(
-            getattr(mission, "elevation", None),
-            current.x,
-            current.y,
-            point[0],
-            point[1],
-            samples=4,
+        proposals.append(
+            {
+                "state": next_state,
+                "point": point,
+                "aero_energy": float(aero_energy),
+                "control": control,
+            }
         )
-        terrain_dz_m = _mission_terrain_dz(mission, current.x, current.y, point[0], point[1])
-        terrain_energy = transition_energy_j(
-            airspeed=current.airspeed,
-            current=(current.x, current.y, current.z),
-            nxt=point,
-            local_u=local["wind_u"],
-            local_v=local["wind_v"],
-            local_w=local["wind_w"],
-            step_distance_m=mission.step_distance_m,
-            altitude_step_m=mission.altitude_step_m,
-            climb_cost_per_level_j=mission.climb_cost_per_level_j,
-            hover_power_w=mission.hover_power_w,
-            cruise_power_w=mission.cruise_power_w,
-            hotel_power_w=mission.hotel_power_w,
-            headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
-            climb_power_per_mps_w=mission.climb_power_per_mps_w,
-            descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
-            terrain_dz_m=terrain_dz_m,
-        )
-        # Blend aero step cost with terrain-aware transition energy (terrain climb dominates hills).
-        step_energy = 0.55 * aero_energy + 0.45 * terrain_energy
+    if not proposals:
+        return []
 
-        current_energy_to_goal = estimate_energy_to_goal_j(
-            (current.x, current.y, current.z), goal, mission, local, belief_map=belief_map
+    # Phase 2: batch belief sample + terrain-aware transition energy.
+    points = np.asarray([item["point"] for item in proposals], dtype=np.float64)
+    next_locals = _sample_belief_states_batch(belief_map, points[:, 0], points[:, 1], points[:, 2])
+    elev = getattr(mission, "elevation", None)
+    if elev is not None:
+        terrain_dz = terrain_delta_m_batch(
+            elev,
+            np.full(len(proposals), current.x),
+            np.full(len(proposals), current.y),
+            points[:, 0],
+            points[:, 1],
         )
-        next_energy_to_goal = estimate_energy_to_goal_j(
-            (point[0], point[1], point[2]), goal, mission, next_local, belief_map=belief_map
-        )
-        energy_progress_reward = current_energy_to_goal - next_energy_to_goal
+    else:
+        terrain_dz = np.zeros(len(proposals), dtype=np.float64)
+    currents = np.tile(np.asarray([current.x, current.y, current.z], dtype=np.float64), (len(proposals), 1))
+    terrain_energies = transition_energy_batch(
+        airspeed=current.airspeed,
+        currents=currents,
+        nexts=points,
+        local_u=np.full(len(proposals), local["wind_u"]),
+        local_v=np.full(len(proposals), local["wind_v"]),
+        local_w=np.full(len(proposals), local["wind_w"]),
+        step_distance_m=mission.step_distance_m,
+        altitude_step_m=mission.altitude_step_m,
+        climb_cost_per_level_j=mission.climb_cost_per_level_j,
+        hover_power_w=mission.hover_power_w,
+        cruise_power_w=mission.cruise_power_w,
+        hotel_power_w=mission.hotel_power_w,
+        headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
+        climb_power_per_mps_w=mission.climb_power_per_mps_w,
+        descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
+        terrain_dz_m=terrain_dz,
+    )
 
-        xy_progress = _goal_axis_progress(current, point, goal)
-        near_goal = horizontal <= 5.0
-        final_approach = horizontal <= 3.5
-        altitude_progress = abs(goal[2] - current.z) - abs(goal[2] - point[2])
-        # Cruise: prioritize XY progress; approach: also close altitude.
-        # Keep progress dominant so uplift/wind probes cannot induce loitering.
-        alt_weight = 75.0 if final_approach else (20.0 if near_goal else 4.0)
-        goal_progress_reward = 82.0 * xy_progress + alt_weight * altitude_progress
+    # Phase 3: batch residual energies + along-track wind (once for all proposals).
+    n_prop = len(proposals)
+    current_energy_to_goal = estimate_energy_to_goal_j(
+        (current.x, current.y, current.z), goal, mission, local, belief_map=belief_map
+    )
+    next_pts = [item["point"] for item in proposals]
+    next_winds = [{key: float(next_locals[key][i]) for key in next_locals} for i in range(n_prop)]
+    next_energies = estimate_energies_to_goal_batch(
+        next_pts, goal, mission, belief_map=belief_map, local_winds=next_winds
+    )
 
-        # Wind along the step segment + further corridor (integrated, not single-point).
+    segs = np.empty((n_prop * 3, 5), dtype=np.float64)
+    look_cells_arr = np.empty(n_prop, dtype=np.float64)
+    track_bearing_arr = np.empty(n_prop, dtype=np.float64)
+    step_len_arr = np.empty(n_prop, dtype=np.float64)
+    goal_look = min(4.0, max(horizontal, 1.0))
+    goal_ax = current.x + math.cos(bearing) * goal_look
+    goal_ay = current.y + math.sin(bearing) * goal_look
+    for i, point in enumerate(next_pts):
         step_dx = point[0] - current.x
         step_dy = point[1] - current.y
         step_len = math.hypot(step_dx, step_dy)
+        step_len_arr[i] = step_len
         track_bearing = math.atan2(step_dy, step_dx) if step_len > 1e-6 else bearing
-        seg_tw, seg_w = _integrate_track_wind(
-            belief_map, current.x, current.y, point[0], point[1], point[2], samples=4
-        )
+        track_bearing_arr[i] = track_bearing
         look_cells = min(4.0, max(2.0, horizontal * 0.35))
+        look_cells_arr[i] = look_cells
         ahead_x = point[0] + math.cos(track_bearing) * look_cells
         ahead_y = point[1] + math.sin(track_bearing) * look_cells
-        lookahead_tw, lookahead_w = _integrate_track_wind(
-            belief_map, point[0], point[1], ahead_x, ahead_y, point[2], samples=4
+        segs[i * 3 + 0] = (current.x, current.y, point[0], point[1], point[2])
+        segs[i * 3 + 1] = (point[0], point[1], ahead_x, ahead_y, point[2])
+        segs[i * 3 + 2] = (current.x, current.y, goal_ax, goal_ay, point[2])
+    track_tw, track_w = _integrate_tracks_batch(belief_map, segs, samples=2)
+
+    terrain_rises = np.empty(n_prop, dtype=np.float64)
+    if elev is not None:
+        terrain_rises[:] = terrain_climb_along_line_batch(
+            elev,
+            np.full(n_prop, current.x),
+            np.full(n_prop, current.y),
+            points[:, 0],
+            points[:, 1],
+            samples=2,
         )
-        goal_tw, goal_w = _integrate_track_wind(
-            belief_map,
-            current.x,
-            current.y,
-            current.x + math.cos(bearing) * min(4.0, max(horizontal, 1.0)),
-            current.y + math.sin(bearing) * min(4.0, max(horizontal, 1.0)),
-            point[2],
-            samples=3,
-        )
+    else:
+        terrain_rises.fill(0.0)
+
+    scored: list[dict] = []
+    near_goal = horizontal <= 5.0
+    final_approach = horizontal <= 3.5
+    for i, item in enumerate(proposals):
+        next_state = item["state"]
+        point = item["point"]
+        aero_energy = item["aero_energy"]
+        control = item["control"]
+        next_local = next_winds[i]
+        terrain_rise_m = float(terrain_rises[i])
+        terrain_energy = float(terrain_energies[i])
+        step_energy = 0.55 * aero_energy + 0.45 * terrain_energy
+
+        energy_progress_reward = current_energy_to_goal - float(next_energies[i])
+
+        xy_progress = _goal_axis_progress(current, point, goal)
+        altitude_progress = abs(goal[2] - current.z) - abs(goal[2] - point[2])
+        alt_weight = 75.0 if final_approach else (20.0 if near_goal else 4.0)
+        goal_progress_reward = 82.0 * xy_progress + alt_weight * altitude_progress
+
+        step_len = float(step_len_arr[i])
+        seg_tw = float(track_tw[i * 3 + 0])
+        seg_w = float(track_w[i * 3 + 0])
+        lookahead_tw = float(track_tw[i * 3 + 1])
+        lookahead_w = float(track_w[i * 3 + 1])
+        goal_tw = float(track_tw[i * 3 + 2])
+        goal_w = float(track_w[i * 3 + 2])
         blend_tw = 0.40 * seg_tw + 0.35 * lookahead_tw + 0.25 * goal_tw
         blend_w = 0.40 * seg_w + 0.35 * lookahead_w + 0.25 * goal_w
         wind_assist = (
@@ -1523,13 +1942,11 @@ def _rank_continuous_successors(
             + 48.0 * max(0.0, blend_w)
             - 36.0 * max(0.0, -blend_w)
         )
-        # Track energy-efficient cruise band while far from goal.
         if not near_goal:
             band_progress = abs(current.z - preferred_z) - abs(point[2] - preferred_z)
             wind_assist += 40.0 * band_progress - 12.0 * abs(point[2] - preferred_z)
             free_lift = max(0.0, next_local["wind_w"] - 0.1)
             climb_dz = point[2] - current.z
-            # Hold level once on the cruise band.
             if abs(current.z - preferred_z) <= 0.3 and abs(point[2] - preferred_z) <= 0.35:
                 wind_assist += 18.0 - 40.0 * abs(climb_dz)
             elif climb_dz > 0.05:
@@ -1539,7 +1956,6 @@ def _rank_continuous_successors(
                     wind_assist -= 90.0 * max(climb_dz, point[2] - preferred_z)
                 else:
                     wind_assist -= 50.0 * climb_dz
-            # Full terrain-climb tax unless along-track wind clearly pays for it.
             if terrain_rise_m > 2.0:
                 terrain_cost = (
                     terrain_rise_m / max(mission.altitude_step_m, 1e-6)
@@ -1550,14 +1966,12 @@ def _rank_continuous_successors(
                 else:
                     wind_assist -= 0.25 * terrain_cost
 
-        # Tax pure sideways motion / S-curves unless wind already compensated via energy_progress.
         cross_track = _cross_track_cells(mission.start, goal, point[0], point[1])
         if not near_goal and cross_track > 0.75:
             wind_assist -= 14.0 * max(0.0, cross_track - 0.75)
         if step_len > 1e-6 and not near_goal:
             wasted = max(0.0, step_len - max(0.0, xy_progress))
             wind_assist -= 36.0 * wasted
-        # Covering ground beats milking a local thermal: damp free-lift rewards when XY stalls.
         if not near_goal and xy_progress < 0.20:
             wind_assist -= 55.0 * max(0.0, blend_w)
             energy_progress_reward = min(energy_progress_reward, 10.0)
@@ -1676,24 +2090,61 @@ def _integrate_track_wind(
     samples: int = 5,
 ) -> tuple[float, float]:
     """Integrate along-track tailwind and vertical wind over a segment."""
+    tw, ww = _integrate_tracks_batch(
+        belief_map,
+        np.asarray([[x0, y0, x1, y1, z]], dtype=np.float64),
+        samples=samples,
+    )
+    return float(tw[0]), float(ww[0])
+
+
+def _integrate_tracks_batch(
+    belief_map: BeliefMap,
+    segs: np.ndarray,
+    samples: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batch along-track wind integrate.
+
+    ``segs`` shape (N, 5): x0,y0,x1,y1,z → returns (tw[N], w[N]).
+    """
+    segs = np.asarray(segs, dtype=np.float64).reshape(-1, 5)
+    n = segs.shape[0]
+    if n == 0:
+        return np.zeros(0), np.zeros(0)
+    n_samp = max(2, int(samples))
+    x0 = segs[:, 0]
+    y0 = segs[:, 1]
+    x1 = segs[:, 2]
+    y1 = segs[:, 3]
+    z = segs[:, 4]
     dx = x1 - x0
     dy = y1 - y0
-    span = math.hypot(dx, dy)
-    if span <= 1e-9:
-        local = _sample_belief_state(belief_map, x0, y0, z)
-        return 0.0, local["wind_w"]
-    bearing = math.atan2(dy, dx)
-    tw_sum = 0.0
-    w_sum = 0.0
-    n = max(2, int(samples))
-    for i in range(n):
-        t = i / (n - 1)
-        sx = clamp(x0 + dx * t, 0.0, belief_map.width - 1)
-        sy = clamp(y0 + dy * t, 0.0, belief_map.height - 1)
-        local = _sample_belief_state(belief_map, sx, sy, z)
-        tw_sum += local["wind_u"] * math.cos(bearing) + local["wind_v"] * math.sin(bearing)
-        w_sum += local["wind_w"]
-    return tw_sum / n, w_sum / n
+    span = np.hypot(dx, dy)
+    bearings = np.arctan2(dy, dx)
+    bearings = np.where(span > 1e-9, bearings, 0.0)
+    t = np.linspace(0.0, 1.0, n_samp, dtype=np.float64)[None, :]
+    xs = np.clip(x0[:, None] + dx[:, None] * t, 0.0, float(belief_map.width - 1)).reshape(-1)
+    ys = np.clip(y0[:, None] + dy[:, None] * t, 0.0, float(belief_map.height - 1)).reshape(-1)
+    zs = np.repeat(z, n_samp)
+    wind = _sample_wind_batch(belief_map, xs, ys, zs)
+    wu = wind["wind_u"].reshape(n, n_samp)
+    wv = wind["wind_v"].reshape(n, n_samp)
+    ww = wind["wind_w"].reshape(n, n_samp)
+    cos_b = np.cos(bearings)[:, None]
+    sin_b = np.sin(bearings)[:, None]
+    tw = np.mean(wu * cos_b + wv * sin_b, axis=1)
+    w_mean = np.mean(ww, axis=1)
+    return tw, w_mean
+
+
+def _sample_wind_batch(belief_map: BeliefMap, xs, ys, zs) -> dict[str, np.ndarray]:
+    arrays = belief_map.field_arrays
+    if arrays is None or "wind_u" not in arrays:
+        arrays = ensure_belief_field_arrays(belief_map, _WIND_ATTRS)
+    xs_a = np.asarray(xs, dtype=np.float64).reshape(-1)
+    ys_a = np.asarray(ys, dtype=np.float64).reshape(-1)
+    zs_a = np.asarray(zs, dtype=np.float64).reshape(-1)
+    return {attr: trilinear_sample_batch(arrays[attr], xs_a, ys_a, zs_a) for attr in _WIND_ATTRS}
 
 
 def _heading_turn_rate(current_heading: float, desired_heading: float) -> float:
@@ -1849,12 +2300,40 @@ def _control_library(
     return controls
 
 
+def _sample_belief_states_batch(
+    belief_map: BeliefMap,
+    xs,
+    ys,
+    zs,
+) -> dict[str, np.ndarray]:
+    arrays = ensure_belief_field_arrays(belief_map, _BELIEF_SAMPLE_ATTRS)
+    return {attr: trilinear_sample_batch(arrays[attr], xs, ys, zs) for attr in _BELIEF_SAMPLE_ATTRS}
+
+
 def _sample_belief_state(belief_map: BeliefMap, x: float, y: float, z: float) -> dict[str, float]:
-    attrs = ("wind_u", "wind_v", "wind_w", "expected_energy_gain", "uncertainty", "safety_penalty", "mode_prob_uplift", "mode_prob_sink")
-    return {attr: _sample_attr(belief_map, attr, x, y, z) for attr in attrs}
+    arrays = belief_map.field_arrays
+    if arrays is not None and "wind_u" in arrays:
+        # Scalar Numba path — avoid per-call length-1 arrays / ensure overhead.
+        return {
+            attr: float(trilinear_sample(arrays[attr], x, y, z))
+            for attr in _BELIEF_SAMPLE_ATTRS
+            if attr in arrays
+        }
+    arrays = ensure_belief_field_arrays(belief_map, _BELIEF_SAMPLE_ATTRS)
+    return {attr: float(trilinear_sample(arrays[attr], x, y, z)) for attr in _BELIEF_SAMPLE_ATTRS}
 
 
 def _sample_attr(belief_map: BeliefMap, attr: str, x: float, y: float, z: float) -> float:
+    arrays = belief_map.field_arrays
+    if arrays is not None and attr in arrays:
+        return float(
+            trilinear_sample_batch(
+                arrays[attr],
+                np.asarray([x], dtype=np.float64),
+                np.asarray([y], dtype=np.float64),
+                np.asarray([z], dtype=np.float64),
+            )[0]
+        )
     z = clamp(z, 0.0, belief_map.levels - 1)
     z0 = int(math.floor(z))
     z1 = min(z0 + 1, belief_map.levels - 1)
@@ -1943,21 +2422,113 @@ def _rank_successors(
     return scored[:branch_width]
 
 
-def compute_return_cost_map(belief_map: BeliefMap, mission: Mission) -> dict[State3D, float]:
+def _return_budget_is_tight(
+    mission: Mission,
+    start: tuple[float, float, float],
+    goal: State3D,
+) -> bool:
+    """True when remaining return budget may bind — otherwise skip Dijkstra."""
+    budget = mission.max_return_cost_j
+    home = mission.home
+    if budget is None or home is None:
+        return False
+    home_state = normalize_state(home)
+    to_goal = estimate_energy_to_goal_j(start, goal, mission)
+    goal_pt = (float(goal[0]), float(goal[1]), float(goal[2]))
+    home_from_goal = estimate_energy_to_goal_j(goal_pt, home_state, mission)
+    home_from_here = estimate_energy_to_goal_j(start, home_state, mission)
+    need = max(to_goal + home_from_goal, home_from_here) * 1.45
+    return float(budget) < need
+
+
+def _coarse_neighbors(
+    x: int,
+    y: int,
+    z: int,
+    width: int,
+    height: int,
+    min_z: int,
+    max_z: int,
+    stride: int,
+) -> list[State3D]:
+    """26-connected neighbors on a stride-aligned XY lattice (full Z)."""
+    result: list[State3D] = []
+    for dz in (-1, 0, 1):
+        for dy in (-stride, 0, stride):
+            for dx in (-stride, 0, stride):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                nx = x + dx
+                ny = y + dy
+                nz = z + dz
+                if 0 <= nx < width and 0 <= ny < height and min_z <= nz <= max_z:
+                    result.append((nx, ny, nz))
+    return result
+
+
+class ReturnCostLookup:
+    """Coarse-grid return costs with nearest-cell lookup (dict-compatible .get)."""
+
+    __slots__ = ("costs", "stride")
+
+    def __init__(self, costs: dict[State3D, float], stride: int = 1) -> None:
+        self.costs = costs
+        self.stride = max(1, int(stride))
+
+    def _key(self, point: State3D | tuple[float, float, float]) -> State3D:
+        x, y, z = normalize_state(point)
+        stride = self.stride
+        if stride > 1:
+            x = (x // stride) * stride
+            y = (y // stride) * stride
+        return x, y, z
+
+    def get(self, point: State3D | tuple[float, float, float], default: float = math.inf) -> float:
+        return self.costs.get(self._key(point), default)
+
+    def __getitem__(self, point: State3D | tuple[float, float, float]) -> float:
+        key = self._key(point)
+        if key not in self.costs:
+            raise KeyError(point)
+        return self.costs[key]
+
+    def __contains__(self, point: object) -> bool:
+        try:
+            return self._key(point) in self.costs  # type: ignore[arg-type]
+        except Exception:
+            return False
+
+    def __len__(self) -> int:
+        return len(self.costs)
+
+
+def compute_return_cost_map(
+    belief_map: BeliefMap,
+    mission: Mission,
+    *,
+    xy_stride: int | None = None,
+) -> ReturnCostLookup:
+    """Dijkstra return costs from home.
+
+    On wide fine grids, use XY stride>1 (default 2 when width≥32) so the node
+    count drops ~4× while lookups snap to the coarse lattice.
+    """
     width = belief_map.width
     height = belief_map.height
     min_level, max_level = _search_level_bounds(belief_map, mission)
+    stride = 2 if xy_stride is None and width >= 32 else max(1, int(xy_stride or 1))
     costs: dict[State3D, float] = {}
     if mission.home is None:
-        return costs
+        return ReturnCostLookup(costs, stride=stride)
     home = normalize_state(mission.home)
+    home = ((home[0] // stride) * stride, (home[1] // stride) * stride, home[2])
     costs[home] = 0.0
     frontier: list[tuple[float, State3D]] = [(0.0, home)]
     while frontier:
         current_cost, current = heapq.heappop(frontier)
         if current_cost > costs.get(current, math.inf):
             continue
-        for nxt in neighbors(
+        nbrs = _coarse_neighbors(
             current[0],
             current[1],
             current[2],
@@ -1965,13 +2536,48 @@ def compute_return_cost_map(belief_map: BeliefMap, mission: Mission) -> dict[Sta
             height,
             min_level,
             max_level,
-        ):
-            step_cost = _return_step_cost(belief_map, nxt, current, mission)
-            new_cost = current_cost + step_cost
-            if new_cost < costs.get(nxt, math.inf):
-                costs[nxt] = new_cost
-                heapq.heappush(frontier, (new_cost, nxt))
-    return costs
+            stride,
+        )
+        if not nbrs:
+            continue
+        nxt_arr = np.asarray(nbrs, dtype=np.float64)
+        cur_arr = np.tile(np.asarray(current, dtype=np.float64), (len(nbrs), 1))
+        samples = _sample_belief_states_batch(belief_map, nxt_arr[:, 0], nxt_arr[:, 1], nxt_arr[:, 2])
+        elev = getattr(mission, "elevation", None)
+        if elev is not None:
+            terrain_dz = terrain_delta_m_batch(
+                elev,
+                nxt_arr[:, 0],
+                nxt_arr[:, 1],
+                cur_arr[:, 0],
+                cur_arr[:, 1],
+            )
+        else:
+            terrain_dz = np.zeros(len(nbrs), dtype=np.float64)
+        step_costs = transition_energy_batch(
+            airspeed=mission.nominal_airspeed,
+            currents=nxt_arr,
+            nexts=cur_arr,
+            local_u=samples["wind_u"],
+            local_v=samples["wind_v"],
+            local_w=samples["wind_w"],
+            step_distance_m=mission.step_distance_m,
+            altitude_step_m=mission.altitude_step_m,
+            climb_cost_per_level_j=mission.climb_cost_per_level_j,
+            hover_power_w=mission.hover_power_w,
+            cruise_power_w=mission.cruise_power_w,
+            hotel_power_w=mission.hotel_power_w,
+            headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
+            climb_power_per_mps_w=mission.climb_power_per_mps_w,
+            descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
+            terrain_dz_m=terrain_dz,
+        )
+        for nbr, step_cost in zip(nbrs, step_costs):
+            new_cost = current_cost + float(step_cost)
+            if new_cost < costs.get(nbr, math.inf):
+                costs[nbr] = new_cost
+                heapq.heappush(frontier, (new_cost, nbr))
+    return ReturnCostLookup(costs, stride=stride)
 
 
 def _return_step_cost(
@@ -1981,14 +2587,14 @@ def _return_step_cost(
     mission: Mission,
 ) -> float:
     cx, cy, cz = current
-    cell = belief_map.cells[cz][cy][cx]
+    cell = _sample_belief_state(belief_map, float(cx), float(cy), float(cz))
     return transition_energy_j(
         airspeed=mission.nominal_airspeed,
         current=current,
         nxt=nxt,
-        local_u=cell.wind_u,
-        local_v=cell.wind_v,
-        local_w=cell.wind_w,
+        local_u=cell["wind_u"],
+        local_v=cell["wind_v"],
+        local_w=cell["wind_w"],
         step_distance_m=mission.step_distance_m,
         altitude_step_m=mission.altitude_step_m,
         climb_cost_per_level_j=mission.climb_cost_per_level_j,
@@ -2025,8 +2631,18 @@ def _altitude_bonus(
     move_norm = max(math.hypot(move_dx, move_dy), 1e-6)
     if belief_cell is None:
         return 0.0
-    tailwind = (belief_cell.wind_u * (move_dx / move_norm)) + (belief_cell.wind_v * (move_dy / move_norm))
-    score = 0.45 * tailwind + 0.55 * belief_cell.wind_w + 0.35 * belief_cell.expected_energy_gain
+    if isinstance(belief_cell, dict):
+        wind_u = float(belief_cell["wind_u"])
+        wind_v = float(belief_cell["wind_v"])
+        wind_w = float(belief_cell["wind_w"])
+        energy = float(belief_cell["expected_energy_gain"])
+    else:
+        wind_u = float(belief_cell.wind_u)
+        wind_v = float(belief_cell.wind_v)
+        wind_w = float(belief_cell.wind_w)
+        energy = float(belief_cell.expected_energy_gain)
+    tailwind = (wind_u * (move_dx / move_norm)) + (wind_v * (move_dy / move_norm))
+    score = 0.45 * tailwind + 0.55 * wind_w + 0.35 * energy
     return max(-1.0, min(1.0, score / 4.0))
 
 
@@ -2061,46 +2677,95 @@ def _preferred_cruise_altitude(
             return clamp(goal_z, float(min_level), float(max_level))
         return clamp(z_now + 0.6 * (goal_z - z_now), float(min_level), float(max_level))
 
-    def band_tailwind(level: float) -> float:
-        samples = []
-        for frac in (0.0, 0.3, 0.6):
-            sx = x + frac * (goal[0] - x)
-            sy = y + frac * (goal[1] - y)
-            local = _sample_belief_state(belief_map, sx, sy, float(level))
-            samples.append(local["wind_u"] * math.cos(bearing) + local["wind_v"] * math.sin(bearing))
-        return sum(samples) / max(len(samples), 1)
+    # Sticky cruise from energy guides: keep probing light (current / sticky / ±1)
+    # instead of rescanning every integer band at every MPC node.
+    if preferred_cruise_agl is not None and horizontal_cells > 6.0:
+        sticky = clamp(float(preferred_cruise_agl), float(search_min), float(max_level))
+        candidates = {
+            int(round(clamp(z_now, search_min, max_level))),
+            int(round(clamp(sticky, search_min, max_level))),
+            int(round(clamp(sticky - 1.0, search_min, max_level))),
+            int(round(clamp(sticky + 1.0, search_min, max_level))),
+            int(round(clamp(floor, search_min, max_level))),
+        }
+        levels = sorted(candidates)
+    else:
+        levels = list(range(search_min, max_level + 1))
+    if not levels:
+        return clamp(z_now, float(min_level), float(max_level))
+
+    # Batch all belief probes: here@z_now, here@each level, and 3 along-track fracs per level.
+    fracs = (0.0, 0.3, 0.6)
+    track_xy = [(x + f * (goal[0] - x), y + f * (goal[1] - y)) for f in fracs]
+    xs: list[float] = [x]
+    ys: list[float] = [y]
+    zs: list[float] = [z_now]
+    # index 0 = current band at (x,y)
+    level_here_idx: dict[int, int] = {}
+    level_track_idx: dict[int, tuple[int, int, int]] = {}
+    for level in levels:
+        level_here_idx[level] = len(xs)
+        xs.append(x)
+        ys.append(y)
+        zs.append(float(level))
+        track_ids = []
+        for sx, sy in track_xy:
+            track_ids.append(len(xs))
+            xs.append(sx)
+            ys.append(sy)
+            zs.append(float(level))
+        level_track_idx[level] = (track_ids[0], track_ids[1], track_ids[2])
+
+    packed = _sample_belief_states_batch(belief_map, xs, ys, zs)
+    cos_b = math.cos(bearing)
+    sin_b = math.sin(bearing)
+    here = {attr: float(packed[attr][0]) for attr in _BELIEF_SAMPLE_ATTRS}
+
+    def band_tailwind(level: int) -> float:
+        i0, i1, i2 = level_track_idx[level]
+        tw = 0.0
+        for i in (i0, i1, i2):
+            tw += float(packed["wind_u"][i]) * cos_b + float(packed["wind_v"][i]) * sin_b
+        return tw / 3.0
 
     def band_score(level: int) -> float:
-        local = _sample_belief_state(belief_map, x, y, float(level))
-        here = _sample_belief_state(belief_map, x, y, z_now)
-        tw = band_tailwind(float(level))
+        i = level_here_idx[level]
+        local_u = float(packed["wind_u"][i])
+        local_v = float(packed["wind_v"][i])
+        local_w = float(packed["wind_w"][i])
+        energy = float(packed["expected_energy_gain"][i])
+        uplift = float(packed["mode_prob_uplift"][i])
+        sink = float(packed["mode_prob_sink"][i])
+        unc = float(packed["uncertainty"][i])
+        safety = float(packed["safety_penalty"][i])
+        tw = band_tailwind(level)
         wind_saving = horizontal_cells * (
             22.0 * tw
             - 20.0 * max(0.0, -tw)
-            + 16.0 * max(0.0, local["wind_w"])
-            - 18.0 * max(0.0, -local["wind_w"])
-            + 10.0 * local["expected_energy_gain"]
-            + 5.0 * local["mode_prob_uplift"]
-            - 12.0 * local["mode_prob_sink"]
+            + 16.0 * max(0.0, local_w)
+            - 18.0 * max(0.0, -local_w)
+            + 10.0 * energy
+            + 5.0 * uplift
+            - 12.0 * sink
         )
         free_lift = clamp(2.5 * max(0.0, here["wind_w"] - 0.1), 0.0, 2.0)
         powered_climb = max(0.0, float(level) - z_now - free_lift)
         climb_up = powered_climb * climb_cost_per_level_j
-        # Terminal return to goal altitude (glide recovers some energy).
         terminal_align = abs(float(level) - goal_z) * 0.7 * climb_cost_per_level_j
-        # Mild preference to stay put when scores are close (anti-chatter).
         leave_current = abs(float(level) - z_now) * 0.2 * climb_cost_per_level_j
         return (
             wind_saving
             - climb_up
             - terminal_align
             - leave_current
-            - 8.0 * local["uncertainty"]
-            - 6.0 * local["safety_penalty"]
+            - 8.0 * unc
+            - 6.0 * safety
         )
 
     # Default anchor: current band (or clearance floor), never forced higher without wind gain.
     anchor = int(round(clamp(max(z_now, floor) if goal_z <= z_now + 0.25 else max(z_now, goal_z, floor), search_min, max_level)))
+    if anchor not in level_here_idx:
+        anchor = levels[0]
     best_z = float(anchor)
     best_score = band_score(anchor)
     # Small margin so we only change altitude when the gain is clear.
@@ -2108,39 +2773,42 @@ def _preferred_cruise_altitude(
     guide_target: float | None = None
     if preferred_cruise_agl is not None and horizontal_cells > 6.0:
         guide_target = clamp(float(preferred_cruise_agl), float(search_min), float(max_level))
-        # Soften the switch bar when climbing/descending toward the guide-selected band.
         margin = 35.0 + 6.0 * max(0.0, 10.0 - horizontal_cells)
-    for level in range(search_min, max_level + 1):
+    tw_now = band_tailwind(anchor)
+    for level in levels:
         if level == anchor:
             continue
         score = band_score(level)
-        # Reject climbing into a clearly worse headwind than the current band.
-        if level > z_now + 0.4 and band_tailwind(float(level)) < band_tailwind(z_now) - 0.45:
+        if level > z_now + 0.4 and band_tailwind(level) < tw_now - 0.45:
             if guide_target is None or abs(float(level) - guide_target) > 0.6:
                 continue
         level_margin = margin
         if guide_target is not None and abs(float(level) - guide_target) <= 0.6:
             level_margin = min(level_margin, 20.0)
-            score += 45.0  # Prefer the energy-guide cruise band.
+            score += 45.0
         if score > best_score + level_margin:
             best_score = score
             best_z = float(level)
 
-    # Explicitly pull toward the sticky guide band when it is not far worse.
     if guide_target is not None:
         target = float(guide_target)
-        # Score the fractional guide target (not only integer wind-grid levels).
-        target_score = band_score(int(round(clamp(target, search_min, max_level))))
-        # Blend: prefer exact guide height if nearby integer score is competitive.
-        if target_score > best_score - 55.0:
-            best_z = target
+        target_level = int(round(clamp(target, search_min, max_level)))
+        if target_level in level_here_idx:
+            target_score = band_score(target_level)
+            if target_score > best_score - 55.0:
+                best_z = target
 
     # Free-lift ride: allow drifting up one band when uplift is free and not into headwind.
-    here = _sample_belief_state(belief_map, x, y, z_now)
-    if here["wind_w"] > 0.18 and horizontal_cells > 7.0 and band_tailwind(z_now) >= -0.35:
+    if here["wind_w"] > 0.35 and best_z <= z_now + 0.2 and max_level >= search_min:
+        up = int(min(max_level, math.floor(z_now) + 1))
+        if up in level_here_idx and band_tailwind(up) >= tw_now - 0.2:
+            if band_score(up) > best_score - 40.0:
+                best_z = max(best_z, float(up))
+
+    if here["wind_w"] > 0.18 and horizontal_cells > 7.0 and tw_now >= -0.35:
         soft = min(float(max_level), max(z_now, floor) + 0.9)
         soft_i = int(clamp(round(soft), search_min, max_level))
-        if band_tailwind(float(soft_i)) >= band_tailwind(z_now) - 0.2 and band_score(soft_i) > best_score - 50.0:
+        if soft_i in level_here_idx and band_tailwind(soft_i) >= tw_now - 0.2 and band_score(soft_i) > best_score - 50.0:
             best_z = max(best_z, min(soft, float(soft_i)))
 
     # Near goal: start bleeding altitude so we can land without a hover-descent.
@@ -2156,7 +2824,6 @@ def _preferred_cruise_altitude(
 
     # Rate-limit altitude change per replan; always allow climbing toward an elevated goal.
     best_z = max(best_z, floor)
-    # Allow a bit more climb per replan when a higher guide band is selected.
     climb_cap = 1.35 if guide_target is not None and guide_target > z_now + 0.4 else 1.0
     best_z = clamp(best_z, z_now - 1.0, z_now + climb_cap)
     best_z = clamp(best_z, float(search_min), float(max_level))
