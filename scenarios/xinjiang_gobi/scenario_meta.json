@@ -1,0 +1,41 @@
+{
+  "name": "xinjiang_gobi",
+  "description": "Hami Gobi corridor / arid basin (SRTM N42E093)",
+  "lat": 42.83,
+  "lon": 93.52,
+  "hgt": "data/N42E093.hgt",
+  "start_time": "2024-02-10T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 748.684298938934,
+    "max": 780.6114740393215,
+    "mean": 766.228058842531
+  },
+  "wind": {
+    "u_km_mean": 3.54600773477669,
+    "v_km_mean": -0.8489915592340327,
+    "speed_mean": 3.6474975627515547,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      41
+    ],
+    "goal": [
+      65,
+      19
+    ]
+  },
+  "built_at": "2026-08-08T13:36:08Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}
