@@ -125,12 +125,12 @@ python -m unittest tests.test_pipeline
 
 ### 真实场景数据（防过拟合）
 
-数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。当前已构建 **10** 张真实地图。
+数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。当前已构建 **14** 张真实地图。
 
 | 分组 | 场景 | 地形类型 |
 |------|------|----------|
 | Core（调参常用） | fujian_hills / beijing_plain / qinghai_ridge / qingdao_coast | 丘陵、平原、高原脊、海岸 |
-| Holdout（独立验收） | zhangbei_steppe / yunnan_karst / xinjiang_gobi / jilin_forest / neimeng_grass / sichuan_foothills | 坝上草原、喀斯特、戈壁、林地、锡林郭勒草原、四川盆地边缘 |
+| Holdout（独立验收） | zhangbei_steppe / yunnan_karst / xinjiang_gobi / jilin_forest / neimeng_grass / sichuan_foothills / hainan_coast / gansu_hexi / shanxi_loess / hubei_jianghan | 坝上、喀斯特、戈壁、林地、锡林郭勒、四川盆地边缘、海南热带丘陵、河西走廊、黄土沟壑、江汉平原 |
 
 构建 / 补下载：
 
