@@ -100,8 +100,8 @@ class Mission:
     clearance_agl_level: float = 1.0
     # Planning grid for cruise AGL candidates (levels). 0.02 ≈ 1 m if altitude_step_m=50.
     cruise_band_step: float = 0.02
-    # Lateral corridor gate: risk-adjusted energy must be ≤ margin * straight.
-    # None / ≤0 disables corridors; default 0.97 = require ~3% clear edge vs straight.
+    # Lateral corridor generation ceiling vs straight (model Joules).
+    # None / ≤0 disables corridors; final commit still requires a clearer win (~0.8%).
     corridor_energy_margin: float | None = 1.02
     # Optional DEM (meters). When set, constant-AGL moves pay terrain climb energy.
     elevation: list[list[float]] | None = None
