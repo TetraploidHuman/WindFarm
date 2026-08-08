@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .config import MissionConfig, SimulationConfig, TaskConfig, load_task_config, save_task_config
+from .config import BeliefConfig, MissionConfig, SimulationConfig, TaskConfig, load_task_config, save_task_config
 from .data_ingest import (
     DEFAULT_SCENARIOS,
     ScenarioSpec,
@@ -20,15 +20,30 @@ from .data_ingest import (
 )
 from .simulator import EnvironmentSimulator
 
+# Legacy 48×36 @ 50 m geographic span — keep extent, densify cells.
+DEFAULT_EXTENT_M = (2350.0, 1750.0)
+DEFAULT_RESOLUTION_M = 30.0
+REF_ALTITUDE_STEP_M = 50.0
+REF_CLIMB_COST_J = 225.0
+OBS_RADIUS_M = 200.0
+
+
+def grid_dims_for_extent(extent_x_m: float, extent_y_m: float, resolution_m: float) -> tuple[int, int]:
+    res = max(float(resolution_m), 1e-6)
+    width = int(round(float(extent_x_m) / res)) + 1
+    height = int(round(float(extent_y_m) / res)) + 1
+    return max(width, 2), max(height, 2)
+
 
 def build_scenario_dataset(
     spec: ScenarioSpec,
     output_dir: str | Path,
     *,
     data_dir: str | Path = "data",
-    width: int = 24,
-    height: int = 18,
-    resolution_m: float = 100.0,
+    width: int | None = None,
+    height: int | None = None,
+    resolution_m: float = DEFAULT_RESOLUTION_M,
+    extent_m: tuple[float, float] = DEFAULT_EXTENT_M,
     time_steps: int = 120,
     sample_interval_seconds: int = 15,
     seed: int = 7,
@@ -38,6 +53,11 @@ def build_scenario_dataset(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir = Path(data_dir)
+    resolution_m = float(resolution_m)
+    if width is None or height is None:
+        auto_w, auto_h = grid_dims_for_extent(extent_m[0], extent_m[1], resolution_m)
+        width = int(width if width is not None else auto_w)
+        height = int(height if height is not None else auto_h)
 
     hgt = ensure_srtm_tile(data_dir, spec.tile_lat, spec.tile_lon)
     terrain = terrain_from_srtm(
@@ -62,14 +82,13 @@ def build_scenario_dataset(
             "width": width,
             "height": height,
             "resolution_m": resolution_m,
-            "source": "SRTM1/skadi",
+            "source": "SRTM1/skadi native crop",
         },
     )
 
     # Align simulation start with the first wind hour so interpolation stays in-range.
     hourly = fetch_open_meteo_hourly(spec.lat, spec.lon, spec.wind_start_date, spec.wind_end_date)
     start_time = hourly[0]["timestamp"]
-    # Prefer mid-morning of the first day when available.
     for item in hourly:
         if item["timestamp"][11:13] == "08":
             start_time = item["timestamp"]
@@ -80,7 +99,7 @@ def build_scenario_dataset(
         coarse,
         meta={
             "scenario": spec.name,
-            "source": "Open-Meteo archive (ERA5-backed)",
+            "source": "Open-Meteo archive (ERA5-backed) 10m+100m",
             "lat": spec.lat,
             "lon": spec.lon,
             "wind_start_date": spec.wind_start_date,
@@ -101,7 +120,6 @@ def build_scenario_dataset(
         coarse_wind=coarse,
     )
     simulator.write_dataset(dataset, str(output_dir))
-    # Re-write terrain/coarse with metadata (write_dataset overwrites plain versions).
     write_terrain_json(
         output_dir / "terrain.json",
         terrain,
@@ -111,7 +129,7 @@ def build_scenario_dataset(
             "lat": spec.lat,
             "lon": spec.lon,
             "hgt": str(hgt),
-            "source": "SRTM1/skadi",
+            "source": "SRTM1/skadi native crop",
         },
     )
     write_coarse_wind_json(
@@ -119,7 +137,7 @@ def build_scenario_dataset(
         coarse,
         meta={
             "scenario": spec.name,
-            "source": "Open-Meteo archive (ERA5-backed)",
+            "source": "Open-Meteo archive (ERA5-backed) 10m+100m",
             "lat": spec.lat,
             "lon": spec.lon,
             "wind_start_date": spec.wind_start_date,
@@ -132,6 +150,11 @@ def build_scenario_dataset(
         config = load_task_config(base_config)
     else:
         config = TaskConfig()
+
+    climb_cost = REF_CLIMB_COST_J * (resolution_m / REF_ALTITUDE_STEP_M)
+    cruise_band_step = max(0.01, 1.0 / resolution_m)
+    obs_radius = max(2, int(round(OBS_RADIUS_M / resolution_m)))
+
     config.simulation = SimulationConfig(
         width=width,
         height=height,
@@ -141,6 +164,10 @@ def build_scenario_dataset(
         sample_interval_seconds=sample_interval_seconds,
         report_keyframe_interval=config.simulation.report_keyframe_interval,
     )
+    belief_kwargs = {f: getattr(config.belief, f) for f in BeliefConfig.__dataclass_fields__}
+    belief_kwargs["observation_radius"] = obs_radius
+    config.belief = BeliefConfig(**belief_kwargs)
+
     config.mission = MissionConfig(
         start=start,
         goal=goal,
@@ -155,12 +182,13 @@ def build_scenario_dataset(
         climb_power_per_mps_w=config.mission.climb_power_per_mps_w,
         descent_power_reduction_per_mps_w=config.mission.descent_power_reduction_per_mps_w,
         reserve_energy_ratio=config.mission.reserve_energy_ratio,
-        altitude_step_m=config.mission.altitude_step_m,
+        altitude_step_m=resolution_m,
         min_altitude_level=config.mission.min_altitude_level,
         max_altitude_level=config.mission.max_altitude_level,
-        climb_cost_per_level_j=config.mission.climb_cost_per_level_j,
+        climb_cost_per_level_j=climb_cost,
         clearance_agl_level=config.mission.clearance_agl_level,
-        cruise_band_step=getattr(config.mission, "cruise_band_step", 0.025),
+        cruise_band_step=cruise_band_step,
+        corridor_energy_margin=getattr(config.mission, "corridor_energy_margin", 0.97),
     )
     save_task_config(output_dir / "config.json", config)
 
@@ -175,14 +203,17 @@ def build_scenario_dataset(
         "start_time": start_time,
         "time_steps": time_steps,
         "grid": {"width": width, "height": height, "resolution_m": resolution_m},
+        "extent_m": {"x": (width - 1) * resolution_m, "y": (height - 1) * resolution_m},
         "elevation_m": {"min": min(flat), "max": max(flat), "mean": sum(flat) / max(len(flat), 1)},
         "wind": {
             "u_km_mean": sum(s["u_km"] for s in coarse) / len(coarse),
             "v_km_mean": sum(s["v_km"] for s in coarse) / len(coarse),
             "speed_mean": sum((s["u_km"] ** 2 + s["v_km"] ** 2) ** 0.5 for s in coarse) / len(coarse),
+            "has_100m_profile": all("u100_km" in s for s in coarse),
         },
         "mission": {"start": list(start), "goal": list(goal)},
         "built_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "source": "SRTM1 native crop + Open-Meteo 10m/100m",
     }
     (output_dir / "scenario_meta.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
@@ -193,6 +224,10 @@ def build_default_scenarios(
     data_dir: str | Path = "data",
     base_config: str | Path | None = "config_eval.json",
     only: list[str] | None = None,
+    *,
+    resolution_m: float = DEFAULT_RESOLUTION_M,
+    width: int | None = None,
+    height: int | None = None,
 ) -> list[dict]:
     scenarios_dir = Path(scenarios_dir)
     scenarios_dir.mkdir(parents=True, exist_ok=True)
@@ -200,16 +235,20 @@ def build_default_scenarios(
     for spec in DEFAULT_SCENARIOS:
         if only and spec.name not in only:
             continue
-        print(f"[scenario] building {spec.name}: {spec.description}")
+        print(f"[scenario] building {spec.name}: {spec.description} @ {resolution_m:.0f} m")
         summary = build_scenario_dataset(
             spec,
             scenarios_dir / spec.name,
             data_dir=data_dir,
             base_config=base_config if base_config and Path(base_config).exists() else None,
+            resolution_m=resolution_m,
+            width=width,
+            height=height,
         )
         summaries.append(summary)
         print(
-            f"  elev {summary['elevation_m']['min']:.0f}–{summary['elevation_m']['max']:.0f} m, "
+            f"  grid {summary['grid']['width']}×{summary['grid']['height']} @ {summary['grid']['resolution_m']} m, "
+            f"elev {summary['elevation_m']['min']:.0f}–{summary['elevation_m']['max']:.0f} m, "
             f"wind_speed≈{summary['wind']['speed_mean']:.2f} m/s, "
             f"mission {summary['mission']['start']}→{summary['mission']['goal']}"
         )
@@ -218,9 +257,10 @@ def build_default_scenarios(
     return summaries
 
 
-def resolve_scenario_spec(name: str) -> ScenarioSpec:
-    for spec in DEFAULT_SCENARIOS:
-        if spec.name == name:
-            return spec
-    known = ", ".join(s.name for s in DEFAULT_SCENARIOS)
-    raise KeyError(f"Unknown scenario '{name}'. Known: {known}")
+__all__ = [
+    "DEFAULT_EXTENT_M",
+    "DEFAULT_RESOLUTION_M",
+    "build_default_scenarios",
+    "build_scenario_dataset",
+    "grid_dims_for_extent",
+]

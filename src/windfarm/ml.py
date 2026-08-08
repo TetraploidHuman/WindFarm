@@ -220,7 +220,7 @@ class XGBoostRegressor:
         array = np.asarray([features], dtype=np.float32)
         return float(self.booster.inplace_predict(array)[0])
 
-    def predict_many(self, feature_rows: list[list[float]] | object) -> list[float]:
+    def predict_many(self, feature_rows: list[list[float]] | object) -> list[float] | object:
         if np is None or xgb is None:
             raise RuntimeError("XGBoost runtime is not available.")
         array = np.asarray(feature_rows, dtype=np.float32)
@@ -228,7 +228,9 @@ class XGBoostRegressor:
             return []
         if array.ndim == 1:
             array = array.reshape(1, -1)
-        return [float(value) for value in self.booster.inplace_predict(array)]
+        preds = self.booster.inplace_predict(array)
+        # Keep ndarray on the hot path; callers that need lists can convert.
+        return preds
 
     def to_dict(self) -> dict:
         raw = bytes(self.booster.save_raw())
@@ -275,7 +277,7 @@ class LightGBMRegressor:
         array = np.asarray([features], dtype=np.float32)
         return float(self.booster.predict(array)[0])
 
-    def predict_many(self, feature_rows: list[list[float]] | object) -> list[float]:
+    def predict_many(self, feature_rows: list[list[float]] | object) -> list[float] | object:
         if lgb is None or np is None:
             raise RuntimeError("LightGBM runtime is not available.")
         array = np.asarray(feature_rows, dtype=np.float32)
@@ -283,7 +285,7 @@ class LightGBMRegressor:
             return []
         if array.ndim == 1:
             array = array.reshape(1, -1)
-        return [float(value) for value in self.booster.predict(array)]
+        return self.booster.predict(array)
 
     def to_dict(self) -> dict:
         return {
@@ -648,18 +650,31 @@ class ResidualWindModel:
         vector = [features[name] for name in self.feature_names]
         return self.u_model.predict(vector), self.v_model.predict(vector), self.w_model.predict(vector)
 
-    def predict_batch(self, feature_rows: list[list[float]]) -> tuple[list[float], list[float], list[float]]:
-        if not feature_rows:
+    def predict_batch(self, feature_rows: list[list[float]] | object) -> tuple[list[float], list[float], list[float]]:
+        if feature_rows is None:
+            return [], [], []
+        if hasattr(feature_rows, "__len__") and len(feature_rows) == 0:
             return [], [], []
         if hasattr(self.u_model, "predict_many"):
+            # Parallel u/v/w when the feature matrix is large enough to amortize threads.
+            n = len(feature_rows)
+            if n >= 512:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    fu = pool.submit(self.u_model.predict_many, feature_rows)
+                    fv = pool.submit(self.v_model.predict_many, feature_rows)
+                    fw = pool.submit(self.w_model.predict_many, feature_rows)
+                    return fu.result(), fv.result(), fw.result()
             return (
                 self.u_model.predict_many(feature_rows),
                 self.v_model.predict_many(feature_rows),
                 self.w_model.predict_many(feature_rows),
             )
-        du = [self.u_model.predict(row) for row in feature_rows]
-        dv = [self.v_model.predict(row) for row in feature_rows]
-        dw = [self.w_model.predict(row) for row in feature_rows]
+        rows = feature_rows if isinstance(feature_rows, list) else np.asarray(feature_rows, dtype=np.float32).tolist()
+        du = [self.u_model.predict(row) for row in rows]
+        dv = [self.v_model.predict(row) for row in rows]
+        dw = [self.w_model.predict(row) for row in rows]
         return du, dv, dw
 
     def to_json(self) -> str:

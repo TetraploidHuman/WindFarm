@@ -17,9 +17,16 @@ from windfarm.execution import NavigationEngine
 from windfarm.io import coarse_samples_from_dict, observations_from_dict
 from windfarm.mission_runner import MissionRunner
 from windfarm.pipeline import WindFarmPipeline
-from windfarm.planner import compute_return_cost_map, plan_path_details, transition_cost_breakdown
+from windfarm.planner import (
+    compute_return_cost_map,
+    plan_path_details,
+    transition_cost_breakdown,
+    _energy_guide_paths,
+    _select_preferred_cruise_band,
+)
+from windfarm.physics import downscale_wind
 from windfarm.simulator import EnvironmentSimulator
-from windfarm.types import Mission, TrainingSample
+from windfarm.types import Mission, TerrainField, TrainingSample
 
 
 class PipelineTest(unittest.TestCase):
@@ -270,12 +277,13 @@ class PipelineTest(unittest.TestCase):
 
     def test_belief_snapshot_exposes_probabilities_and_safety(self) -> None:
         belief_map = create_belief_map(2, 2, 1)
-        cell = belief_map.cells[0][0][0]
-        cell.mode_prob_sink = 0.1
-        cell.mode_prob_neutral = 0.3
-        cell.mode_prob_uplift = 0.6
-        cell.belief_entropy = 1.2
-        cell.safety_penalty = 0.4
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        arrays["mode_prob_sink"][0, 0, 0] = 0.1
+        arrays["mode_prob_neutral"][0, 0, 0] = 0.3
+        arrays["mode_prob_uplift"][0, 0, 0] = 0.6
+        arrays["belief_entropy"][0, 0, 0] = 1.2
+        arrays["safety_penalty"][0, 0, 0] = 0.4
 
         snapshot = belief_snapshot(belief_map, 0)
 
@@ -283,6 +291,92 @@ class PipelineTest(unittest.TestCase):
         self.assertAlmostEqual(snapshot["sink_prob"][0][0], 0.1)
         self.assertAlmostEqual(snapshot["entropy"][0][0], 1.2)
         self.assertAlmostEqual(snapshot["safety"][0][0], 0.4)
+
+    def test_corridor_guides_disabled_when_margin_none(self) -> None:
+        width, height, levels = 24, 14, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    # Stronger eastward wind on the north side → +y corridor is cheaper.
+                    u = 12.0 if y >= height // 2 + 2 else -10.0
+                    arrays["wind_u"][z, y, x] = u
+                    arrays["uncertainty"][z, y, x] = 0.02
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = u
+                    cell.uncertainty = 0.02
+        elev = [[10.0 for _ in range(width)] for _ in range(height)]
+        start = (2.0, height / 2.0, 0.0)
+        goal = (width - 3, height // 2, 0)
+        mission = Mission(
+            start=(2, height // 2, 0),
+            goal=goal,
+            max_steps=40,
+            step_distance_m=50.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=None,
+            elevation=elev,
+        )
+        guides_off = _energy_guide_paths(start, goal, belief_map, mission)
+        self.assertTrue(any(label.startswith("guide_straight_agl") for label, _ in guides_off))
+        self.assertFalse(any(label.startswith("guide_corridor_") for label, _ in guides_off))
+
+        mission.corridor_energy_margin = 0.95
+        guides_on = _energy_guide_paths(start, goal, belief_map, mission)
+        self.assertTrue(
+            any(label.startswith("guide_corridor_") for label, _ in guides_on),
+            msg=f"expected a corridor candidate, got {[l for l,_ in guides_on]}",
+        )
+
+    def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:
+        # Noise-sized 0.5% "win" at higher band must not leave clearance.
+        scores = {1.0: 1000.0, 1.35: 995.0, 2.0: 990.0}
+        z = _select_preferred_cruise_band(scores, sticky=None, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
+        self.assertAlmostEqual(z, 1.0, places=5)
+        # Clear ≥1.5% win does climb.
+        scores2 = {1.0: 1000.0, 1.5: 980.0, 2.5: 820.0}
+        z2 = _select_preferred_cruise_band(scores2, sticky=None, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
+        self.assertAlmostEqual(z2, 2.5, places=5)
+        # Sticky high layer with strong savings holds against weak lower argmin.
+        scores3 = {1.0: 1000.0, 2.5: 820.0, 2.7: 818.0}
+        z3 = _select_preferred_cruise_band(scores3, sticky=2.5, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
+        self.assertAlmostEqual(z3, 2.5, places=5)
+        # Mistaken sticky with ≥2.5% worse than clearance → corrective step down.
+        scores4 = {1.0: 1000.0, 1.6: 1040.0}
+        z4 = _select_preferred_cruise_band(scores4, sticky=1.6, clearance=1.0, remaining_horiz=40.0, band_step=0.05)
+        self.assertLess(z4, 1.6)
+
+    def test_downscale_uses_100m_profile_aloft(self) -> None:
+        elev = [[100.0, 110.0], [105.0, 115.0]]
+        terrain = TerrainField(
+            elevation=elev,
+            slope=[[0.1, 0.1], [0.1, 0.1]],
+            aspect=[[0.0, 0.0], [0.0, 0.0]],
+            roughness=[[0.05, 0.05], [0.05, 0.05]],
+        )
+        wind_no, _ = downscale_wind(2.0, 0.0, terrain, 0.0, altitude_levels=5, altitude_step_m=30.0)
+        wind_yes, _ = downscale_wind(
+            2.0,
+            0.0,
+            terrain,
+            0.0,
+            altitude_levels=5,
+            altitude_step_m=30.0,
+            u_100=6.0,
+            v_100=0.0,
+        )
+        import numpy as np
+
+        u0 = float(np.asarray(wind_yes.u)[0].mean())
+        u_hi = float(np.asarray(wind_yes.u)[-1].mean())
+        u_hi_no = float(np.asarray(wind_no.u)[-1].mean())
+        self.assertGreater(u_hi, u0)
+        self.assertGreater(abs(u_hi), abs(u_hi_no))
 
     def test_navigation_engine_uses_local_window_between_keyframes(self) -> None:
         config = TaskConfig()

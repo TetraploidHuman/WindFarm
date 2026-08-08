@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 from .mathutils import clamp
 from .types import DroneState
 
@@ -105,6 +107,227 @@ def transition_energy_j(
         baseline_power + wind_power + maneuver_power + climb_power + legacy_vertical_bias - descent_credit - uplift_credit,
     )
     return max(0.0, total_power * travel_time)
+
+
+def transition_energy_batch(
+    airspeed: float,
+    currents,
+    nexts,
+    local_u,
+    local_v,
+    local_w,
+    step_distance_m: float,
+    altitude_step_m: float,
+    climb_cost_per_level_j: float,
+    hover_power_w: float = 105.0,
+    cruise_power_w: float = 150.0,
+    hotel_power_w: float = 18.0,
+    headwind_power_per_mps_w: float = 14.0,
+    climb_power_per_mps_w: float = 125.0,
+    descent_power_reduction_per_mps_w: float = 58.0,
+    terrain_dz_m=0.0,
+):
+    """Vectorized transition_energy_j for N segments. Arrays shaped (N,) / (N,3)."""
+    import numpy as np
+
+    cur = np.asarray(currents, dtype=np.float64)
+    nxt = np.asarray(nexts, dtype=np.float64)
+    if cur.ndim == 1:
+        cur = cur.reshape(1, 3)
+        nxt = nxt.reshape(1, 3)
+    u = np.asarray(local_u, dtype=np.float64).reshape(-1)
+    v = np.asarray(local_v, dtype=np.float64).reshape(-1)
+    w = np.asarray(local_w, dtype=np.float64).reshape(-1)
+    terrain_dz = np.asarray(terrain_dz_m, dtype=np.float64)
+    if terrain_dz.ndim == 0:
+        terrain_dz = np.full(cur.shape[0], float(terrain_dz), dtype=np.float64)
+    else:
+        terrain_dz = terrain_dz.reshape(-1)
+
+    env = DEFAULT_ENVELOPE
+    return _transition_energy_batch_core(
+        float(airspeed),
+        cur,
+        nxt,
+        u,
+        v,
+        w,
+        float(step_distance_m),
+        float(altitude_step_m),
+        float(climb_cost_per_level_j),
+        float(hover_power_w),
+        float(cruise_power_w),
+        float(hotel_power_w),
+        float(headwind_power_per_mps_w),
+        float(climb_power_per_mps_w),
+        float(descent_power_reduction_per_mps_w),
+        terrain_dz,
+        float(env.max_bank_rad),
+        float(env.best_glide_speed),
+        float(env.induced_drag_coeff),
+        float(env.base_sink_mps),
+        float(env.polar_quad_coeff),
+    )
+
+
+def _transition_energy_batch_core_numpy(
+    airspeed,
+    cur,
+    nxt,
+    u,
+    v,
+    w,
+    step_distance_m,
+    altitude_step_m,
+    climb_cost_per_level_j,
+    hover_power_w,
+    cruise_power_w,
+    hotel_power_w,
+    headwind_power_per_mps_w,
+    climb_power_per_mps_w,
+    descent_power_reduction_per_mps_w,
+    terrain_dz,
+    max_bank_rad,
+    best_glide_speed,
+    induced_drag_coeff,
+    base_sink_mps,
+    polar_quad_coeff,
+):
+    import numpy as np
+
+    move_dx = nxt[:, 0] - cur[:, 0]
+    move_dy = nxt[:, 1] - cur[:, 1]
+    move_dz = nxt[:, 2] - cur[:, 2]
+    move_norm = np.maximum(np.hypot(move_dx, move_dy), 1e-6)
+    headwind = -((u * move_dx) + (v * move_dy)) / move_norm - 0.2 * w
+    horizontal_distance_cells = np.hypot(move_dx, move_dy)
+    alt_step = max(float(altitude_step_m), 1e-6)
+    effective_dz = move_dz + terrain_dz / alt_step
+    step_distance = np.hypot(horizontal_distance_cells * step_distance_m, np.abs(effective_dz) * alt_step)
+    bank_cap = max_bank_rad * 0.45
+    bank_rad = np.clip(np.abs(np.arctan2(move_dy, np.maximum(move_dx, 1e-6))), 0.0, bank_cap)
+
+    vv = float(max(8.5, min(22.0, airspeed)))
+    dv = vv - best_glide_speed
+    bank_penalty = induced_drag_coeff * np.maximum(
+        0.0,
+        (1.0 / np.maximum(np.cos(np.clip(bank_rad, 0.0, max_bank_rad)), 1e-3)) - 1.0,
+    )
+    sink = base_sink_mps + polar_quad_coeff * dv * dv + bank_penalty
+    thermal_credit = 55.0 * np.maximum(w - sink, 0.0)
+    profile_drag = 42.0 + 0.48 * airspeed * airspeed
+    bank_drag = 18.0 * np.maximum(
+        0.0,
+        (1.0 / np.maximum(np.cos(np.clip(bank_rad, 0.0, max_bank_rad)), 1e-3)) - 1.0,
+    )
+    aero = np.maximum(12.0, profile_drag + bank_drag - thermal_credit)
+
+    travel_time = step_distance / np.maximum(airspeed - headwind, 4.0)
+    vertical_rate_mps = (effective_dz * alt_step) / np.maximum(travel_time, 1e-6)
+    baseline_power = cruise_power_w + hotel_power_w
+    wind_power = headwind_power_per_mps_w * np.maximum(headwind, 0.0) - 0.45 * headwind_power_per_mps_w * np.maximum(
+        -headwind, 0.0
+    )
+    maneuver_power = np.maximum(0.0, aero - 90.0)
+    climb_power = climb_power_per_mps_w * np.maximum(vertical_rate_mps, 0.0)
+    descent_credit = descent_power_reduction_per_mps_w * np.maximum(-vertical_rate_mps, 0.0)
+    uplift_credit = 0.30 * descent_power_reduction_per_mps_w * np.maximum(w, 0.0)
+    legacy_vertical_bias = climb_cost_per_level_j * np.maximum(effective_dz, 0.0) / np.maximum(travel_time, 1e-6)
+    total_power = np.maximum(
+        hover_power_w,
+        baseline_power + wind_power + maneuver_power + climb_power + legacy_vertical_bias - descent_credit - uplift_credit,
+    )
+    return np.maximum(0.0, total_power * travel_time)
+
+
+try:
+    from numba import njit
+
+    @njit(cache=True)
+    def _transition_energy_batch_core(
+        airspeed,
+        cur,
+        nxt,
+        u,
+        v,
+        w,
+        step_distance_m,
+        altitude_step_m,
+        climb_cost_per_level_j,
+        hover_power_w,
+        cruise_power_w,
+        hotel_power_w,
+        headwind_power_per_mps_w,
+        climb_power_per_mps_w,
+        descent_power_reduction_per_mps_w,
+        terrain_dz,
+        max_bank_rad,
+        best_glide_speed,
+        induced_drag_coeff,
+        base_sink_mps,
+        polar_quad_coeff,
+    ):
+        n = cur.shape[0]
+        out = np.empty(n, dtype=np.float64)
+        alt_step = altitude_step_m if altitude_step_m > 1e-6 else 1e-6
+        bank_cap = max_bank_rad * 0.45
+        vv = airspeed
+        if vv < 8.5:
+            vv = 8.5
+        elif vv > 22.0:
+            vv = 22.0
+        dv = vv - best_glide_speed
+        profile_drag = 42.0 + 0.48 * airspeed * airspeed
+        for i in range(n):
+            move_dx = nxt[i, 0] - cur[i, 0]
+            move_dy = nxt[i, 1] - cur[i, 1]
+            move_dz = nxt[i, 2] - cur[i, 2]
+            move_norm = math.hypot(move_dx, move_dy)
+            if move_norm < 1e-6:
+                move_norm = 1e-6
+            headwind = -((u[i] * move_dx) + (v[i] * move_dy)) / move_norm - 0.2 * w[i]
+            horizontal = math.hypot(move_dx, move_dy)
+            effective_dz = move_dz + terrain_dz[i] / alt_step
+            step_distance = math.hypot(horizontal * step_distance_m, abs(effective_dz) * alt_step)
+            bank_rad = abs(math.atan2(move_dy, move_dx if move_dx > 1e-6 else 1e-6))
+            if bank_rad > bank_cap:
+                bank_rad = bank_cap
+            cos_b = math.cos(bank_rad if bank_rad < max_bank_rad else max_bank_rad)
+            if cos_b < 1e-3:
+                cos_b = 1e-3
+            bank_penalty = induced_drag_coeff * max(0.0, (1.0 / cos_b) - 1.0)
+            sink = base_sink_mps + polar_quad_coeff * dv * dv + bank_penalty
+            thermal_credit = 55.0 * max(w[i] - sink, 0.0)
+            bank_drag = 18.0 * max(0.0, (1.0 / cos_b) - 1.0)
+            aero = profile_drag + bank_drag - thermal_credit
+            if aero < 12.0:
+                aero = 12.0
+            travel_den = airspeed - headwind
+            if travel_den < 4.0:
+                travel_den = 4.0
+            travel_time = step_distance / travel_den
+            if travel_time < 1e-6:
+                travel_time = 1e-6
+            vertical_rate_mps = (effective_dz * alt_step) / travel_time
+            baseline_power = cruise_power_w + hotel_power_w
+            wind_power = headwind_power_per_mps_w * max(headwind, 0.0) - 0.45 * headwind_power_per_mps_w * max(-headwind, 0.0)
+            maneuver_power = max(0.0, aero - 90.0)
+            climb_power = climb_power_per_mps_w * max(vertical_rate_mps, 0.0)
+            descent_credit = descent_power_reduction_per_mps_w * max(-vertical_rate_mps, 0.0)
+            uplift_credit = 0.30 * descent_power_reduction_per_mps_w * max(w[i], 0.0)
+            legacy_vertical_bias = climb_cost_per_level_j * max(effective_dz, 0.0) / travel_time
+            total_power = baseline_power + wind_power + maneuver_power + climb_power + legacy_vertical_bias - descent_credit - uplift_credit
+            if total_power < hover_power_w:
+                total_power = hover_power_w
+            energy = total_power * travel_time
+            out[i] = energy if energy > 0.0 else 0.0
+        return out
+
+except Exception:  # pragma: no cover
+    import numpy as np
+
+    def _transition_energy_batch_core(*args, **kwargs):
+        return _transition_energy_batch_core_numpy(*args, **kwargs)
 
 
 def advance_continuous_state(

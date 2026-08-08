@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .api_server import serve_api
@@ -116,6 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
     scenarios_cmd.add_argument("--data-dir", default="data")
     scenarios_cmd.add_argument("--base-config", default="config_eval.json")
     scenarios_cmd.add_argument("--only", nargs="*", help="Optional subset of scenario names")
+    scenarios_cmd.add_argument("--resolution-m", type=float, default=30.0, help="Native DEM crop resolution in meters")
+    scenarios_cmd.add_argument("--width", type=int, default=None, help="Optional grid width override")
+    scenarios_cmd.add_argument("--height", type=int, default=None, help="Optional grid height override")
     return parser
 
 
@@ -223,6 +227,9 @@ def main() -> None:
             data_dir=args.data_dir,
             base_config=args.base_config,
             only=args.only or None,
+            resolution_m=args.resolution_m,
+            width=args.width,
+            height=args.height,
         )
         print(f"built {len(summaries)} scenarios under {args.output_dir}")
         return
@@ -230,6 +237,9 @@ def main() -> None:
     if args.command == "run-demo":
         import shutil
 
+        from .perf import warmup_numeric_kernels
+
+        warmup_numeric_kernels()
         config = load_task_config(args.config)
         repository = ModelRepository(args.runs_dir)
         artifacts = repository.create_run(args.run_name)
@@ -251,7 +261,12 @@ def main() -> None:
                 src = scenario_dir / name
                 if not src.exists():
                     raise SystemExit(f"Scenario missing {name}: {src}")
-                shutil.copy2(src, artifacts.run_dir / name)
+                dst = artifacts.run_dir / name
+                # Prefer hardlink for large artifacts (truth/training ~60MB each).
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copy2(src, dst)
             meta_src = scenario_dir / "scenario_meta.json"
             if meta_src.exists():
                 shutil.copy2(meta_src, artifacts.run_dir / "scenario_meta.json")
@@ -273,15 +288,22 @@ def main() -> None:
             artifacts.metrics_path,
             config.model,
         )
-        pipeline = WindFarmPipeline.from_paths(artifacts.terrain_path, artifacts.model_path, config.model)
+        pipeline = WindFarmPipeline.from_paths(
+            artifacts.terrain_path,
+            artifacts.model_path,
+            config.model,
+            altitude_step_m=config.mission.altitude_step_m,
+        )
         report = MissionRunner(pipeline, config).run(
             artifacts.run_dir / "coarse_wind.json",
             artifacts.run_dir / "observations.json",
             artifacts.mission_path,
             artifacts.run_dir / "truth.json",
         )
-        build_dashboard_from_report(artifacts.mission_path, artifacts.dashboard_path)
-        artifacts.live_dashboard_path.write_text(build_live_dashboard_html(), encoding="utf-8")
+        skip_dash = os.environ.get("WINDFARM_SKIP_DASHBOARD", "").strip() in {"1", "true", "True", "yes"}
+        if not skip_dash:
+            build_dashboard_from_report(artifacts.mission_path, artifacts.dashboard_path)
+            artifacts.live_dashboard_path.write_text(build_live_dashboard_html(), encoding="utf-8")
         repository.save_manifest(
             artifacts,
             {
@@ -293,8 +315,8 @@ def main() -> None:
                 },
                 "scenario": str(scenario_dir) if scenario_dir is not None else "synthetic",
                 "artifacts": {
-                    "dashboard": str(artifacts.dashboard_path),
-                    "live_dashboard": str(artifacts.live_dashboard_path),
+                    "dashboard": str(artifacts.dashboard_path) if not skip_dash else None,
+                    "live_dashboard": str(artifacts.live_dashboard_path) if not skip_dash else None,
                     "mission_report": str(artifacts.mission_path),
                 },
             },

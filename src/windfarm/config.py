@@ -17,8 +17,17 @@ def resolve_n_jobs(requested: int | None = 0) -> int:
     - ``0`` / ``None``: auto-adapt to the host (leave a few cores for OS / planner)
     - ``> 0``: use exactly that many threads (capped by CPU count)
     - ``< 0``: use all logical CPUs
+
+    Env ``WINDFARM_N_JOBS`` overrides when set (used by parallel multi-scenario eval
+    to avoid oversubscribing cores across concurrent run-demo processes).
     """
     cpu = detect_cpu_count()
+    env_jobs = os.environ.get("WINDFARM_N_JOBS")
+    if env_jobs is not None and str(env_jobs).strip() != "":
+        try:
+            requested = int(env_jobs)
+        except ValueError:
+            pass
     if requested is None or requested == 0:
         if cpu <= 4:
             return max(1, cpu - 1)
@@ -54,7 +63,7 @@ class ModelConfig:
 
 @dataclass(slots=True)
 class BeliefConfig:
-    observation_radius: int = 2
+    observation_radius: int = 4
     advection_gain: float = 0.25
     decay_per_step: float = 0.04
     process_noise: float = 0.18
@@ -66,13 +75,13 @@ class BeliefConfig:
 class PlannerConfig:
     risk_weight: float = 1.2
     safety_weight: float = 1.5
-    replan_interval_steps: int = 1
-    anytime_rounds: int = 4
+    replan_interval_steps: int = 2
+    anytime_rounds: int = 3
     heuristic_weight_start: float = 2.4
     heuristic_weight_end: float = 1.0
-    search_node_budget: int = 9000
+    search_node_budget: int = 6000
     horizon_steps: int = 7
-    beam_width: int = 28
+    beam_width: int = 24
     branch_width: int = 10
     discount_factor: float = 0.93
     terminal_progress_weight: float = 24.0
@@ -82,7 +91,7 @@ class PlannerConfig:
 class SimulationConfig:
     width: int = 32
     height: int = 24
-    resolution_m: float = 100.0
+    resolution_m: float = 50.0
     time_steps: int = 360
     start_time: str = "2026-03-21T08:30:00"
     sample_interval_seconds: int = 15
@@ -94,7 +103,7 @@ class MissionConfig:
     start: tuple[int, int] = (4, 18)
     goal: tuple[int, int] = (26, 7)
     max_steps: int = 80
-    step_distance_m: float = 100.0
+    step_distance_m: float = 50.0
     battery_capacity_j: float = 620000.0
     nominal_airspeed: float = 16.5
     hover_power_w: float = 105.0
@@ -104,12 +113,14 @@ class MissionConfig:
     climb_power_per_mps_w: float = 125.0
     descent_power_reduction_per_mps_w: float = 58.0
     reserve_energy_ratio: float = 0.22
-    altitude_step_m: float = 40.0
+    altitude_step_m: float = 50.0
     min_altitude_level: int = 0
     max_altitude_level: int = 4
-    climb_cost_per_level_j: float = 180.0
+    climb_cost_per_level_j: float = 225.0
     clearance_agl_level: float = 1.0
-    cruise_band_step: float = 0.025
+    # ~1 m physical when altitude_step_m=50
+    cruise_band_step: float = 0.02
+    corridor_energy_margin: float | None = 0.97
 
 
 @dataclass(slots=True)
