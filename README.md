@@ -135,8 +135,8 @@ python -m unittest tests.test_pipeline
 构建 / 补下载：
 
 ```bash
-# 若客户端 Clash Verge 已开「允许局域网」，在 NixOS 开发机上走网关代理（更快下 SRTM）：
-export HTTPS_PROXY=http://172.20.128.1:7897   # 端口以 Clash 设置页为准，常见 7890/7897
+# 若 Windows 上 Clash Verge 已开「允许局域网」，在 NixOS 开发机走代理（更快下 SRTM）：
+export HTTPS_PROXY=http://172.20.128.142:7897   # 以实际探测到的主机/端口为准
 export HTTP_PROXY="$HTTPS_PROXY"
 
 .venv-linux/bin/python -m windfarm.cli build-scenarios \
@@ -167,26 +167,39 @@ export HTTP_PROXY="$HTTPS_PROXY"
 - 走廊：只生成不差于直线的候选，终选需模型能量明确更省（约 ≥0.8%）；避免「看起来差不多」的绕行亏电
 - 信念预测改为与先验滤波融合（不再整场覆盖），近期观测与侧向风差可保留
 
-### 最新 8 场景结果（`multi-scenario-energy-20260808-222925`）
+### 最新 10 场景结果（`multi-scenario-energy-20260808-232624`）
 
-含 4 个 core + 4 个 holdout（张北 / 云南 / 新疆 / 吉林）：
+含 4 个 core + 6 个 holdout（含内蒙古草原、四川盆地边缘）：
 
 | 分组 | vs 名义直线 | vs 最佳高度带 |
 |------|-------------|---------------|
 | CORE | **+4.9%** | -0.1% |
-| HOLDOUT | **+0.2%** | -0.5% |
-| 全部 8 场景 | **+2.6%** | -0.3% |
+| HOLDOUT | -0.7% | -1.2% |
+| 全部 10 场景 | **+1.5%** | -0.8% |
 
-要点：holdout 没有出现大亏（最差约 -1.3%），说明当前策略没有明显过拟合到原四图；福建仍有 +3.3% 走廊收益，青海相对名义直线 +17%，但相对最佳高度带仍略负。
+| 场景 | save_agl% | save_best% | 备注 |
+|------|-----------|------------|------|
+| fujian_hills | +3.3 | +3.3 | 走廊兑现 |
+| beijing_plain | 0.0 | 0.0 | |
+| qinghai_ridge | +17.0 | -3.2 | 高度带收益大，相对最佳带仍负 |
+| qingdao_coast | -0.6 | -0.6 | |
+| zhangbei_steppe | 0.0 | 0.0 | |
+| yunnan_karst | 0.0 | -1.3 | |
+| xinjiang_gobi | 0.0 | 0.0 | |
+| jilin_forest | +0.8 | -0.7 | |
+| neimeng_grass | 0.0 | 0.0 | 新 holdout |
+| sichuan_foothills | **-5.2** | **-5.2** | 新 holdout，当前最差 |
+
+要点：CORE 仍稳；新 holdout 暴露四川 **-5.2%**，说明算法对弱风/盆地边缘地形仍不稳，不能只看原四图。
 
 对比：修复前糟糕 run `...-104637` 均值 **-29%**。
 
 ### 仍未解决
 
-1. **`save_best%` 尚未全面为正** — 青海 / 部分 holdout 仍略逊最优常数 AGL  
-2. **青岛偶发小幅负值** — 需继续压低错误绕行  
-3. **盘旋热利用仍弱** — 走廊有进展，热盘旋链路待加强  
-4. **10 场景全量评测** — `neimeng_grass` / `sichuan_foothills` 已构建，跑全量 holdout 验收  
+1. **`sichuan_foothills` 大亏 -5.2%** — 优先排查弱风场景下的走廊/路径偏差  
+2. **`save_best%` 尚未全面为正** — 青海 / 云南 / 吉林仍略逊最优常数 AGL  
+3. **青岛偶发小幅负值** — 需继续压低错误绕行  
+4. **盘旋热利用仍弱** — 走廊有进展，热盘旋链路待加强  
 
 ### 评测怎么读
 
