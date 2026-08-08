@@ -272,6 +272,37 @@ class BeliefUpdater:
         var_w = np.minimum(4.0, var_w + process_var)
         cov_uv = cov_uv * max(0.0, 1.0 - self.decay_per_step)
 
+        # Fuse prediction with prior belief instead of overwriting (keeps obs / shear).
+        pred_u = wind_u
+        pred_v = wind_v
+        pred_w = wind_w
+        if arrays is not None and "wind_u" in arrays:
+            prior_u = np.asarray(arrays["wind_u"], dtype=np.float64)
+            prior_v = np.asarray(arrays["wind_v"], dtype=np.float64)
+            prior_w = np.asarray(arrays["wind_w"], dtype=np.float64)
+            prior_mag = np.abs(prior_u) + np.abs(prior_v) + np.abs(prior_w)
+            informed = (last_update > 0) | (prior_mag > 1e-6)
+            pred_noise = max(float(self.observation_noise), 0.10) + 0.05
+            ku = var_u / (var_u + pred_noise)
+            kv = var_v / (var_v + pred_noise)
+            kw = var_w / (var_w + pred_noise)
+            # Uninformed cells take the prediction fully (cold start).
+            ku = np.where(informed, ku, 1.0)
+            kv = np.where(informed, kv, 1.0)
+            kw = np.where(informed, kw, 1.0)
+            # Recently observed cells resist overwrite more.
+            fresh = np.exp(-2.0 * self.decay_per_step * age)
+            resist = np.where(last_update > 0, 1.0 - 0.55 * fresh, 1.0)
+            ku = ku * resist
+            kv = kv * resist
+            kw = kw * resist
+            wind_u = prior_u + ku * (pred_u - prior_u)
+            wind_v = prior_v + kv * (pred_v - prior_v)
+            wind_w = prior_w + kw * (pred_w - prior_w)
+            var_u = np.minimum(4.0, (1.0 - ku) * var_u + ku * pred_noise)
+            var_v = np.minimum(4.0, (1.0 - kv) * var_v + kv * pred_noise)
+            var_w = np.minimum(4.0, (1.0 - kw) * var_w + kw * pred_noise)
+
         mode_entropy = _entropy_np(mode_s, mode_n, mode_u)
         horizontal_speed = np.hypot(wind_u, wind_v)
         uncertainty = ((var_u + var_v + var_w) / 3.0) + 0.25 * mode_entropy

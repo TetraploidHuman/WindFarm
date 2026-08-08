@@ -47,6 +47,28 @@ class VectorizedPhysicsTest(unittest.TestCase):
         self.assertAlmostEqual(float(arrays["wind_u"][0, 1, 2]), 1.0)
         self.assertTrue(np.isfinite(arrays["expected_energy_gain"]).all())
 
+    def test_belief_prediction_fuses_instead_of_overwrite(self) -> None:
+        belief = create_belief_map(3, 2, levels=1)
+        arrays = belief.field_arrays
+        assert arrays is not None
+        arrays["wind_u"][0, 0, 1] = 8.0
+        arrays["wind_v"][0, 0, 1] = 0.0
+        arrays["wind_w"][0, 0, 1] = 0.0
+        arrays["last_update"][0, 0, 1] = 5
+        arrays["wind_var_u"][0, 0, 1] = 0.05
+        BeliefUpdater().apply_prediction(
+            belief,
+            WindField(
+                u=np.zeros((1, 2, 3)),
+                v=np.zeros((1, 2, 3)),
+                w=np.zeros((1, 2, 3)),
+            ),
+            step=6,
+        )
+        fused = float(belief.field_arrays["wind_u"][0, 0, 1])
+        # Recent observation must not be wiped to the zero prediction.
+        self.assertGreater(fused, 4.0)
+
     def test_trilinear_batch_matches_scalar(self) -> None:
         rng = np.random.default_rng(0)
         field = rng.normal(size=(4, 5, 6))
