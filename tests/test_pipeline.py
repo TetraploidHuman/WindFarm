@@ -729,6 +729,83 @@ class PipelineTest(unittest.TestCase):
             msg=f"fresh corridor should still be offered, got {labels}",
         )
 
+    def test_multi_via_corridors_on_alternating_shear(self) -> None:
+        """Opposite lateral shear lobes unlock 2-via S-curve candidates (strong ambient)."""
+        width, height, levels = 36, 20, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        mid = height // 2
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    # First third: prefer north; last third: prefer south (needs S-curve).
+                    if x < width / 3:
+                        u = 9.0 if y >= mid + 2 else -7.0
+                    elif x > 2 * width / 3:
+                        u = 9.0 if y <= mid - 2 else -7.0
+                    else:
+                        u = 2.5
+                    arrays["wind_u"][z, y, x] = u
+                    arrays["wind_v"][z, y, x] = 0.05
+                    arrays["wind_w"][z, y, x] = 0.0
+                    arrays["uncertainty"][z, y, x] = 0.02
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = u
+                    cell.wind_v = 0.05
+                    cell.wind_w = 0.0
+                    cell.uncertainty = 0.02
+        elev = [[8.0 for _ in range(width)] for _ in range(height)]
+        start = (2.0, float(mid), 0.0)
+        goal = (width - 3, mid, 0)
+        mission = Mission(
+            start=(2, mid, 0),
+            goal=goal,
+            max_steps=50,
+            step_distance_m=40.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+        )
+        labels = [l for l, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        self.assertTrue(
+            any("2via" in l for l in labels),
+            msg=f"expected 2-via corridor candidates, got {labels}",
+        )
+
+    def test_multi_via_blocked_in_weak_wind(self) -> None:
+        """Calm ambient must not invent 2-via corridors."""
+        width, height, levels = 28, 16, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        for z in range(levels):
+            arrays["wind_u"][z, :, :] = 0.4
+            arrays["uncertainty"][z, :, :] = 0.2
+            for y in range(height):
+                for x in range(width):
+                    belief_map.cells[z][y][x].wind_u = 0.4
+                    belief_map.cells[z][y][x].uncertainty = 0.2
+        elev = [[10.0 for _ in range(width)] for _ in range(height)]
+        mid = height // 2
+        mission = Mission(
+            start=(2, mid, 0),
+            goal=(width - 3, mid, 0),
+            max_steps=40,
+            step_distance_m=40.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+        )
+        labels = [l for l, _ in _energy_guide_paths((2.0, float(mid), 0.0), (width - 3, mid, 0), belief_map, mission)]
+        self.assertFalse(any("2via" in l for l in labels), msg=f"calm 2via leak: {labels}")
+
     def test_mild_sticky_skips_mpc_even_with_guide_via(self) -> None:
         """Mild sticky + via: guides own XY; forcing MPC regresses Shanxi-class corridors."""
         width, height, levels = 20, 12, 3

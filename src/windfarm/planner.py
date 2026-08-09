@@ -1207,6 +1207,10 @@ CORRIDOR_LIGHT_SPEED_ADVANTAGE_MPS = 0.22
 CORRIDOR_LIGHT_SPEED_GEOM_MAX_ER0 = 1.07
 # Below-hard corridor hunt: farther vias (clearance-band lobes; no forced climb).
 CORRIDOR_LIGHT_OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0, 450.0, 550.0)
+# Two-via S-curves (opposite lateral signs). Only above marginal ambient — avoids
+# weak-air combinatorial thrash; targets Shanxi/Jilin-class shear that one via misses.
+CORRIDOR_MULTI_VIA_OFFSETS_M = (150.0, 250.0, 350.0)
+CORRIDOR_MULTI_VIA_DETOUR_MAX_M = 420.0
 CORRIDOR_LIGHT_DETOUR_MAX_M = 380.0
 
 
@@ -1644,18 +1648,18 @@ def _agl_guide_polyline(
     goal: State3D,
     belief_map: BeliefMap,
     mission: Mission,
-    via_xy: tuple[float, float] | None = None,
+    via_xy: tuple[float, float] | list[tuple[float, float]] | tuple[tuple[float, float], ...] | None = None,
     cruise_z: float | None = None,
 ) -> list[tuple[float, float, float]]:
     """Constant-AGL guide packed like eval `straight_agl_baseline`.
 
     Coarse waypoint packing biases band ranking (elevated cruise looks worse than
     it is). Use the same climb/hold/descend discretization as the energy metric.
+    `via_xy` may be one point or an ordered sequence (multi-via corridor).
     """
-    clearance = float(getattr(mission, "clearance_agl_level", 1.0))
     min_level, max_level = _search_level_bounds(belief_map, mission)
     if cruise_z is None:
-        cruise_z = clearance
+        cruise_z = float(getattr(mission, "clearance_agl_level", 1.0))
     cruise_z = clamp(float(cruise_z), float(min_level), float(max_level))
     sx, sy, sz = float(start[0]), float(start[1]), float(start[2])
     gx, gy, gz = float(goal[0]), float(goal[1]), float(goal[2])
@@ -1678,15 +1682,34 @@ def _agl_guide_polyline(
                 out.append(p)
         return out if out else [(sx, sy, sz)]
 
-    if via_xy is None or math.hypot(gx - sx, gy - sy) < 5.0:
+    vias: list[tuple[float, float]] = []
+    if via_xy is not None:
+        if isinstance(via_xy, tuple) and len(via_xy) == 2 and not isinstance(via_xy[0], (tuple, list)):
+            vias = [(float(via_xy[0]), float(via_xy[1]))]
+        else:
+            vias = [(float(p[0]), float(p[1])) for p in via_xy]  # type: ignore[arg-type]
+
+    if not vias or math.hypot(gx - sx, gy - sy) < 5.0:
         return _clamp_path(straight_agl_guide_polyline((sx, sy, sz), (gx, gy, gz), agl_cruise=cruise_z))
 
-    vx = clamp(float(via_xy[0]), 0.0, float(width))
-    vy = clamp(float(via_xy[1]), 0.0, float(height))
-    # Two constant-AGL legs: start → via (hold cruise) → goal (descend).
-    leg1 = straight_agl_guide_polyline((sx, sy, sz), (vx, vy, cruise_z), agl_cruise=cruise_z)
-    leg2 = straight_agl_guide_polyline((vx, vy, cruise_z), (gx, gy, gz), agl_cruise=cruise_z)
-    merged = list(leg1) + list(leg2[1:] if leg2 else [])
+    # Constant-AGL legs: start → via1 → … → viaN → goal.
+    anchors: list[tuple[float, float, float]] = [(sx, sy, sz)]
+    for vx, vy in vias:
+        anchors.append(
+            (
+                clamp(float(vx), 0.0, float(width)),
+                clamp(float(vy), 0.0, float(height)),
+                cruise_z,
+            )
+        )
+    anchors.append((gx, gy, gz))
+    merged: list[tuple[float, float, float]] = []
+    for a, b in zip(anchors, anchors[1:]):
+        leg = straight_agl_guide_polyline(a, b, agl_cruise=cruise_z)
+        if not merged:
+            merged = list(leg)
+        else:
+            merged.extend(list(leg[1:] if leg else []))
     return _clamp_path(merged)
 
 
@@ -2367,6 +2390,83 @@ def _energy_guide_paths(
                 label = f"guide_corridor_{sign:+.0f}_{offset:.1f}_z{cruise_band:g}"
                 corridor_candidates.append(
                     (label, path, has_edge, has_relief, has_light_w, band_speed)
+                )
+
+        # Two-via S-curves: opposite lateral signs at 1/3 and 2/3. Strong ambient only.
+        if band_below_hard or band_speed < CORRIDOR_MARGINAL_WIND_MPS:
+            continue
+        multi_offsets = tuple(o / cell_m for o in CORRIDOR_MULTI_VIA_OFFSETS_M)
+        multi_detour_max = CORRIDOR_MULTI_VIA_DETOUR_MAX_M / cell_m
+        for offset in multi_offsets:
+            for sign_a, sign_b in ((-1.0, 1.0), (1.0, -1.0)):
+                mx1 = clamp(sx + (1.0 / 3.0) * dx + sign_a * offset * px, 0.0, belief_map.width - 1)
+                my1 = clamp(sy + (1.0 / 3.0) * dy + sign_a * offset * py, 0.0, belief_map.height - 1)
+                mx2 = clamp(sx + (2.0 / 3.0) * dx + sign_b * offset * px, 0.0, belief_map.width - 1)
+                my2 = clamp(sy + (2.0 / 3.0) * dy + sign_b * offset * py, 0.0, belief_map.height - 1)
+                via_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, mx1, my1, samples=3)
+                via_rise += terrain_climb_along_line_m(mission.elevation, mx1, my1, mx2, my2, samples=3)
+                via_rise += terrain_climb_along_line_m(mission.elevation, mx2, my2, gx, gy, samples=3)
+                if direct_rise > 1.0 and via_rise > direct_rise * 1.10 + 0.5 * max(
+                    float(mission.altitude_step_m), 1.0
+                ):
+                    continue
+                detour = (
+                    math.hypot(mx1 - sx, my1 - sy)
+                    + math.hypot(mx2 - mx1, my2 - my1)
+                    + math.hypot(gx - mx2, gy - my2)
+                    - horiz
+                )
+                if detour > multi_detour_max:
+                    continue
+                path = _agl_guide_polyline(
+                    start,
+                    goal,
+                    belief_map,
+                    mission,
+                    via_xy=((mx1, my1), (mx2, my2)),
+                    cruise_z=cruise_band,
+                )
+                if len(path) <= 1:
+                    continue
+                relief_m = float(direct_rise - via_rise)
+                has_relief = _corridor_has_terrain_relief(
+                    path,
+                    mission,
+                    sx=sx,
+                    sy=sy,
+                    gx=gx,
+                    gy=gy,
+                    via_xy=(mx1, my1),
+                    relief_m=relief_m,
+                    direct_rise_m=float(direct_rise),
+                    straight_path=straight_probe,
+                    windless_belief=windless,
+                    straight_geom_e=straight_geom_e,
+                )
+                has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
+                if not _corridor_ambient_ok(
+                    band_speed,
+                    has_edge=has_edge,
+                    has_terrain_relief=has_relief,
+                    has_light_vertical=False,
+                ):
+                    continue
+                if not _corridor_wind_usable(
+                    path,
+                    belief_map,
+                    straight_path=straight_probe,
+                    allow_shear_unlock=True,
+                    allow_terrain_relief=has_relief,
+                    allow_light_vertical=False,
+                ):
+                    continue
+                if require_edge and not has_edge and not has_relief:
+                    continue
+                label = (
+                    f"guide_corridor_2via_{sign_a:+.0f}{sign_b:+.0f}_{offset:.1f}_z{cruise_band:g}"
+                )
+                corridor_candidates.append(
+                    (label, path, has_edge, has_relief, False, band_speed)
                 )
 
     scored: list[tuple[float, float, str, list[tuple[float, float, float]]]] = []
