@@ -1207,11 +1207,14 @@ CORRIDOR_LIGHT_SPEED_ADVANTAGE_MPS = 0.22
 CORRIDOR_LIGHT_SPEED_GEOM_MAX_ER0 = 1.07
 # Below-hard corridor hunt: farther vias (clearance-band lobes; no forced climb).
 CORRIDOR_LIGHT_OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0, 450.0, 550.0)
+# Strong / marginal ambient: cap at 350 m — 450/550 live-commits hurt Shanxi belief noise.
+CORRIDOR_STRONG_OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0)
 # Two-via S-curves (opposite lateral signs). Only above marginal ambient — avoids
 # weak-air combinatorial thrash; targets Shanxi/Jilin-class shear that one via misses.
 CORRIDOR_MULTI_VIA_OFFSETS_M = (150.0, 250.0, 350.0)
 CORRIDOR_MULTI_VIA_DETOUR_MAX_M = 420.0
 CORRIDOR_LIGHT_DETOUR_MAX_M = 380.0
+CORRIDOR_STRONG_DETOUR_MAX_M = 300.0
 
 
 def _windless_belief_map(belief_map: BeliefMap) -> BeliefMap:
@@ -2303,9 +2306,9 @@ def _energy_guide_paths(
     ux, uy = dx / horiz, dy / horiz
     px, py = -uy, ux
     direct_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, gx, gy, samples=8)
-    offset_m_list = CORRIDOR_LIGHT_OFFSETS_M if below_hard else (100.0, 150.0, 200.0, 250.0, 350.0)
+    offset_m_list = CORRIDOR_LIGHT_OFFSETS_M if below_hard else CORRIDOR_STRONG_OFFSETS_M
     offsets = tuple(offset_m / cell_m for offset_m in offset_m_list)
-    detour_max_m = CORRIDOR_LIGHT_DETOUR_MAX_M if below_hard else 300.0
+    detour_max_m = CORRIDOR_LIGHT_DETOUR_MAX_M if below_hard else CORRIDOR_STRONG_DETOUR_MAX_M
     detour_max_cells = detour_max_m / cell_m
 
     corridor_candidates: list[tuple[str, list[tuple[float, float, float]], bool, bool, bool, float]] = []
