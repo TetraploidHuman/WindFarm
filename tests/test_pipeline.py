@@ -24,12 +24,24 @@ from windfarm.planner import (
     _energy_guide_paths,
     _select_preferred_cruise_band,
 )
+from windfarm.controller import speed_to_fly_airspeed
 from windfarm.physics import downscale_wind
 from windfarm.simulator import EnvironmentSimulator
 from windfarm.types import Mission, TerrainField, TrainingSample
 
 
 class PipelineTest(unittest.TestCase):
+    def test_speed_to_fly_pushes_into_headwind_not_calm(self) -> None:
+        nominal = 16.5
+        # Calm / mild head: stay near nominal (no false speed-up on shear corridors).
+        self.assertAlmostEqual(speed_to_fly_airspeed(nominal, 0.0, 0.0), nominal, places=2)
+        self.assertAlmostEqual(speed_to_fly_airspeed(nominal, 0.4, 0.0), nominal, places=2)
+        self.assertLessEqual(speed_to_fly_airspeed(nominal, 0.2, 0.8), nominal + 0.05)
+        # Clear headwind: MacCready-style boost.
+        fast = speed_to_fly_airspeed(nominal, 1.7, 0.6)
+        self.assertGreater(fast, nominal + 1.0)
+        self.assertLessEqual(fast, 22.0)
+
     def test_end_to_end_training_prediction_and_planning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = TaskConfig()
