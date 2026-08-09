@@ -3,7 +3,7 @@
 
 For each curated scenario, using truth wind (not belief):
   - best constant-AGL straight
-  - best lateral via corridor (same offset set as planner light-air hunt)
+  - best lateral via corridor (1-via + opposite-sign 2-via S-curves)
   - same paths with headwind speed-to-fly airspeed
 
 Compares against the newest eval-* run's path_model energy.
@@ -165,7 +165,7 @@ def _eval_scenario(name: str, runs: Path) -> dict:
             best_straight = (e, e_stf, z, path)
 
     se, se_stf, sz, sp = best_straight
-    best_corr = None
+    best_corr = None  # (e, e_stf, z, kind, meta)
     for z in (sz, 1.0, 1.5, 2.0, 2.5):
         for sign in (-1.0, 1.0):
             for off_m in OFFSETS_M:
@@ -178,7 +178,29 @@ def _eval_scenario(name: str, runs: Path) -> dict:
                     path, field, elev, kw, stf_as, nominal_airspeed=nominal, energy_gate=True
                 )
                 if best_corr is None or e < best_corr[0]:
-                    best_corr = (e, e_stf, z, sign, off_m)
+                    best_corr = (e, e_stf, z, "1via", {"sign": sign, "offset_m": off_m})
+        for off_m in (150.0, 250.0, 350.0):
+            off = off_m / cell
+            for sign_a, sign_b in ((-1.0, 1.0), (1.0, -1.0)):
+                mx1 = clamp(sx + (1.0 / 3.0) * dx + sign_a * off * px, 0.0, w - 1)
+                my1 = clamp(sy + (1.0 / 3.0) * dy + sign_a * off * py, 0.0, h - 1)
+                mx2 = clamp(sx + (2.0 / 3.0) * dx + sign_b * off * px, 0.0, w - 1)
+                my2 = clamp(sy + (2.0 / 3.0) * dy + sign_b * off * py, 0.0, h - 1)
+                path = _agl_guide_polyline(
+                    start, goal, belief, mission, via_xy=((mx1, my1), (mx2, my2)), cruise_z=z
+                )
+                e = _path_energy_truth(path, field, elev, kw, const_as)
+                e_stf = _path_energy_truth(
+                    path, field, elev, kw, stf_as, nominal_airspeed=nominal, energy_gate=True
+                )
+                if best_corr is None or e < best_corr[0]:
+                    best_corr = (
+                        e,
+                        e_stf,
+                        z,
+                        "2via",
+                        {"signs": (sign_a, sign_b), "offset_m": off_m},
+                    )
 
     oracle_j = min(se, best_corr[0] if best_corr else se)
     oracle_stf_j = min(se_stf, best_corr[1] if best_corr else se_stf)
@@ -192,7 +214,8 @@ def _eval_scenario(name: str, runs: Path) -> dict:
         "oracle_corridor_kJ": (best_corr[0] / 1000.0) if best_corr else None,
         "oracle_corridor_stf_kJ": (best_corr[1] / 1000.0) if best_corr else None,
         "oracle_corridor_z": best_corr[2] if best_corr else None,
-        "oracle_corridor_offset_m": best_corr[4] if best_corr else None,
+        "oracle_corridor_kind": best_corr[3] if best_corr else None,
+        "oracle_corridor_offset_m": (best_corr[4].get("offset_m") if best_corr else None),
         "oracle_best_kJ": oracle_j / 1000.0,
         "oracle_best_stf_kJ": oracle_stf_j / 1000.0,
         "gap_vs_oracle_pct": 100.0 * (closed_j - oracle_j) / max(oracle_j, 1e-9),

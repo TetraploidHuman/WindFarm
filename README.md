@@ -190,8 +190,9 @@ export HTTP_PROXY="$HTTPS_PROXY"
   - sticky 与 raw argmin 高度带相差 >0.15 时，**双带**生成侧向走廊，并按层保底进候选
   - locked `guide_via` 必须打赢本轮最佳 fresh 走廊（≥1%），否则清除以便换侧
   - 曾试「有 via 就强制 MPC」：山西走廊回归，已撤回；mild sticky 仍 greedy 种子，via 换轨靠 guide 重竞争
+- **多 via（2 拐点 S 曲线）**：强风（≥边际风速）下在 1/3、2/3 处生成对侧偏置双 via；弱风不开。开环真值上界扫过 2-via 后仍无一图优选 2-via（缝不在缺 S 曲线）
 
-### 最新 16 场景结果（`multi-scenario-energy-20260810-020639`）
+### 最新 16 场景结果（`multi-scenario-energy-20260810-022201`）
 
 | 分组 | vs 名义直线 | vs 最佳高度带 |
 |------|-------------|---------------|
