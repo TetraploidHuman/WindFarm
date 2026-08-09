@@ -33,7 +33,20 @@ from windfarm.planner import _agl_guide_polyline, _polyline_model_energy_j
 from windfarm.types import Mission
 
 CORE = ("fujian_hills", "beijing_plain", "qinghai_ridge", "liaoning_coast")
-HOLDOUT = ("xinjiang_gobi", "sichuan_foothills", "shanxi_loess", "taiwan_hills")
+HOLDOUT = (
+    "xinjiang_gobi",
+    "sichuan_foothills",
+    "shanxi_loess",
+    "taiwan_hills",
+    "gansu_hexi",
+    "guizhou_karst",
+    "hainan_coast",
+    "hubei_jianghan",
+    "tibet_lhasa",
+    "jilin_forest",
+    "neimeng_grass",
+    "yunnan_karst",
+)
 SCENARIOS = CORE + HOLDOUT
 OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0, 450.0, 550.0)
 

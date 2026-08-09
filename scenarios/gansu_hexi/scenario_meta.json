@@ -1,0 +1,41 @@
+{
+  "name": "gansu_hexi",
+  "description": "Hexi corridor arid wind gap near Jiayuguan (SRTM N39E098)",
+  "lat": 39.75,
+  "lon": 98.5,
+  "hgt": "data/N39E098.hgt",
+  "start_time": "2024-03-05T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 1451.5382851743354,
+    "max": 1485.184451881101,
+    "mean": 1467.359141660415
+  },
+  "wind": {
+    "u_km_mean": -1.4679352430606845,
+    "v_km_mean": -1.7775031491412974,
+    "speed_mean": 2.307301129415552,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      41
+    ],
+    "goal": [
+      64,
+      20
+    ]
+  },
+  "built_at": "2026-08-08T15:57:15Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

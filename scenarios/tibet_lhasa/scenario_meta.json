@@ -1,0 +1,41 @@
+{
+  "name": "tibet_lhasa",
+  "description": "Lhasa valley / high plateau corridor (SRTM N29E091)",
+  "lat": 29.65,
+  "lon": 91.15,
+  "hgt": "data/N29E091.hgt",
+  "start_time": "2024-01-25T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 3651.08646600458,
+    "max": 3665.684065438555,
+    "mean": 3657.097542375588
+  },
+  "wind": {
+    "u_km_mean": 0.7489012801858039,
+    "v_km_mean": -0.8698926373458017,
+    "speed_mean": 1.1512948254593063,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      41
+    ],
+    "goal": [
+      64,
+      20
+    ]
+  },
+  "built_at": "2026-08-08T16:09:23Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

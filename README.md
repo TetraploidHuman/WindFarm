@@ -125,14 +125,15 @@ python -m unittest tests.test_pipeline
 
 ### 真实场景数据（防过拟合）
 
-数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。正式评测清单已收敛为 **8** 张代表性地图（磁盘上可能仍留有旧场景目录，评测会忽略）。
+数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。正式评测清单为 **16** 张（Core 4 + Holdout 12）。磁盘上若还有未编目目录（如青岛/张北），评测会忽略。
 
 | 分组 | 场景 | 地形类型 |
 |------|------|----------|
 | Core（调参常用） | fujian_hills / beijing_plain / qinghai_ridge / liaoning_coast | 东南丘陵、华北平原、高原脊、辽东海岸 |
-| Holdout（独立验收） | xinjiang_gobi / sichuan_foothills / shanxi_loess / taiwan_hills | 戈壁、四川弱风边缘、黄土沟壑、台湾迎风丘陵 |
+| Holdout（独立验收） | xinjiang_gobi / sichuan_foothills / shanxi_loess / taiwan_hills | 戈壁、四川弱风、黄土沟壑、台湾迎风丘陵 |
+| Holdout 扩展 | gansu_hexi / guizhou_karst / hainan_coast / hubei_jianghan / tibet_lhasa / jilin_forest / neimeng_grass / yunnan_karst | 河西、黔喀斯特、海南、江汉平原、拉萨河谷、长白林缘、锡林郭勒草原、滇中喀斯特 |
 
-评测并行：正式 **8** 场景默认 **`--workers 8`**（吃满多核）；场景数远大于 8 时再降。曾经 18 路并行会刷交换区，与现在无关。
+评测并行：默认 **`--workers 8`**（16 图分两波）；勿开到 16+ 以免刷交换区。
 
 构建 / 补下载：
 
@@ -146,11 +147,12 @@ export HTTP_PROXY="$HTTPS_PROXY"
   --resolution-m 30
 ```
 
-能量评测（只跑上述 8 张，并分别汇总 CORE / HOLDOUT）：
+能量评测（跑上述 16 张，并分别汇总 CORE / HOLDOUT）：
 
 ```bash
 .venv-linux/bin/python scripts/eval_multi_scenario_energy.py --workers 8
 .venv-linux/bin/python scripts/eval_multi_scenario_energy.py --only sichuan_foothills taiwan_hills
+.venv-linux/bin/python scripts/eval_open_loop_upper_bound.py
 ```
 
 **规则**：不要只对着某一张 holdout 调参；改动必须以 CORE+HOLDOUT 均值与「无单场景大亏」为准。
@@ -184,55 +186,64 @@ export HTTP_PROXY="$HTTPS_PROXY"
 - **earned 后微爬**：强风已 earned 且仍低于 `clearance+1.67` 时，仅允许一步跳到邻近更优细带（≥0.3% 更便宜）；禁止宽先验把更高带一起抬热（曾导致窜到 z=3）
 - **防过拟合**：不按地图写特例。曾试「沿航迹顺风边」与「微风高带强制爬升」，live 变差已撤回；现用通用地形/几何 + 微风垂直/水平速门控
 
-### 最新 8 场景结果（`multi-scenario-energy-20260809-230107`）
+### 最新 16 场景结果（`multi-scenario-energy-20260809-232911`）
 
 | 分组 | vs 名义直线 | vs 最佳高度带 |
 |------|-------------|---------------|
 | CORE（闽/京/青/辽） | **+9.2%** | **+4.3%** |
-| HOLDOUT（疆/川/晋/台） | **+4.3%** | **+4.3%** |
-| 全部 8 场景 | **+6.7%** | **+4.3%** |
+| HOLDOUT（12 图） | **+1.7%** | **+1.2%** |
+| 全部 16 场景 | **+3.6%** | **+2.0%** |
+
+旧 8 图子集（编目扩大后重跑，算法未改）：CORE **+9.2** / 原 HOLDOUT4 **+4.3** / 全 8 **+6.7** — 与 `230107` 持平，无回归。
 
 | 场景 | save_agl% | save_best% | 备注 |
 |------|-----------|------------|------|
-| fujian_hills | **+9.6** | **+9.6** | 顶风 speed-to-fly（原 +0.5） |
+| fujian_hills | **+9.6** | **+9.6** | 顶风 speed-to-fly |
 | beijing_plain | 0.0 | 0.0 | 平地对照 |
-| qinghai_ridge | **+19.6** | **+0.0** | 微爬对齐 2.667；zmax≈2.67 |
-| liaoning_coast | **+7.4** | **+7.4** | 走廊正样本（规划侧空速改动曾误伤，已撤回） |
+| qinghai_ridge | **+19.6** | **+0.0** | 微爬对齐 2.667 |
+| liaoning_coast | **+7.4** | **+7.4** | 走廊正样本 |
 | xinjiang_gobi | 0.0 | 0.0 | 干旱开阔 |
 | sichuan_foothills | **+1.8** | **+1.8** | 微风垂直抬升走廊 |
 | shanxi_loess | **+6.7** | **+6.7** | 走廊正样本 |
 | taiwan_hills | **+8.5** | **+8.5** | 几何走廊 + 轻顶风加速 |
-
-对比：speed-to-fly 后全场 **+5.5% → +6.7%**；福建 **+0.5 → +9.6**；台湾 **+8.2 → +8.5**；辽/青/晋/川/京/疆无倒退。
+| gansu_hexi | 0.0 | 0.0 | 河西开阔，近似直线 |
+| guizhou_karst | **-0.2** | **-0.2** | 轻微负；无大亏 |
+| hainan_coast | 0.0 | **-3.7** | 贴名义直线；最佳带在更高 AGL |
+| hubei_jianghan | **+0.9** | **+0.9** | 弱正 |
+| tibet_lhasa | 0.0 | 0.0 | 河谷对照 |
+| jilin_forest | **+0.1** | **-1.4** | 贴名义；最佳带略优 |
+| neimeng_grass | 0.0 | 0.0 | 草原对照 |
+| yunnan_karst | **+2.9** | **+1.6** | 新 holdout 正样本 |
 
 ### 负收益 / 权衡（当前）
 
 | 类型 | 状态 | 说明 |
 |------|------|------|
-| A. 弱风误走廊 | **已收敛** | 硬地板 + 几何/微风垂直/水平速门；四川转正，北京/新疆仍 0 |
-| B. 高度带未对齐 oracle | **已收敛** | 青海贴合 `agl_2.667`（`save_best≈0`） |
-| C. 台湾弱风走廊 | **已收敛（几何）** | 主因是 AGL/DEM 捷径而非 |风速| 边 |
+| A. 弱风误走廊 | **已收敛** | 硬地板 + 几何/微风门；京/疆/甘/藏/蒙仍 ≈0 |
+| B. 高度带未对齐 oracle | **部分** | 青海已贴合；海南/吉林 `save_best` 仍负（贴名义未吃高带） |
+| C. 台湾弱风走廊 | **已收敛（几何）** | 主因是 AGL/DEM 捷径而非 \|风速\| 边 |
+| D. 新 holdout 稀释均值 | **预期内** | 12 图 holdout 均值从 +4.3 降至 +1.7；难图（琼/吉）暴露高度带缝 |
 
-### 开环上界（`scripts/eval_open_loop_upper_bound.py`，`open-loop-upper-bound-20260809-231235`）
+### 开环上界（`scripts/eval_open_loop_upper_bound.py`，`open-loop-upper-bound-20260809-233551`）
 
 相对最新闭环：`gap_vs_oracle_stf%` 为正表示闭环比「真值开环最优直线/走廊 + speed-to-fly」更费电。
 
 | 场景 | gap_stf% | 说明 |
 |------|----------|------|
-| 闽/京/青/疆 | ≤0 | 已吃满或优于该开环集合 |
-| 辽 | +0.5 | 走廊几乎贴上界 |
-| 台 | +1.3 | 仍有一点几何/远偏置空间 |
-| 晋 | +2.2 | 走廊上界略高 |
-| 川 | +2.7 | 微风抬升走廊仍有小缝 |
-| **均值** | **+0.5** | 当前 8 图开环 headroom 很小 |
+| 闽/京/青/疆/甘/黔/藏/蒙 等 | ≤0 | 已吃满或优于该开环集合 |
+| 辽 / 鄂 | ≤+0.5 | 几乎贴上界 |
+| 台 / 滇 | +1.3 / +1.6 | 小缝 |
+| 晋 / 川 | +2.2 / +2.7 | 走廊上界略高 |
+| 琼 / 吉 | **+3.7 / +5.1** | 新暴露：高带/远走廊未兑现 |
+| **16 图均值** | **+0.8%** | 较 8 图 +0.5 略升；难图拉高 headroom |
 
-结论：再砸 ML 残差 RMSE 对这 8 图的 `save%` 期望增益有限；优先把川/晋/台那 1～3% 缝用信念边兑现，或换更大场景集。
+结论：旧 8 图 ML 空间仍小；新场景（琼/吉）把开环缝拉到 4～5%，可先用通用地形/高度带策略吃缝，再评估残差 ML。
 
 ### 仍未解决（按优先级）
 
-1. 把川/晋/台开环缝用信念边/导引兑现（勿过拟合单图）  
-2. 扩大场景集后再评估 ML  
-3. 局部热核盘旋：当前能量模型下对 8 图真值多为负收益  
+1. 兑现琼/吉/川/晋/台开环缝（信念边 + 高度带，勿过拟合单图）  
+2. 贵州轻微负与海南 `save_best` 负：先诊断再决定是否收紧门控  
+3. 难图 headroom 清楚后再评估残差 ML；热盘旋在真值能量下仍多为负  
 
 ### 评测怎么读
 
@@ -242,15 +253,15 @@ export HTTP_PROXY="$HTTPS_PROXY"
 | `save_agl%` 高但 `save_best%≈0` | 主要是选对了巡航带，不是动态寻风 |
 | `save_*` 大幅为负且 `z_max≈3` | 高度策略失控（应视为回归失败） |
 
-### 下一步（仍需跨 8 场景验证）
+### 下一步（跨 16 场景验证）
 
-1. 针对开环缝（川/晋/台）做信念–导引一致性，不抬高北京/新疆误走廊率  
-2. 需要时再跑 `scripts/eval_open_loop_upper_bound.py` 看 headroom  
-3. 场景集扩大后再决定是否加强残差 ML  
+1. 针对开环缝（琼/吉/川/晋/台）做信念–导引与高度带一致性，不抬高京/疆/甘误走廊率  
+2. 难图仍大缝时再加强残差 ML  
+3. 需要时重跑 `eval_open_loop_upper_bound.py`
 
 
 ## 后续方向
 
-- 继续把 `save_best%` 推向 8 场景均值稳定为正，且无单场景大亏
+- 继续把 `save_best%` 推向 16 场景均值稳定为正，且无单场景大亏
 - 接入真实 DEM、地表覆盖与机载遥测日志
 - 从单机信念更新扩展到多机协同信念共享

@@ -1,0 +1,41 @@
+{
+  "name": "guizhou_karst",
+  "description": "Guizhou plateau karst near Guiyang (SRTM N26E106)",
+  "lat": 26.55,
+  "lon": 106.7,
+  "hgt": "data/N26E106.hgt",
+  "start_time": "2024-06-20T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 1060.6145702555307,
+    "max": 1225.8829954997725,
+    "mean": 1101.8104933442874
+  },
+  "wind": {
+    "u_km_mean": 0.8593248898827465,
+    "v_km_mean": 6.1021283517233265,
+    "speed_mean": 6.162647813360024,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      11,
+      43
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-08T16:11:58Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}
