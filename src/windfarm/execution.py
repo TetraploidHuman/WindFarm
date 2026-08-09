@@ -705,30 +705,19 @@ class NavigationEngine:
             next_state.x,
             next_state.y,
         )
-        # Speed-to-fly: raise airspeed into clear horizontal headwind only.
+        # Speed-to-fly: propose MacCready airspeed, then keep it only if cheaper.
         step_headwind = horizontal_headwind_mps(
             prev,
             (next_state.x, next_state.y, next_state.z),
             energy_u,
             energy_v,
         )
-        step_airspeed = speed_to_fly_airspeed(
-            float(getattr(context.mission, "nominal_airspeed", context.state.airspeed)),
-            step_headwind,
-            energy_w,
-        )
-        next_state = DroneState(
-            x=next_state.x,
-            y=next_state.y,
-            z=next_state.z,
-            heading_rad=next_state.heading_rad,
-            battery_ratio=next_state.battery_ratio,
-            airspeed=step_airspeed,
-        )
-        required_energy = transition_energy_j(
-            airspeed=step_airspeed,
+        nominal_airspeed = float(getattr(context.mission, "nominal_airspeed", context.state.airspeed))
+        proposed_airspeed = speed_to_fly_airspeed(nominal_airspeed, step_headwind, energy_w)
+        nxt_xyz = (next_state.x, next_state.y, next_state.z)
+        energy_kw = dict(
             current=prev,
-            nxt=(next_state.x, next_state.y, next_state.z),
+            nxt=nxt_xyz,
             local_u=energy_u,
             local_v=energy_v,
             local_w=energy_w,
@@ -742,6 +731,22 @@ class NavigationEngine:
             climb_power_per_mps_w=context.mission.climb_power_per_mps_w,
             descent_power_reduction_per_mps_w=context.mission.descent_power_reduction_per_mps_w,
             terrain_dz_m=terrain_dz_m,
+        )
+        e_proposed = transition_energy_j(airspeed=proposed_airspeed, **energy_kw)
+        step_airspeed = proposed_airspeed
+        required_energy = e_proposed
+        if proposed_airspeed > nominal_airspeed + 1e-6:
+            e_nominal = transition_energy_j(airspeed=nominal_airspeed, **energy_kw)
+            if e_proposed > e_nominal:
+                step_airspeed = nominal_airspeed
+                required_energy = e_nominal
+        next_state = DroneState(
+            x=next_state.x,
+            y=next_state.y,
+            z=next_state.z,
+            heading_rad=next_state.heading_rad,
+            battery_ratio=next_state.battery_ratio,
+            airspeed=step_airspeed,
         )
         # uplift_energy_scale is applied inside transition_energy_j
         if required_energy > context.battery_j:

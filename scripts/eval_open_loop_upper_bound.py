@@ -65,7 +65,17 @@ def _mission_kw(m) -> dict:
     )
 
 
-def _path_energy_truth(path, truth_field, elev, kw, airspeed_fn) -> float:
+def _path_energy_truth(
+    path,
+    truth_field,
+    elev,
+    kw,
+    airspeed_fn,
+    *,
+    nominal_airspeed: float | None = None,
+    energy_gate: bool = False,
+) -> float:
+    """Truth-wind path energy. When energy_gate, keep proposed airspeed only if cheaper."""
     e = 0.0
     for a, b in zip(path, path[1:]):
         u = trilinear_sample(truth_field["u"], a[0], a[1], a[2])
@@ -74,8 +84,7 @@ def _path_energy_truth(path, truth_field, elev, kw, airspeed_fn) -> float:
         head = horizontal_headwind_mps(tuple(a), tuple(b), u, v)
         aspd = airspeed_fn(w, head)
         tdz = terrain_delta_m(elev, a[0], a[1], b[0], b[1])
-        e += transition_energy_j(
-            airspeed=aspd,
+        step_kw = dict(
             current=tuple(a),
             nxt=tuple(b),
             local_u=u,
@@ -84,6 +93,16 @@ def _path_energy_truth(path, truth_field, elev, kw, airspeed_fn) -> float:
             terrain_dz_m=tdz,
             **kw,
         )
+        e_prop = transition_energy_j(airspeed=aspd, **step_kw)
+        if (
+            energy_gate
+            and nominal_airspeed is not None
+            and aspd > float(nominal_airspeed) + 1e-6
+        ):
+            e_nom = transition_energy_j(airspeed=float(nominal_airspeed), **step_kw)
+            e += min(e_prop, e_nom)
+        else:
+            e += e_prop
     return e
 
 
@@ -139,7 +158,9 @@ def _eval_scenario(name: str, runs: Path) -> dict:
     for z in (1.0, 1.5, 2.0, 2.5, 3.0):
         path = _agl_guide_polyline(start, goal, belief, mission, cruise_z=z)
         e = _path_energy_truth(path, field, elev, kw, const_as)
-        e_stf = _path_energy_truth(path, field, elev, kw, stf_as)
+        e_stf = _path_energy_truth(
+            path, field, elev, kw, stf_as, nominal_airspeed=nominal, energy_gate=True
+        )
         if best_straight is None or e < best_straight[0]:
             best_straight = (e, e_stf, z, path)
 
@@ -153,7 +174,9 @@ def _eval_scenario(name: str, runs: Path) -> dict:
                 my = clamp(sy + 0.5 * dy + sign * off * py, 0.0, h - 1)
                 path = _agl_guide_polyline(start, goal, belief, mission, via_xy=(mx, my), cruise_z=z)
                 e = _path_energy_truth(path, field, elev, kw, const_as)
-                e_stf = _path_energy_truth(path, field, elev, kw, stf_as)
+                e_stf = _path_energy_truth(
+                    path, field, elev, kw, stf_as, nominal_airspeed=nominal, energy_gate=True
+                )
                 if best_corr is None or e < best_corr[0]:
                     best_corr = (e, e_stf, z, sign, off_m)
 

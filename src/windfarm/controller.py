@@ -32,7 +32,8 @@ def uplift_energy_scale(local_w: float) -> float:
 
 # Headwind MacCready-style boost (m/s airspeed per m/s *horizontal* headwind).
 # Oracle: Fujian ~1.7 m/s head saves ~8% at 0.85×; calm/tail maps must stay nominal.
-# Gate is intentionally high so mild corridor shear (Liaoning-class) does not overspeed.
+# Gate stays moderate; execution energy-gates the boost so mild-head maps (Guizhou)
+# that make path_model worse fall back to nominal.
 SPEED_TO_FLY_HEADWIND_GAIN = 0.85
 SPEED_TO_FLY_HEADWIND_MIN_MPS = 0.55
 # Only ease speed in lift when headwind is negligible (classic dolphin); never fight a headwind.
@@ -60,7 +61,11 @@ def speed_to_fly_airspeed(
     local_w: float = 0.0,
     envelope: FlightEnvelope = DEFAULT_ENVELOPE,
 ) -> float:
-    """Energy-aware airspeed: push into headwind; mild ease only in calm-air lift."""
+    """MacCready-style airspeed proposal: push into headwind; mild ease in calm lift.
+
+    Callers that charge `path_model` should energy-gate the proposal (see execution):
+    keep nominal when the boosted step is not cheaper under `transition_energy_j`.
+    """
     base = float(nominal_airspeed)
     head = max(0.0, float(headwind_mps))
     boost = 0.0
