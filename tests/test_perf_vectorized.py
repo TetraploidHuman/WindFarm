@@ -69,6 +69,31 @@ class VectorizedPhysicsTest(unittest.TestCase):
         # Recent observation must not be wiped to the zero prediction.
         self.assertGreater(fused, 4.0)
 
+    def test_belief_prediction_preserves_observed_vertical_shear(self) -> None:
+        """Observed uplift lobe vs calm forecast must retain a usable w edge."""
+        belief = create_belief_map(4, 3, levels=1)
+        arrays = belief.field_arrays
+        assert arrays is not None
+        arrays["wind_u"][...] = 0.6
+        arrays["wind_v"][...] = 0.0
+        arrays["wind_w"][...] = 0.05
+        arrays["wind_w"][0, 1, 2] = 0.75
+        arrays["last_update"][0, 1, 2] = 4
+        arrays["wind_var_w"][0, 1, 2] = 0.08
+        BeliefUpdater().apply_prediction(
+            belief,
+            WindField(
+                u=np.full((1, 3, 4), 0.55),
+                v=np.zeros((1, 3, 4)),
+                w=np.full((1, 3, 4), 0.08),
+            ),
+            step=5,
+        )
+        kept = float(belief.field_arrays["wind_w"][0, 1, 2])
+        calm = float(belief.field_arrays["wind_w"][0, 1, 0])
+        self.assertGreater(kept, 0.40)
+        self.assertGreater(kept - calm, 0.25)
+
     def test_trilinear_batch_matches_scalar(self) -> None:
         rng = np.random.default_rng(0)
         field = rng.normal(size=(4, 5, 6))
