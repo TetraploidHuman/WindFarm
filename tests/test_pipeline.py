@@ -626,6 +626,159 @@ class PipelineTest(unittest.TestCase):
             msg=f"uniform light speed must not corridor, got {flat}",
         )
 
+    def test_corridor_dual_band_probe_when_sticky_diverges(self) -> None:
+        """Sticky cling vs raw argmin (>0.15) generates corridors on both layers.
+
+        Sticky at z=1 stays within the 1.2% cling bar while raw argmin is z=2
+        (slightly cheaper via mild aloft uplift) — dual probe must emit both zs.
+        """
+        width, height, levels = 28, 16, 4
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        mid = height // 2
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    # North lobe strong tailwind; aloft uplift so z=2 barely beats z=1
+                    # (within sticky 1.2% cling) — dual probe must emit both zs.
+                    u = 8.0 if y >= mid + 2 else -6.0
+                    w = 0.75 if z >= 2 else 0.05
+                    arrays["wind_u"][z, y, x] = u
+                    arrays["wind_v"][z, y, x] = 0.1
+                    arrays["wind_w"][z, y, x] = w
+                    arrays["uncertainty"][z, y, x] = 0.03
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = u
+                    cell.wind_v = 0.1
+                    cell.wind_w = w
+                    cell.uncertainty = 0.03
+        elev = [[10.0 for _ in range(width)] for _ in range(height)]
+        start = (2.0, float(mid), 0.0)
+        goal = (width - 3, mid, 0)
+        mission = Mission(
+            start=(2, mid, 0),
+            goal=goal,
+            max_steps=40,
+            step_distance_m=40.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=3,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+            preferred_cruise_agl=1.0,
+        )
+        labels = [l for l, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        corridor_labels = [l for l in labels if l.startswith("guide_corridor_") and "locked" not in l]
+        self.assertTrue(corridor_labels, msg=f"expected fresh corridors, got {labels}")
+        zs = {l.split("_z")[-1] for l in corridor_labels if "_z" in l}
+        self.assertGreaterEqual(
+            len(zs),
+            2,
+            msg=f"dual-band should probe sticky and argmin, zs={zs} labels={corridor_labels}",
+        )
+
+    def test_locked_via_drops_when_fresh_corridor_cheaper(self) -> None:
+        """Locked via must lose to a clearly better fresh corridor (dynamic swap)."""
+        width, height, levels = 28, 16, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        mid = height // 2
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    u = 10.0 if y >= mid + 2 else -8.0
+                    arrays["wind_u"][z, y, x] = u
+                    arrays["wind_v"][z, y, x] = 0.05
+                    arrays["wind_w"][z, y, x] = 0.0
+                    arrays["uncertainty"][z, y, x] = 0.02
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = u
+                    cell.wind_v = 0.05
+                    cell.wind_w = 0.0
+                    cell.uncertainty = 0.02
+        elev = [[10.0 for _ in range(width)] for _ in range(height)]
+        start = (2.0, float(mid), 0.0)
+        goal = (width - 3, mid, 0)
+        # Lock a via on the *wrong* (south / headwind) side.
+        mission = Mission(
+            start=(2, mid, 0),
+            goal=goal,
+            max_steps=40,
+            step_distance_m=40.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+            preferred_cruise_agl=1.0,
+            guide_via=(width * 0.5, float(mid) - 4.0),
+        )
+        guides = _energy_guide_paths(start, goal, belief_map, mission)
+        labels = [l for l, _ in guides]
+        self.assertIsNone(mission.guide_via, msg="locked via should clear when fresh wins")
+        self.assertFalse(
+            any(l == "guide_corridor_locked" for l in labels),
+            msg=f"locked must not remain in guides, got {labels}",
+        )
+        self.assertTrue(
+            any(l.startswith("guide_corridor_") for l in labels),
+            msg=f"fresh corridor should still be offered, got {labels}",
+        )
+
+    def test_mild_sticky_skips_mpc_even_with_guide_via(self) -> None:
+        """Mild sticky + via: guides own XY; forcing MPC regresses Shanxi-class corridors."""
+        width, height, levels = 20, 12, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        for z in range(levels):
+            arrays["wind_u"][z, :, :] = 3.0
+            arrays["uncertainty"][z, :, :] = 0.05
+            for y in range(height):
+                for x in range(width):
+                    belief_map.cells[z][y][x].wind_u = 3.0
+                    belief_map.cells[z][y][x].uncertainty = 0.05
+        elev = [[8.0 for _ in range(width)] for _ in range(height)]
+        mission = Mission(
+            start=(2, height // 2, 0),
+            goal=(width - 3, height // 2, 0),
+            max_steps=30,
+            step_distance_m=40.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+            preferred_cruise_agl=1.0,
+            guide_via=(width * 0.5, height * 0.5 + 2.0),
+        )
+        plan = plan_path_details(
+            belief_map,
+            mission,
+            risk_weight=1.0,
+            safety_weight=1.0,
+            anytime_rounds=1,
+            heuristic_weight_start=2.0,
+            heuristic_weight_end=1.0,
+            search_node_budget=800,
+            horizon_steps=4,
+            beam_width=8,
+            branch_width=4,
+            discount_factor=0.93,
+            terminal_progress_weight=20.0,
+        )
+        notes = [c.get("note") for c in plan.get("candidates", []) if isinstance(c, dict)]
+        self.assertIn(
+            "sticky_cruise_skip_mpc",
+            notes,
+            msg=f"mild sticky should seed greedy (not MPC), candidates={plan.get('candidates')}",
+        )
+
     def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:
         # Sub-5% "wins" at higher bands must not leave clearance (belief noise aloft).
         scores = {1.0: 1000.0, 1.35: 995.0, 2.0: 960.0}
