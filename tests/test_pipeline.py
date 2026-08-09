@@ -33,11 +33,11 @@ from windfarm.types import Mission, TerrainField, TrainingSample
 class PipelineTest(unittest.TestCase):
     def test_speed_to_fly_pushes_into_headwind_not_calm(self) -> None:
         nominal = 16.5
-        # Calm / mild head: stay near nominal (no false speed-up on shear corridors).
+        # Calm / sub-gate head: stay near nominal (execution also energy-gates boosts).
         self.assertAlmostEqual(speed_to_fly_airspeed(nominal, 0.0, 0.0), nominal, places=2)
         self.assertAlmostEqual(speed_to_fly_airspeed(nominal, 0.4, 0.0), nominal, places=2)
         self.assertLessEqual(speed_to_fly_airspeed(nominal, 0.2, 0.8), nominal + 0.05)
-        # Clear headwind: MacCready-style boost.
+        # Clear headwind: MacCready-style boost proposal.
         fast = speed_to_fly_airspeed(nominal, 1.7, 0.6)
         self.assertGreater(fast, nominal + 1.0)
         self.assertLessEqual(fast, 22.0)
@@ -709,7 +709,7 @@ class PipelineTest(unittest.TestCase):
             scores7w, sticky=1.35, clearance=1.0, remaining_horiz=40.0, band_step=0.05, climb_earned=True
         )
         self.assertLessEqual(z7w, 1.35 + 1e-9)
-        # Calm air: a 6% "win" at a mild higher band must not leave clearance.
+        # Calm + flat: a 6% "win" at a mild higher band must not leave clearance.
         scores_calm = {1.0: 1000.0, 1.2: 940.0}
         z_calm = _select_preferred_cruise_band(
             scores_calm,
@@ -720,6 +720,44 @@ class PipelineTest(unittest.TestCase):
             ambient_wind_mps=0.6,
         )
         self.assertAlmostEqual(z_calm, 1.0, places=5)
+        # Calm + rising DEM: ≥3% high-band win may unlock (aloft uplift, Hainan-class).
+        scores_calm_relief = {1.0: 1000.0, 1.5: 990.0, 3.0: 965.0}
+        z_calm_relief = _select_preferred_cruise_band(
+            scores_calm_relief,
+            sticky=None,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            ambient_wind_mps=0.6,
+            terrain_rise_m=200.0,
+            altitude_step_m=50.0,
+        )
+        self.assertGreaterEqual(z_calm_relief, 2.5)
+        # Micro-layer on rising DEM: 1.5% enough; sub-1% still blocked.
+        scores_micro_lo = {1.0: 1000.0, 1.033: 985.0}
+        z_micro_lo = _select_preferred_cruise_band(
+            scores_micro_lo,
+            sticky=None,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            terrain_rise_m=100.0,
+            altitude_step_m=50.0,
+            ambient_wind_mps=2.2,
+        )
+        self.assertAlmostEqual(z_micro_lo, 1.033, places=5)
+        scores_micro_noise = {1.0: 1000.0, 1.033: 992.0}
+        z_micro_noise = _select_preferred_cruise_band(
+            scores_micro_noise,
+            sticky=None,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            terrain_rise_m=100.0,
+            altitude_step_m=50.0,
+            ambient_wind_mps=2.2,
+        )
+        self.assertAlmostEqual(z_micro_noise, 1.0, places=5)
         # Moderate-band catch-up (≤clearance+1.2) may jump farther in one step.
         scores7b = {1.0: 1000.0, 1.2: 990.0, 2.0: 850.0}
         z7b = _select_preferred_cruise_band(

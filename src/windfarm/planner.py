@@ -1930,8 +1930,10 @@ def _select_preferred_cruise_band(
 
     Universal rules (no map-specific thresholds):
     - Flat routes: climb only if winner beats clearance by ≥5% (belief aloft is noisy).
-    - Significant along-route terrain rise: relax to ≥3% (ridge-following needs height).
-    - Calm horizontal wind: require ≥10% vs clearance before any climb (sichuan-class).
+    - Significant along-route terrain rise: relax to ≥3% (ridge-following needs height);
+      micro-layers (≤clearance+0.15) need only ≥1.5%.
+    - Calm + flat: require ≥10% vs clearance before any climb (noisy aloft).
+    - Calm + rising DEM: ≥3% unlocks mid/high bands (aloft uplift can be real; Hainan-class).
     - Dump toward clearance if sticky is ≥2% worse than clearance.
     - Unearned sticky (never cleared the climb bar) eases down even if slightly cheaper.
     """
@@ -1952,15 +1954,20 @@ def _select_preferred_cruise_band(
     # Once a high band is earned in strong air, demand ≥8% sticky-relative before dumping
     # (stops qinghai-class walk-down from ~2.6 → 1.3). Weak/marginal air keeps 2%.
     cruise_dump_need = 0.92 if (climb_earned and strong_air) else dump_need
+    # Calm sticky hold: flat still needs ≥10%; rising DEM aligns with the 3% climb bar.
+    calm_hold_need = 0.97 if terrain_relief else 0.90
 
     def _climb_need_for(target_z: float, from_z: float | None) -> float:
-        """Relax to 3% only for the first step above clearance on rising DEM routes.
+        """Evidence bar vs clearance energy (lower multiplier ⇒ easier climb).
 
-        High bands need a clearer clearance-relative win — stops Taiwan-class z→3 cascades.
-        Calm air needs ≥10% before leaving clearance at all.
+        Micro-layers on rising DEM: ≥1.5%. Calm+flat: ≥10%. Calm+relief: ≥3%.
+        High bands otherwise need 8–10% — stops Taiwan-class z→3 cascades.
         """
+        # Thin band just above clearance (Jilin-class oracle layer).
+        if target_z <= clearance_key + 0.15 + 1e-9:
+            return 0.985 if terrain_relief else 0.98
         if calm_air and target_z > clearance_key + 0.5 * step:
-            return 0.90
+            return 0.97 if terrain_relief else 0.90
         base = from_z if from_z is not None else clearance_key
         if terrain_relief and base <= clearance_key + 0.5 * step and target_z <= clearance_key + 1.0 + 1e-9:
             return 0.97
@@ -1995,7 +2002,8 @@ def _select_preferred_cruise_band(
                 return float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance_key))))
         if best_z > clearance_key + 0.5 * step and _earned_climb(best_e, best_z, clearance_key):
             # Soft ceiling also applies on cold start (avoid leaping to z≈3 immediately).
-            cold_unlock = 0.85
+            # Calm+rising DEM: align with 3% climb bar so aloft-uplift bands can commit.
+            cold_unlock = 0.97 if (calm_air and terrain_relief) else 0.85
             if best_z > clearance_key + 1.2 + 1e-9 and best_e > clearance_e * cold_unlock:
                 ceiling = clearance_key + 1.2
                 mid = {
@@ -2040,16 +2048,18 @@ def _select_preferred_cruise_band(
 
     # Early/mid cruise: climb only with clearance-relative evidence; dump freely if better.
     # Soft ceiling: ignore bands >clearance+1.2 unless they beat clearance clearly.
-    # Earned+strong+rising DEM: keep ceiling at clearance+1.8 so an already-won high sticky stays eligible.
+    # Rising DEM (strong earned, or calm uplift): keep ceiling at clearance+1.8.
     # Strong ambient: ≥13% unlock once earned / on rising DEM (qinghai-class).
-    # Marginal/calm: ≥20% — belief aloft is much noisier (taiwan-class cascades).
+    # Calm+flat: ≥20% (noisy aloft). Calm+relief: ≥3% (Hainan-class uplift aloft).
     ceiling = clearance_key + 1.2
-    if climb_earned and strong_air and terrain_relief:
+    if terrain_relief and (climb_earned and strong_air or calm_air):
         ceiling = clearance_key + 1.8
     if strong_air and (climb_earned or terrain_relief):
         ceiling_unlock = 0.87
     elif strong_air:
         ceiling_unlock = 0.85
+    elif terrain_relief:
+        ceiling_unlock = 0.97
     else:
         ceiling_unlock = 0.80
     eligible = {
@@ -2102,8 +2112,8 @@ def _select_preferred_cruise_band(
         and not _earned_climb(sticky_e, sticky_key, clearance_key)
     ):
         return float(max(clearance_key, sticky_key - 0.35))
-    # Calm air: dump sticky height that lacks a ≥10% clearance-relative win.
-    if calm_air and sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * 0.90:
+    # Calm air: dump sticky that lacks the calm hold bar (10% flat / 3% rising DEM).
+    if calm_air and sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * calm_hold_need:
         return float(max(clearance_key, sticky_key - 0.35))
     # Sticky parked above the soft ceiling without a clear clearance win → ease down.
     # Earned+strong sticky that still beats clearance by ≥5%: hold (qinghai retain).
