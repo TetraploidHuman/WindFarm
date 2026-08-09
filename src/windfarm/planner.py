@@ -782,9 +782,26 @@ def plan_path_details(
                 windless_belief=commit_windless,
                 straight_geom_e=straight_geom_e,
             )
-            # Dual ambient + path check; shear / terrain-relief unlocks below soft floor.
+            has_light_w = False
+            if (
+                not has_relief
+                and amb_speed >= CORRIDOR_LIGHT_FLOOR_MPS
+                and amb_speed < CORRIDOR_HARD_FLOOR_MPS
+            ):
+                has_light_w = _corridor_has_light_vertical_edge(
+                    path,
+                    belief_map,
+                    pref_straight,
+                    mission,
+                    windless_belief=commit_windless,
+                    straight_geom_e=straight_geom_e,
+                )
+            # Dual ambient + path check; shear / terrain / light-vertical unlocks.
             if not _corridor_ambient_ok(
-                amb_speed, has_edge=has_edge, has_terrain_relief=has_relief
+                amb_speed,
+                has_edge=has_edge,
+                has_terrain_relief=has_relief,
+                has_light_vertical=has_light_w,
             ):
                 continue
             if not _corridor_wind_usable(
@@ -793,10 +810,16 @@ def plan_path_details(
                 straight_path=pref_straight,
                 allow_shear_unlock=True,
                 allow_terrain_relief=has_relief,
+                allow_light_vertical=has_light_w,
             ):
                 continue
-            # Marginal ambient wind without edge/relief → reject (no Joules loophole).
-            if amb_speed < CORRIDOR_MARGINAL_WIND_MPS and not has_edge and not has_relief:
+            # Marginal ambient wind without edge/relief/light-w → reject.
+            if (
+                amb_speed < CORRIDOR_MARGINAL_WIND_MPS
+                and not has_edge
+                and not has_relief
+                and not has_light_w
+            ):
                 continue
             win_need = _corridor_energy_win_need(
                 path,
@@ -805,8 +828,9 @@ def plan_path_details(
                 ambient_wind_mps=amb_speed,
                 has_lateral_edge=has_edge,
                 has_terrain_relief=has_relief,
+                has_light_vertical=has_light_w,
             )
-            if not has_edge and not has_relief:
+            if not has_edge and not has_relief and not has_light_w:
                 no_edge = (
                     CORRIDOR_NO_EDGE_WIN_NEED
                     if amb_speed < CORRIDOR_MARGINAL_WIND_MPS
@@ -814,7 +838,6 @@ def plan_path_details(
                 )
                 win_need = min(win_need, no_edge)
             # In marginal wind, tax belief uncertainty at commit; strong wind keeps raw Joules.
-            # Proven shear-band edge: light tax; terrain-relief below hard: full calm tax.
             commit_e = float(energy)
             if amb_speed < CORRIDOR_MARGINAL_WIND_MPS:
                 shear_edged = (
@@ -825,6 +848,8 @@ def plan_path_details(
                     u_gain = CORRIDOR_SHEAR_COMMIT_UNCERTAINTY_GAIN
                 elif has_relief:
                     u_gain = CORRIDOR_TERRAIN_COMMIT_UNCERTAINTY_GAIN
+                elif has_light_w:
+                    u_gain = CORRIDOR_LIGHT_COMMIT_UNCERTAINTY_GAIN
                 else:
                     u_gain = CORRIDOR_COMMIT_UNCERTAINTY_GAIN
                 if u_gain > 0.0:
@@ -833,6 +858,12 @@ def plan_path_details(
                     )
                     commit_e = max(commit_e, float(risk_e))
             if floor_e < math.inf and commit_e > floor_e * win_need:
+                continue
+            if (
+                has_light_w
+                and floor_e < math.inf
+                and float(energy) > floor_e * CORRIDOR_LIGHT_RAW_WIN
+            ):
                 continue
             # When selected≈corridor band, also beat that straight. Do NOT compare a high
             # shear corridor against clearance sticky — that reintroduces the amb/floor bug.
@@ -1149,6 +1180,20 @@ CORRIDOR_TERRAIN_RELIEF_NEED_DIRECT_M = 8.0
 CORRIDOR_TERRAIN_WIN_NEED = 0.970
 # Geometry/DEM unlock: light commit tax (edge is structural, not belief shear noise).
 CORRIDOR_TERRAIN_COMMIT_UNCERTAINTY_GAIN = 0.02
+# Below HARD_FLOOR: light-air vertical-wind unlock (sichuan-class uplift corridors).
+# Horizontal |speed| is often flat; real savings come from stronger path-mean w.
+# Keep bars strict: belief w noise previously caused a tiny path_model regression.
+CORRIDOR_LIGHT_FLOOR_MPS = 0.40
+CORRIDOR_LIGHT_W_ADVANTAGE_MPS = 0.20
+CORRIDOR_LIGHT_W_MIN_MPS = 0.22
+CORRIDOR_LIGHT_WIN_NEED = 0.960
+CORRIDOR_LIGHT_COMMIT_UNCERTAINTY_GAIN = 0.028
+# Windless energy may be slightly worse (detour); reject large geometry losers on w noise.
+CORRIDOR_LIGHT_GEOM_MAX_ER0 = 1.07
+# Extra raw Joules bar for light-vertical (before uncertainty tax).
+CORRIDOR_LIGHT_RAW_WIN = 0.950
+# Uplift lobes sit off-ray — apply only a mild detour penalty vs horizontal corridors.
+CORRIDOR_LIGHT_DETOUR_WIN_BETA = 0.15
 
 
 def _windless_belief_map(belief_map: BeliefMap) -> BeliefMap:
@@ -1290,6 +1335,31 @@ def _corridor_has_terrain_relief(
     )
 
 
+def _corridor_has_light_vertical_edge(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    straight_path: list[tuple[float, float, float]] | None,
+    mission: Mission,
+    *,
+    windless_belief: BeliefMap | None = None,
+    straight_geom_e: float | None = None,
+) -> bool:
+    """Below-hard unlock: stronger path-mean vertical wind with bounded geometry loss."""
+    if straight_path is None or len(straight_path) <= 1 or len(path) <= 1:
+        return False
+    _spd, w_mean, _up = _path_wind_utilization_stats(path, belief_map)
+    _s_spd, s_w, _s_up = _path_wind_utilization_stats(straight_path, belief_map)
+    if float(w_mean) < CORRIDOR_LIGHT_W_MIN_MPS:
+        return False
+    if float(w_mean) < float(s_w) + CORRIDOR_LIGHT_W_ADVANTAGE_MPS:
+        return False
+    if windless_belief is not None and straight_geom_e is not None and float(straight_geom_e) > 1e-6:
+        path_geom_e = _polyline_model_energy_j(path, windless_belief, mission)
+        if float(path_geom_e) > float(straight_geom_e) * CORRIDOR_LIGHT_GEOM_MAX_ER0:
+            return False
+    return True
+
+
 def _corridor_wind_usable(
     path: list[tuple[float, float, float]],
     belief_map: BeliefMap,
@@ -1297,14 +1367,15 @@ def _corridor_wind_usable(
     straight_path: list[tuple[float, float, float]] | None = None,
     allow_shear_unlock: bool = False,
     allow_terrain_relief: bool = False,
+    allow_light_vertical: bool = False,
 ) -> bool:
     """Horizontal-wind floor — blocks calm fields that invent tiny Joules wins.
 
     Between HARD_FLOOR and MIN, corridors are allowed only with a proven lateral
     edge vs the straight ray (weak-but-sheared routes; still blocks uniform calm).
-    Below HARD_FLOOR, ``allow_terrain_relief`` may pass DEM-shortcut corridors.
+    Below HARD_FLOOR, terrain-relief or light vertical-wind unlocks may pass.
     """
-    if allow_terrain_relief:
+    if allow_terrain_relief or allow_light_vertical:
         return True
     speed, _w_mean, _uplift_p = _path_wind_utilization_stats(path, belief_map)
     if speed < CORRIDOR_HARD_FLOOR_MPS:
@@ -1321,10 +1392,13 @@ def _corridor_ambient_ok(
     *,
     has_edge: bool,
     has_terrain_relief: bool = False,
+    has_light_vertical: bool = False,
 ) -> bool:
-    """Straight-ray ambient gate with shear / terrain-relief unlocks."""
+    """Straight-ray ambient gate with shear / terrain / light-vertical unlocks."""
     if has_terrain_relief:
         return True
+    if has_light_vertical:
+        return amb_speed >= CORRIDOR_LIGHT_FLOOR_MPS
     if amb_speed < CORRIDOR_HARD_FLOOR_MPS:
         return False
     if amb_speed >= CORRIDOR_MIN_WIND_MPS:
@@ -1398,6 +1472,7 @@ def _corridor_energy_win_need(
     ambient_wind_mps: float | None = None,
     has_lateral_edge: bool = False,
     has_terrain_relief: bool = False,
+    has_light_vertical: bool = False,
 ) -> float:
     """Stricter Joules gate when the corridor adds XY length or ambient wind is calm."""
     base = min(float(corridor_margin), CORRIDOR_WIN_NEED)
@@ -1406,6 +1481,10 @@ def _corridor_energy_win_need(
     ):
         # DEM shortcut below the wind hard floor — demand a clear Joules edge.
         base = min(base, CORRIDOR_TERRAIN_WIN_NEED)
+    elif has_light_vertical and (
+        ambient_wind_mps is None or ambient_wind_mps < CORRIDOR_HARD_FLOOR_MPS
+    ):
+        base = min(base, CORRIDOR_LIGHT_WIN_NEED)
     elif ambient_wind_mps is not None and ambient_wind_mps < CORRIDOR_MARGINAL_WIND_MPS:
         if (
             has_lateral_edge
@@ -1422,7 +1501,12 @@ def _corridor_energy_win_need(
     if s_len <= 1e-6:
         return base
     detour_frac = max(0.0, _path_xy_length(path) / s_len - 1.0)
-    return max(0.90, base - CORRIDOR_DETOUR_WIN_BETA * detour_frac)
+    beta = (
+        CORRIDOR_LIGHT_DETOUR_WIN_BETA
+        if has_light_vertical and not has_terrain_relief and not has_lateral_edge
+        else CORRIDOR_DETOUR_WIN_BETA
+    )
+    return max(0.90, base - beta * detour_frac)
 
 
 def _polyline_risk_adjusted_energy_j(
@@ -2123,6 +2207,20 @@ def _energy_guide_paths(
                     windless_belief=windless,
                     straight_geom_e=straight_geom_e,
                 )
+                has_light_w = False
+                if (
+                    not has_relief
+                    and s_spd >= CORRIDOR_LIGHT_FLOOR_MPS
+                    and s_spd < CORRIDOR_HARD_FLOOR_MPS
+                ):
+                    has_light_w = _corridor_has_light_vertical_edge(
+                        locked_path,
+                        belief_map,
+                        straight_probe,
+                        mission,
+                        windless_belief=windless,
+                        straight_geom_e=straight_geom_e,
+                    )
                 win_need = _corridor_energy_win_need(
                     locked_path,
                     straight_probe,
@@ -2130,8 +2228,9 @@ def _energy_guide_paths(
                     ambient_wind_mps=s_spd,
                     has_lateral_edge=has_edge,
                     has_terrain_relief=has_relief,
+                    has_light_vertical=has_light_w,
                 )
-                if not has_edge and not has_relief:
+                if not has_edge and not has_relief and not has_light_w:
                     no_edge = (
                         CORRIDOR_NO_EDGE_WIN_NEED
                         if s_spd < CORRIDOR_MARGINAL_WIND_MPS
@@ -2140,7 +2239,10 @@ def _energy_guide_paths(
                     win_need = min(win_need, no_edge)
                 keep_locked = (
                     _corridor_ambient_ok(
-                        s_spd, has_edge=has_edge, has_terrain_relief=has_relief
+                        s_spd,
+                        has_edge=has_edge,
+                        has_terrain_relief=has_relief,
+                        has_light_vertical=has_light_w,
                     )
                     and _corridor_wind_usable(
                         locked_path,
@@ -2148,8 +2250,14 @@ def _energy_guide_paths(
                         straight_path=straight_probe,
                         allow_shear_unlock=True,
                         allow_terrain_relief=has_relief,
+                        allow_light_vertical=has_light_w,
                     )
-                    and not (s_spd < CORRIDOR_MARGINAL_WIND_MPS and not has_edge and not has_relief)
+                    and not (
+                        s_spd < CORRIDOR_MARGINAL_WIND_MPS
+                        and not has_edge
+                        and not has_relief
+                        and not has_light_w
+                    )
                     and locked_e <= straight_floor * win_need
                 )
                 if keep_locked:
@@ -2163,7 +2271,7 @@ def _energy_guide_paths(
     if corridor_margin is None or float(corridor_margin) <= 0.0:
         return guides
     # Probe wind on the preferred straight band. Below HARD_FLOOR still hunt
-    # terrain-relief corridors (DEM shortcuts); wind-edge unlock stays off.
+    # terrain-relief and light vertical-wind corridors; horizontal shear stays off.
     cruise_band = float(best_band)
     straight_probe = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=cruise_band)
     s_speed, _, _ = _path_wind_utilization_stats(straight_probe, belief_map)
@@ -2172,7 +2280,7 @@ def _energy_guide_paths(
     # Generate near-parity candidates; final selector applies CORRIDOR_WIN_NEED.
     gen_margin = min(max(corridor_margin, 0.95), 1.0)
     # Below soft floor / marginal: only generate corridors with a proven lateral edge
-    # (or terrain/geometry relief — see has_relief below).
+    # (or terrain/geometry / light-vertical relief — see has_* below).
     require_edge = (not below_hard) and s_speed < CORRIDOR_MARGINAL_WIND_MPS
     ux, uy = dx / horiz, dy / horiz
     px, py = -uy, ux
@@ -2186,7 +2294,7 @@ def _energy_guide_paths(
         if windless is not None and len(straight_probe) > 1
         else None
     )
-    corridor_candidates: list[tuple[str, list[tuple[float, float, float]], bool, bool]] = []
+    corridor_candidates: list[tuple[str, list[tuple[float, float, float]], bool, bool, bool]] = []
     for sign in (-1.0, 1.0):
         for offset in offsets:
             mx = clamp(sx + 0.5 * dx + sign * offset * px, 0.0, belief_map.width - 1)
@@ -2217,12 +2325,29 @@ def _energy_guide_paths(
                 windless_belief=windless,
                 straight_geom_e=straight_geom_e,
             )
-            # Below hard floor: only geometry/DEM shortcuts (blocks sichuan calm Joules noise).
-            if below_hard and not has_relief:
+            has_light_w = False
+            if (
+                below_hard
+                and not has_relief
+                and s_speed >= CORRIDOR_LIGHT_FLOOR_MPS
+            ):
+                has_light_w = _corridor_has_light_vertical_edge(
+                    path,
+                    belief_map,
+                    straight_probe,
+                    mission,
+                    windless_belief=windless,
+                    straight_geom_e=straight_geom_e,
+                )
+            # Below hard floor: geometry/DEM or light vertical unlock only.
+            if below_hard and not has_relief and not has_light_w:
                 continue
             has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
             if not _corridor_ambient_ok(
-                s_speed, has_edge=has_edge, has_terrain_relief=has_relief
+                s_speed,
+                has_edge=has_edge,
+                has_terrain_relief=has_relief,
+                has_light_vertical=has_light_w,
             ):
                 continue
             if not _corridor_wind_usable(
@@ -2231,22 +2356,21 @@ def _energy_guide_paths(
                 straight_path=straight_probe,
                 allow_shear_unlock=True,
                 allow_terrain_relief=has_relief,
+                allow_light_vertical=has_light_w,
             ):
                 continue
-            if require_edge and not has_edge and not has_relief:
+            if require_edge and not has_edge and not has_relief and not has_light_w:
                 continue
             label = f"guide_corridor_{sign:+.0f}_{offset:.1f}"
-            corridor_candidates.append((label, path, has_edge, has_relief))
+            corridor_candidates.append((label, path, has_edge, has_relief, has_light_w))
     if corridor_candidates:
         scored: list[tuple[float, str, list[tuple[float, float, float]]]] = []
-        for label, path, has_edge, has_relief in corridor_candidates:
+        for label, path, has_edge, has_relief, has_light_w in corridor_candidates:
             raw = _polyline_model_energy_j(path, belief_map, mission)
             # Generation stays near-parity; detour-scaled bar is enforced at final commit.
             if straight_floor < math.inf and raw > straight_floor * gen_margin:
                 continue
             # Prefer corridors that also look good after an uncertainty tax.
-            # Strong ambient / proven shear-band edge: light tax.
-            # Terrain-relief / marginal air without edge: heavier tax.
             shear_edged = (
                 has_edge and CORRIDOR_HARD_FLOOR_MPS <= s_speed < CORRIDOR_MIN_WIND_MPS
             )
@@ -2254,6 +2378,10 @@ def _energy_guide_paths(
                 u_gain, risk_slack = 0.04, 0.06
             elif has_relief:
                 u_gain, risk_slack = CORRIDOR_TERRAIN_COMMIT_UNCERTAINTY_GAIN, 0.05
+            elif has_light_w:
+                u_gain, risk_slack = CORRIDOR_LIGHT_COMMIT_UNCERTAINTY_GAIN, 0.03
+                if straight_floor < math.inf and raw > straight_floor * CORRIDOR_LIGHT_RAW_WIN:
+                    continue
             else:
                 u_gain, risk_slack = 0.07, 0.03
             risk = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=u_gain)

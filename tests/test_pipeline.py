@@ -507,6 +507,57 @@ class PipelineTest(unittest.TestCase):
             msg=f"flat calm must not corridor, got {flat_labels}",
         )
 
+    def test_corridor_light_vertical_unlocks_below_hard_floor(self) -> None:
+        """Light horizontal wind + clear vertical-wind lobe may unlock a corridor."""
+        width, height, levels = 28, 16, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    arrays["wind_u"][z, y, x] = 0.55
+                    arrays["wind_v"][z, y, x] = 0.05
+                    # Stronger uplift on the +y side — light-air vertical corridor.
+                    arrays["wind_w"][z, y, x] = 0.70 if y >= height // 2 + 1 else 0.02
+                    arrays["uncertainty"][z, y, x] = 0.05
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = 0.55
+                    cell.wind_v = 0.05
+                    cell.wind_w = float(arrays["wind_w"][z, y, x])
+                    cell.uncertainty = 0.05
+        elev = [[12.0 for _ in range(width)] for _ in range(height)]
+        start = (2.0, height / 2.0, 0.0)
+        goal = (width - 3, height // 2, 0)
+        mission = Mission(
+            start=(2, height // 2, 0),
+            goal=goal,
+            max_steps=40,
+            step_distance_m=30.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+        )
+        labels = [l for l, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        self.assertTrue(
+            any(l.startswith("guide_corridor_") for l in labels),
+            msg=f"expected light-vertical corridor, got {labels}",
+        )
+        # Uniform weak vertical wind must stay blocked.
+        for z in range(levels):
+            arrays["wind_w"][z, :, :] = 0.12
+            for y in range(height):
+                for x in range(width):
+                    belief_map.cells[z][y][x].wind_w = 0.12
+        flat_w = [l for l, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        self.assertFalse(
+            any(l.startswith("guide_corridor_") for l in flat_w),
+            msg=f"uniform light w must not corridor, got {flat_w}",
+        )
+
     def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:
         # Sub-5% "wins" at higher bands must not leave clearance (belief noise aloft).
         scores = {1.0: 1000.0, 1.35: 995.0, 2.0: 960.0}
