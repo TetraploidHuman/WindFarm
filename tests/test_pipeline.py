@@ -397,7 +397,7 @@ class PipelineTest(unittest.TestCase):
         weak = _run(0.4, 0.5)
         self.assertTrue(any(l.startswith("guide_straight_agl") for l in weak))
         self.assertFalse(any(l.startswith("guide_corridor_") for l in weak), msg=f"weak={weak}")
-        # Below HARD_FLOOR (1.20): never corridor.
+        # Below HARD_FLOOR (1.20) on flat DEM: no corridor (no terrain relief).
         below_hard = _run(0.8, 1.0)
         self.assertFalse(any(l.startswith("guide_corridor_") for l in below_hard), msg=f"below_hard={below_hard}")
         # Between hard/soft floors without a real lateral edge → still no corridor.
@@ -450,6 +450,62 @@ class PipelineTest(unittest.TestCase):
         # Uniform moderate wind still has no lateral edge → no corridor.
         uniform = _run(2.5, 2.5)
         self.assertFalse(any(l.startswith("guide_corridor_") for l in uniform), msg=f"uniform={uniform}")
+
+    def test_corridor_terrain_relief_unlocks_below_hard_floor(self) -> None:
+        """Calm air + clear DEM shortcut may corridor; flat calm still must not."""
+        width, height, levels = 28, 16, 3
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    arrays["wind_u"][z, y, x] = 0.7
+                    arrays["wind_v"][z, y, x] = 0.1
+                    arrays["wind_w"][z, y, x] = 0.0
+                    arrays["uncertainty"][z, y, x] = 0.05
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = 0.7
+                    cell.wind_v = 0.1
+                    cell.uncertainty = 0.05
+        # Hill on the straight mid-route; +y bypass is lower → north via cuts climb.
+        elev = []
+        mid_y = height * 0.45
+        for y in range(height):
+            row = []
+            for x in range(width):
+                hill = 120.0 * math.exp(
+                    -((x - width * 0.5) / 3.2) ** 2 - ((y - mid_y) / 1.6) ** 2
+                )
+                row.append(25.0 + hill)
+            elev.append(row)
+        start = (2.0, mid_y, 0.0)
+        goal = (width - 3, int(mid_y), 0)
+        mission = Mission(
+            start=(2, int(mid_y), 0),
+            goal=goal,
+            max_steps=40,
+            step_distance_m=50.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+        )
+        labels = [l for l, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        self.assertTrue(
+            any(l.startswith("guide_corridor_") for l in labels),
+            msg=f"expected terrain-relief corridor below hard floor, got {labels}",
+        )
+        # Same calm wind on flat DEM must stay blocked.
+        flat = [[10.0 for _ in range(width)] for _ in range(height)]
+        mission.elevation = flat
+        flat_labels = [l for l, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        self.assertFalse(
+            any(l.startswith("guide_corridor_") for l in flat_labels),
+            msg=f"flat calm must not corridor, got {flat_labels}",
+        )
 
     def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:
         # Sub-5% "wins" at higher bands must not leave clearance (belief noise aloft).
