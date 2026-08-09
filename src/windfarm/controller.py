@@ -30,6 +30,48 @@ def uplift_energy_scale(local_w: float) -> float:
     return max(0.5, min(1.4, 1.0 - 0.20 * max(float(local_w), 0.0)))
 
 
+# Headwind MacCready-style boost (m/s airspeed per m/s *horizontal* headwind).
+# Oracle: Fujian ~1.7 m/s head saves ~8% at 0.85×; calm/tail maps must stay nominal.
+# Gate is intentionally high so mild corridor shear (Liaoning-class) does not overspeed.
+SPEED_TO_FLY_HEADWIND_GAIN = 0.85
+SPEED_TO_FLY_HEADWIND_MIN_MPS = 0.55
+# Only ease speed in lift when headwind is negligible (classic dolphin); never fight a headwind.
+SPEED_TO_FLY_LIFT_EASE = 0.35
+SPEED_TO_FLY_LIFT_HEADWIND_MAX_MPS = 0.25
+
+
+def horizontal_headwind_mps(
+    current: tuple[float, float, float],
+    nxt: tuple[float, float, float],
+    local_u: float,
+    local_v: float,
+) -> float:
+    """Along-track opposing wind only (no vertical mix-in) — used for speed-to-fly."""
+    move_dx = float(nxt[0]) - float(current[0])
+    move_dy = float(nxt[1]) - float(current[1])
+    move_norm = max(math.hypot(move_dx, move_dy), 1e-6)
+    along = (float(local_u) * move_dx + float(local_v) * move_dy) / move_norm
+    return max(0.0, -along)
+
+
+def speed_to_fly_airspeed(
+    nominal_airspeed: float,
+    headwind_mps: float,
+    local_w: float = 0.0,
+    envelope: FlightEnvelope = DEFAULT_ENVELOPE,
+) -> float:
+    """Energy-aware airspeed: push into headwind; mild ease only in calm-air lift."""
+    base = float(nominal_airspeed)
+    head = max(0.0, float(headwind_mps))
+    boost = 0.0
+    if head >= SPEED_TO_FLY_HEADWIND_MIN_MPS:
+        boost = SPEED_TO_FLY_HEADWIND_GAIN * head
+    ease = 0.0
+    if head <= SPEED_TO_FLY_LIFT_HEADWIND_MAX_MPS:
+        ease = SPEED_TO_FLY_LIFT_EASE * max(0.0, float(local_w) - 0.30)
+    return clamp_airspeed(base + boost - ease, envelope)
+
+
 def compute_heading(current: tuple[float, float, float], nxt: tuple[float, float, float]) -> float:
     dx = nxt[0] - current[0]
     dy = nxt[1] - current[1]

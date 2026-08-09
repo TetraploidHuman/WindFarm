@@ -16,7 +16,12 @@ from .altitude import (
 )
 from .belief import BeliefUpdater, belief_snapshot, create_belief_map
 from .config import TaskConfig
-from .controller import advance_continuous_state, transition_energy_j
+from .controller import (
+    advance_continuous_state,
+    horizontal_headwind_mps,
+    speed_to_fly_airspeed,
+    transition_energy_j,
+)
 from .mathutils import bilinear_sample, clamp, magnitude, magnitude3, trilinear_sample
 from .planner import _cruise_z_from_guide_label, plan_path_details
 from .types import CoarseWindSample, DroneState, Mission, Observation, TerrainField, WindField
@@ -700,8 +705,28 @@ class NavigationEngine:
             next_state.x,
             next_state.y,
         )
+        # Speed-to-fly: raise airspeed into clear horizontal headwind only.
+        step_headwind = horizontal_headwind_mps(
+            prev,
+            (next_state.x, next_state.y, next_state.z),
+            energy_u,
+            energy_v,
+        )
+        step_airspeed = speed_to_fly_airspeed(
+            float(getattr(context.mission, "nominal_airspeed", context.state.airspeed)),
+            step_headwind,
+            energy_w,
+        )
+        next_state = DroneState(
+            x=next_state.x,
+            y=next_state.y,
+            z=next_state.z,
+            heading_rad=next_state.heading_rad,
+            battery_ratio=next_state.battery_ratio,
+            airspeed=step_airspeed,
+        )
         required_energy = transition_energy_j(
-            airspeed=context.state.airspeed,
+            airspeed=step_airspeed,
             current=prev,
             nxt=(next_state.x, next_state.y, next_state.z),
             local_u=energy_u,
