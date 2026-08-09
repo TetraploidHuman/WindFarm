@@ -293,9 +293,19 @@ class BeliefUpdater:
             # Recently observed cells resist overwrite more.
             fresh = np.exp(-2.0 * self.decay_per_step * age)
             resist = np.where(last_update > 0, 1.0 - 0.55 * fresh, 1.0)
-            ku = ku * resist
-            kv = kv * resist
-            kw = kw * resist
+            # Observed shear / uplift lobes that disagree with a smooth forecast must
+            # not be washed out on the next predict step (sichuan/taiwan-class edges).
+            innov_h = np.hypot(prior_u - pred_u, prior_v - pred_v)
+            innov_w = np.abs(prior_w - pred_w)
+            edge_protect = np.where(
+                last_update > 0,
+                np.clip(0.40 * innov_h + 0.45 * innov_w, 0.0, 0.55),
+                0.0,
+            )
+            gain_scale = resist * (1.0 - edge_protect)
+            ku = ku * gain_scale
+            kv = kv * gain_scale
+            kw = kw * gain_scale
             wind_u = prior_u + ku * (pred_u - prior_u)
             wind_v = prior_v + kv * (pred_v - prior_v)
             wind_w = prior_w + kw * (pred_w - prior_w)
