@@ -1,0 +1,41 @@
+{
+  "name": "hubei_jianghan",
+  "description": "Jianghan plain / humid flatland near Wuhan (SRTM N30E114)",
+  "lat": 30.55,
+  "lon": 114.3,
+  "hgt": "data/N30E114.hgt",
+  "start_time": "2024-05-28T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 10.899218206972952,
+    "max": 80.92272481847459,
+    "mean": 37.47622029641113
+  },
+  "wind": {
+    "u_km_mean": -2.8466172245942616,
+    "v_km_mean": 1.2069144120769293,
+    "speed_mean": 3.0925304426971194,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      13,
+      41
+    ],
+    "goal": [
+      65,
+      19
+    ]
+  },
+  "built_at": "2026-08-08T15:53:31Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

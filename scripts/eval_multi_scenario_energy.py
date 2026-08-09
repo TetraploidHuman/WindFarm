@@ -34,6 +34,15 @@ HOLDOUT_SCENARIOS = (
     "sichuan_foothills",
     "shanxi_loess",
     "taiwan_hills",
+    # Expansion: arid / karst / tropical / plain / plateau / forest / steppe.
+    "gansu_hexi",
+    "guizhou_karst",
+    "hainan_coast",
+    "hubei_jianghan",
+    "tibet_lhasa",
+    "jilin_forest",
+    "neimeng_grass",
+    "yunnan_karst",
 )
 SCENARIOS = CORE_SCENARIOS + HOLDOUT_SCENARIOS
 

@@ -58,8 +58,8 @@ class DataIngestTests(unittest.TestCase):
 
     def test_default_scenario_catalog_diverse(self) -> None:
         names = [spec.name for spec in DEFAULT_SCENARIOS]
-        self.assertEqual(len(names), 8)
-        self.assertEqual(len(set(names)), 8)
+        self.assertEqual(len(names), 16)
+        self.assertEqual(len(set(names)), 16)
         for required in (
             "fujian_hills",
             "beijing_plain",
@@ -69,6 +69,14 @@ class DataIngestTests(unittest.TestCase):
             "sichuan_foothills",
             "shanxi_loess",
             "taiwan_hills",
+            "gansu_hexi",
+            "guizhou_karst",
+            "hainan_coast",
+            "hubei_jianghan",
+            "tibet_lhasa",
+            "jilin_forest",
+            "neimeng_grass",
+            "yunnan_karst",
         ):
             self.assertIn(required, names)
 

@@ -1,0 +1,79 @@
+{
+  "model": {
+    "split_ratio": 0.7,
+    "model_type": "xgboost",
+    "learning_rate": 0.1,
+    "epochs": 800,
+    "l2": 0.01,
+    "num_estimators": 64,
+    "max_depth": 3,
+    "min_samples_leaf": 32,
+    "max_bins": 10,
+    "feature_subsample_ratio": 0.55,
+    "max_training_samples": 2000,
+    "validation_ratio": 0.2,
+    "early_stopping_rounds": 12,
+    "temporal_window_size": 4,
+    "altitude_levels": 5,
+    "n_jobs": 0
+  },
+  "belief": {
+    "observation_radius": 7,
+    "advection_gain": 0.25,
+    "decay_per_step": 0.04,
+    "process_noise": 0.18,
+    "observation_noise": 0.12,
+    "advection_noise": 0.08
+  },
+  "planner": {
+    "risk_weight": 1.2,
+    "safety_weight": 1.5,
+    "replan_interval_steps": 1,
+    "anytime_rounds": 3,
+    "heuristic_weight_start": 2.4,
+    "heuristic_weight_end": 1.0,
+    "search_node_budget": 6000,
+    "horizon_steps": 7,
+    "beam_width": 24,
+    "branch_width": 10,
+    "discount_factor": 0.93,
+    "terminal_progress_weight": 24.0
+  },
+  "simulation": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0,
+    "time_steps": 120,
+    "start_time": "2024-06-20T08:00:00",
+    "sample_interval_seconds": 15,
+    "report_keyframe_interval": 3
+  },
+  "mission": {
+    "start": [
+      11,
+      43
+    ],
+    "goal": [
+      66,
+      17
+    ],
+    "max_steps": 145,
+    "step_distance_m": 30.0,
+    "battery_capacity_j": 620000.0,
+    "nominal_airspeed": 16.5,
+    "hover_power_w": 105.0,
+    "cruise_power_w": 150.0,
+    "hotel_power_w": 18.0,
+    "headwind_power_per_mps_w": 14.0,
+    "climb_power_per_mps_w": 125.0,
+    "descent_power_reduction_per_mps_w": 58.0,
+    "reserve_energy_ratio": 0.22,
+    "altitude_step_m": 30.0,
+    "min_altitude_level": 0,
+    "max_altitude_level": 4,
+    "climb_cost_per_level_j": 135.0,
+    "clearance_agl_level": 1.0,
+    "cruise_band_step": 0.03333333333333333,
+    "corridor_energy_margin": 1.02
+  }
+}
