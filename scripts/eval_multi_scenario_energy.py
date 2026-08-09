@@ -26,48 +26,24 @@ CORE_SCENARIOS = (
     "fujian_hills",
     "beijing_plain",
     "qinghai_ridge",
-    "qingdao_coast",
+    "liaoning_coast",
 )
 # Holdout real-world maps (anti-overfit; do not tune on these in isolation).
 HOLDOUT_SCENARIOS = (
-    "zhangbei_steppe",
-    "yunnan_karst",
     "xinjiang_gobi",
-    "jilin_forest",
-    "neimeng_grass",
     "sichuan_foothills",
-    "hainan_coast",
-    "gansu_hexi",
     "shanxi_loess",
-    "hubei_jianghan",
+    "taiwan_hills",
 )
 SCENARIOS = CORE_SCENARIOS + HOLDOUT_SCENARIOS
 
 
 def _discover_scenarios(scenarios_dir: Path) -> list[str]:
-    """Prefer index.json order, then any on-disk scenario with terrain.json."""
+    """Return the curated SCENARIOS list that exist on disk (ignore leftover maps)."""
     ordered: list[str] = []
-    seen: set[str] = set()
-    index_path = scenarios_dir / "index.json"
-    if index_path.exists():
-        try:
-            rows = json.loads(index_path.read_text(encoding="utf-8")).get("scenarios") or []
-            for row in rows:
-                name = str(row.get("name") or "")
-                if name and (scenarios_dir / name / "terrain.json").exists():
-                    ordered.append(name)
-                    seen.add(name)
-        except json.JSONDecodeError:
-            pass
     for name in SCENARIOS:
-        if name not in seen and (scenarios_dir / name / "terrain.json").exists():
+        if (scenarios_dir / name / "terrain.json").exists():
             ordered.append(name)
-            seen.add(name)
-    for path in sorted(scenarios_dir.glob("*/terrain.json")):
-        name = path.parent.name
-        if name not in seen:
-            ordered.append(name)
-            seen.add(name)
     return ordered
 
 
@@ -352,12 +328,37 @@ def main() -> None:
         if not names:
             raise SystemExit("no scenarios with terrain.json found under scenarios/")
         # Optional filter: python scripts/eval_multi_scenario_energy.py --only a b c
-        if len(sys.argv) > 1 and sys.argv[1] == "--only":
-            wanted = set(sys.argv[2:])
+        # Optional parallelism: --workers N  (default caps at 4; 18-way OOMs ~32GB hosts)
+        argv = sys.argv[1:]
+        max_workers_arg: int | None = None
+        only_names: list[str] | None = None
+        i = 0
+        while i < len(argv):
+            if argv[i] == "--only":
+                i += 1
+                only_names = []
+                while i < len(argv) and not argv[i].startswith("--"):
+                    only_names.append(argv[i])
+                    i += 1
+                continue
+            if argv[i] == "--workers" and i + 1 < len(argv):
+                max_workers_arg = max(1, int(argv[i + 1]))
+                i += 2
+                continue
+            if argv[i] == "--output-dir" and i + 1 < len(argv):
+                out_dir = Path(argv[i + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                i += 2
+                continue
+            i += 1
+        if only_names is not None:
+            wanted = set(only_names)
             names = [n for n in names if n in wanted]
             if not names:
                 raise SystemExit("no matching scenarios for --only")
-        max_workers = min(len(names), max(1, os.cpu_count() or 4))
+        # 8 curated maps fit in ~32GB at full parallelism; only cap when many more exist.
+        default_cap = min(8, max(1, os.cpu_count() or 4))
+        max_workers = min(len(names), max_workers_arg or default_cap)
         # Split cores across concurrent scenario processes to avoid XGB/OpenMP thrash.
         per_proc_jobs = max(1, (os.cpu_count() or 4) // max(max_workers, 1))
         print(

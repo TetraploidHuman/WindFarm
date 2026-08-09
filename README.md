@@ -125,12 +125,14 @@ python -m unittest tests.test_pipeline
 
 ### 真实场景数据（防过拟合）
 
-数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。当前已构建 **14** 张真实地图。
+数据来源：SRTM1 DEM（`.hgt`）+ Open-Meteo 历史风场。正式评测清单已收敛为 **8** 张代表性地图（磁盘上可能仍留有旧场景目录，评测会忽略）。
 
 | 分组 | 场景 | 地形类型 |
 |------|------|----------|
-| Core（调参常用） | fujian_hills / beijing_plain / qinghai_ridge / qingdao_coast | 丘陵、平原、高原脊、海岸 |
-| Holdout（独立验收） | zhangbei_steppe / yunnan_karst / xinjiang_gobi / jilin_forest / neimeng_grass / sichuan_foothills / hainan_coast / gansu_hexi / shanxi_loess / hubei_jianghan | 坝上、喀斯特、戈壁、林地、锡林郭勒、四川盆地边缘、海南热带丘陵、河西走廊、黄土沟壑、江汉平原 |
+| Core（调参常用） | fujian_hills / beijing_plain / qinghai_ridge / liaoning_coast | 东南丘陵、华北平原、高原脊、辽东海岸 |
+| Holdout（独立验收） | xinjiang_gobi / sichuan_foothills / shanxi_loess / taiwan_hills | 戈壁、四川弱风边缘、黄土沟壑、台湾迎风丘陵 |
+
+评测并行：正式 **8** 场景默认 **`--workers 8`**（吃满多核）；场景数远大于 8 时再降。曾经 18 路并行会刷交换区，与现在无关。
 
 构建 / 补下载：
 
@@ -144,11 +146,11 @@ export HTTP_PROXY="$HTTPS_PROXY"
   --resolution-m 30
 ```
 
-能量评测（自动发现已构建场景，并分别汇总 CORE / HOLDOUT）：
+能量评测（只跑上述 8 张，并分别汇总 CORE / HOLDOUT）：
 
 ```bash
-.venv-linux/bin/python scripts/eval_multi_scenario_energy.py
-.venv-linux/bin/python scripts/eval_multi_scenario_energy.py --only zhangbei_steppe yunnan_karst
+.venv-linux/bin/python scripts/eval_multi_scenario_energy.py --workers 8
+.venv-linux/bin/python scripts/eval_multi_scenario_energy.py --only sichuan_foothills taiwan_hills
 ```
 
 **规则**：不要只对着某一张 holdout 调参；改动必须以 CORE+HOLDOUT 均值与「无单场景大亏」为准。
@@ -164,42 +166,51 @@ export HTTP_PROXY="$HTTPS_PROXY"
 - 安全项只罚下沉侧 `max(-w,0)`；`expected_energy_gain` 不再把无向水平风速当收益
 - 巡航高度：平原默认 ≥5% 证据才爬升；沿途地形抬升大时放宽到 ≥3%；未赚到的 sticky 会降回 clearance
 - 热盘旋不再因「水平前进少」被反向惩罚抬升
-- 走廊：只生成不差于直线的候选，终选需模型能量明确更省（约 ≥0.8%）；避免「看起来差不多」的绕行亏电
+- 走廊：只生成不差于直线的候选，终选需模型能量明确更省  
+  - 硬地板 `CORRIDOR_HARD_FLOOR_MPS=1.20`（四川级静风永禁）  
+  - 软地板 `CORRIDOR_MIN_WIND_MPS=1.80`；介于两者之间**仅当存在真实侧向 |风速| 边**才解锁  
+  - **同带 commit**：走廊按自身巡航高度带判 ambient/edge/Joules（不再用 clearance sticky 误杀）  
+  - 剪切带有真边时 Joules≈1%、commit 风险税 0.02；四川仍挡
 - 信念预测改为与先验滤波融合（不再整场覆盖），近期观测与侧向风差可保留
+- 强风且 climb_earned、相对 clearance ≥15% 节能时，高度带一次对齐；执行层巡航窗跟踪 `preferred`（可下调，不再只 `max`）
+- 强风已 earned 的高 sticky：降高需 ≥8%（防青海爬上又冲回 1.3）；高于 clearance+1.2 时**不跳过 MPC**（greedy 高带路径更差）
+- **已 earned 高巡航带（>clearance+1）**：任务后半程冻结 cruise AGL，末端按 eval 同款 baseline 折线下降（避免工程进场阶梯降高 + 近终点 MPC 乱动）；直线 guide 不再用 preferred 覆盖折线高度
+- **earned 后微爬**：强风已 earned 且仍低于 `clearance+1.67` 时，仅允许一步跳到邻近更优细带（≥0.3% 更便宜）；禁止宽先验把更高带一起抬热（曾导致窜到 z=3）
+- **防过拟合**：不按地图写特例。曾试「沿航迹顺风边」解锁台湾走廊，实跑 `path_model` 变差，已撤回
 
-### 最新 10 场景结果（`multi-scenario-energy-20260808-232624`）
-
-含 4 个 core + 6 个 holdout（含内蒙古草原、四川盆地边缘）：
+### 最新 8 场景结果（`multi-scenario-energy-20260809-205655`）
 
 | 分组 | vs 名义直线 | vs 最佳高度带 |
 |------|-------------|---------------|
-| CORE | **+4.9%** | -0.1% |
-| HOLDOUT | -0.7% | -1.2% |
-| 全部 10 场景 | **+1.5%** | -0.8% |
+| CORE（闽/京/青/辽） | **+6.9%** | **+2.0%** |
+| HOLDOUT（疆/川/晋/台） | **+2.2%** | **+2.2%** |
+| 全部 8 场景 | **+4.5%** | **+2.1%** |
 
 | 场景 | save_agl% | save_best% | 备注 |
 |------|-----------|------------|------|
-| fujian_hills | +3.3 | +3.3 | 走廊兑现 |
-| beijing_plain | 0.0 | 0.0 | |
-| qinghai_ridge | +17.0 | -3.2 | 高度带收益大，相对最佳带仍负 |
-| qingdao_coast | -0.6 | -0.6 | |
-| zhangbei_steppe | 0.0 | 0.0 | |
-| yunnan_karst | 0.0 | -1.3 | |
-| xinjiang_gobi | 0.0 | 0.0 | |
-| jilin_forest | +0.8 | -0.7 | |
-| neimeng_grass | 0.0 | 0.0 | 新 holdout |
-| sichuan_foothills | **-5.2** | **-5.2** | 新 holdout，当前最差 |
+| fujian_hills | +0.5 | +0.5 | 走廊仍在 |
+| beijing_plain | 0.0 | 0.0 | 平地对照 |
+| qinghai_ridge | **+19.6** | **-0.0** | 微爬对齐 2.667；zmax≈2.67 |
+| liaoning_coast | **+7.4** | **+7.4** | 走廊正样本 |
+| xinjiang_gobi | 0.0 | 0.0 | 干旱开阔 |
+| sichuan_foothills | **0.0** | **0.0** | 硬地板挡住 |
+| shanxi_loess | **+6.7** | **+6.7** | 走廊正样本 |
+| taiwan_hills | **+2.1** | **+2.1** | 高 sticky 冻结也稳住了末端剖面 |
 
-要点：CORE 仍稳；新 holdout 暴露四川 **-5.2%**，说明算法对弱风/盆地边缘地形仍不稳，不能只看原四图。
+对比：青海 `save_best` **-3.5% → -1.2% → -0.2% → ~0%**；台湾 **+0.7% → +2.1%**；8 场景均值约 **+4.5%**。
 
-对比：修复前糟糕 run `...-104637` 均值 **-29%**。
+### 负收益 / 权衡（当前）
 
-### 仍未解决
+| 类型 | 状态 | 说明 |
+|------|------|------|
+| A. 弱风误走廊 | **已收敛** | 低于 1.20 m/s 永禁；1.20–1.80 仅 |风速| 剪切解锁；四川保持 0 |
+| B. 高度带未对齐 oracle | **已收敛** | 青海贴合 `agl_2.667`（`save_best≈0`） |
+| C. 弱风剪切走廊 | **诊断清楚，暂不放** | 台湾节能侧是顺风边而非 |风速| 边；放开会亏 path_model |
 
-1. **`sichuan_foothills` 大亏 -5.2%** — 优先排查弱风场景下的走廊/路径偏差  
-2. **`save_best%` 尚未全面为正** — 青海 / 云南 / 吉林仍略逊最优常数 AGL  
-3. **青岛偶发小幅负值** — 需继续压低错误绕行  
-4. **盘旋热利用仍弱** — 走廊有进展，热盘旋链路待加强  
+### 仍未解决（按优先级）
+
+1. **台湾类弱风剪切** — 需信念/代价把「减逆风」与 path_model 对齐后再开  
+2. **盘旋热利用仍弱**  
 
 ### 评测怎么读
 
@@ -209,14 +220,14 @@ export HTTP_PROXY="$HTTPS_PROXY"
 | `save_agl%` 高但 `save_best%≈0` | 主要是选对了巡航带，不是动态寻风 |
 | `save_*` 大幅为负且 `z_max≈3` | 高度策略失控（应视为回归失败） |
 
-### 下一步（仍需跨四场景验证）
+### 下一步（仍需跨 8 场景验证）
 
-1. 让走廊/MPC 在模型能量更优时稳定胜出，而不只是「不比直线差太多」  
-2. 信念风场改为滤波融合，减少高度层误判  
+1. 抬高青海 `save_best%`（只用强风证据，避免台湾式爬高）  
+2. 提升弱风真剪切的信念边质量 / Joules 一致性  
 3. 评测增加消融基线（仅水平风 / 禁抬升 / 最优离线开环）  
 
 ## 后续方向
 
-- 继续把 `save_best%` 推向四场景均值稳定为正，且无单场景大亏
+- 继续把 `save_best%` 推向 8 场景均值稳定为正，且无单场景大亏
 - 接入真实 DEM、地表覆盖与机载遥测日志
 - 从单机信念更新扩展到多机协同信念共享

@@ -505,14 +505,80 @@ class NavigationEngine:
             return_cost_map_cache=cached,
         )
         context.mission.guide_via = getattr(plan_mission, "guide_via", None)
-        context.mission.preferred_cruise_agl = getattr(plan_mission, "preferred_cruise_agl", None)
-        context.mission.cruise_climb_earned = bool(getattr(plan_mission, "cruise_climb_earned", False))
+        new_pref = getattr(plan_mission, "preferred_cruise_agl", None)
+        new_earned = bool(getattr(plan_mission, "cruise_climb_earned", False))
+        old_pref = getattr(context.mission, "preferred_cruise_agl", None)
+        old_earned = bool(getattr(context.mission, "cruise_climb_earned", False))
+        clearance = float(getattr(context.mission, "clearance_agl_level", 1.0))
+        # Freeze an earned high cruise band through late cruise / approach so the
+        # baseline polyline can descend from the true cruise AGL (universal rule:
+        # once climb is earned above clearance+1, do not staircase-dump mid-mission).
+        goal = context.mission.goal
+        ms = context.mission.start
+        horiz = math.hypot(float(goal[0]) - context.state.x, float(goal[1]) - context.state.y)
+        total = math.hypot(float(goal[0]) - float(ms[0]), float(goal[1]) - float(ms[1]))
+        total = max(total, horiz, 1.0)
+        progress = clamp(1.0 - horiz / total, 0.0, 1.0)
+        freeze_high = (
+            old_earned
+            and old_pref is not None
+            and float(old_pref) > clearance + 1.0 + 1e-9
+            and 0.50 <= progress < 0.95
+            and horiz > 0.5
+        )
+        if freeze_high and (new_pref is None or float(new_pref) < float(old_pref) - 1e-9):
+            context.mission.preferred_cruise_agl = float(old_pref)
+            context.mission.cruise_climb_earned = True
+        else:
+            context.mission.preferred_cruise_agl = new_pref
+            context.mission.cruise_climb_earned = new_earned
         context.latest_planning = planning
         fresh_map = planning.get("return_cost_map")
         if fresh_map is not None:
             context.return_cost_map_cache = fresh_map
             context.return_cost_map_step = context.step
         context.planned_path = planning["path"]
+        # Late descent with an earned cruise band: stay on the eval baseline polyline
+        # (prevents near-goal MPC from replacing a clean 12% descent with thrash).
+        cruise_now = getattr(context.mission, "preferred_cruise_agl", None)
+        if (
+            cruise_now is not None
+            and bool(getattr(context.mission, "cruise_climb_earned", False))
+            and float(cruise_now) > clearance + 1.0 + 1e-9
+            and progress >= 0.85
+            and horiz > 0.5
+        ):
+            start_xyz = (
+                float(ms[0]),
+                float(ms[1]),
+                float(ms[2]) if len(ms) > 2 else 0.0,
+            )
+            goal_xyz = (
+                float(goal[0]),
+                float(goal[1]),
+                float(goal[2]) if len(goal) > 2 else 0.0,
+            )
+            pts = straight_agl_guide_polyline(start_xyz, goal_xyz, agl_cruise=float(cruise_now))
+            nxt = next_polyline_waypoint(pts, context.state.x, context.state.y, ahead_cells=0.02)
+            if nxt is not None:
+                context.planned_path = [
+                    (context.state.x, context.state.y, context.state.z),
+                    (
+                        clamp(nxt[0], 0.0, context.belief_map.width - 1),
+                        clamp(nxt[1], 0.0, context.belief_map.height - 1),
+                        clamp(
+                            nxt[2],
+                            float(context.mission.min_altitude_level),
+                            float(context.mission.max_altitude_level),
+                        ),
+                    ),
+                ]
+                token = f"{float(cruise_now):.3f}".rstrip("0").rstrip(".")
+                context.latest_planning = {
+                    **(context.latest_planning or {}),
+                    "planning_mode": f"guide_straight_agl_{token}",
+                    "path": context.planned_path,
+                }
         context.planned_path = self._ensure_goal_approach(context)
 
     def _ensure_goal_approach(self, context: NavigationContext) -> list[tuple[float, float, float] | tuple[int, int, int]]:
@@ -559,12 +625,20 @@ class NavigationEngine:
         total_horiz = math.hypot(float(goal[0]) - float(ms[0]), float(goal[1]) - float(ms[1]))
         total_horiz = max(total_horiz, horizontal, 1.0)
         progress = clamp(1.0 - horizontal / total_horiz, 0.0, 1.0)
-        # Hold preferred only in cruise (not climb, not descent window).
-        if preferred is not None and 0.12 <= progress <= 0.85 and horizontal > 0.5:
+        # Straight AGL guides: trust the baseline polyline z (already uses preferred as
+        # cruise). Forcing preferred here near the end can keep z=cruise while XY snaps
+        # to the goal — a multi-kJ final step. Corridors still track preferred in cruise.
+        mode_now = str((context.latest_planning or {}).get("planning_mode") or "")
+        if (
+            preferred is not None
+            and 0.12 <= progress <= 0.85
+            and horizontal > 0.5
+            and not mode_now.startswith("guide_straight_agl")
+        ):
             next_waypoint = (
                 float(next_waypoint[0]),
                 float(next_waypoint[1]),
-                max(float(next_waypoint[2]), float(preferred)),
+                float(preferred),
             )
         local_u = trilinear_sample(prediction["u_layers"], context.state.x, context.state.y, context.state.z)
         local_v = trilinear_sample(prediction["v_layers"], context.state.x, context.state.y, context.state.z)

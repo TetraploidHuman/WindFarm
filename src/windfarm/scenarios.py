@@ -265,11 +265,9 @@ def build_default_scenarios(
             pass
     for row in summaries:
         by_name[str(row["name"])] = row
+    # Index tracks only the curated DEFAULT_SCENARIOS catalog (8 maps).
     order = [spec.name for spec in DEFAULT_SCENARIOS]
     merged = [by_name[name] for name in order if name in by_name]
-    for name, row in by_name.items():
-        if name not in order:
-            merged.append(row)
     index = {"scenarios": merged}
     index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
     return summaries

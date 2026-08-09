@@ -1,0 +1,41 @@
+{
+  "name": "liaoning_coast",
+  "description": "Liaodong peninsula coast near Dalian (SRTM N39E121)",
+  "lat": 39.15,
+  "lon": 121.65,
+  "hgt": "data/N39E121.hgt",
+  "start_time": "2024-11-18T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": -2.0,
+    "max": 103.70595579093967,
+    "mean": 7.885900648590893
+  },
+  "wind": {
+    "u_km_mean": -0.7931962334618183,
+    "v_km_mean": -3.6188765596841574,
+    "speed_mean": 3.705160162851015,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      42
+    ],
+    "goal": [
+      66,
+      18
+    ]
+  },
+  "built_at": "2026-08-08T16:10:41Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

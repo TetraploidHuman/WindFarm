@@ -354,6 +354,103 @@ class PipelineTest(unittest.TestCase):
             msg=f"expected corridor planning mode, got {plan.get('planning_mode')}",
         )
 
+    def test_corridor_guides_blocked_in_weak_wind(self) -> None:
+        """Calm / uniform fields must not invent lateral corridors (sichuan-class failure)."""
+        width, height, levels = 24, 14, 3
+
+        def _run(u_south: float, u_north: float) -> list[str]:
+            belief_map = create_belief_map(width, height, levels)
+            arrays = belief_map.field_arrays
+            assert arrays is not None
+            for z in range(levels):
+                for y in range(height):
+                    for x in range(width):
+                        u = u_north if y >= height // 2 + 2 else u_south
+                        arrays["wind_u"][z, y, x] = u
+                        arrays["wind_v"][z, y, x] = 0.05
+                        arrays["wind_w"][z, y, x] = 0.0
+                        arrays["mode_prob_uplift"][z, y, x] = 0.2
+                        arrays["uncertainty"][z, y, x] = 0.05
+                        cell = belief_map.cells[z][y][x]
+                        cell.wind_u = u
+                        cell.wind_v = 0.05
+                        cell.wind_w = 0.0
+                        cell.mode_prob_uplift = 0.2
+                        cell.uncertainty = 0.05
+            elev = [[10.0 for _ in range(width)] for _ in range(height)]
+            start = (2.0, height / 2.0, 0.0)
+            goal = (width - 3, height // 2, 0)
+            mission = Mission(
+                start=(2, height // 2, 0),
+                goal=goal,
+                max_steps=40,
+                step_distance_m=50.0,
+                altitude_step_m=50.0,
+                clearance_agl_level=1.0,
+                max_altitude_level=2,
+                cruise_band_step=0.5,
+                corridor_energy_margin=1.02,
+                elevation=elev,
+            )
+            return [label for label, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+
+        weak = _run(0.4, 0.5)
+        self.assertTrue(any(l.startswith("guide_straight_agl") for l in weak))
+        self.assertFalse(any(l.startswith("guide_corridor_") for l in weak), msg=f"weak={weak}")
+        # Below HARD_FLOOR (1.20): never corridor.
+        below_hard = _run(0.8, 1.0)
+        self.assertFalse(any(l.startswith("guide_corridor_") for l in below_hard), msg=f"below_hard={below_hard}")
+        # Between hard/soft floors without a real lateral edge → still no corridor.
+        subfloor = _run(1.4, 1.5)
+        self.assertFalse(any(l.startswith("guide_corridor_") for l in subfloor), msg=f"subfloor={subfloor}")
+        # Between floors WITH clear lateral shear that also wins Joules → unlock.
+        sheared = _run(1.4, 6.0)
+        self.assertTrue(
+            any(l.startswith("guide_corridor_") for l in sheared),
+            msg=f"expected shear-unlocked corridor, got {sheared}",
+        )
+        # Fake uplift in calm horizontal wind must still not invent corridors.
+        belief_map = create_belief_map(width, height, levels)
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        for z in range(levels):
+            for y in range(height):
+                for x in range(width):
+                    arrays["wind_u"][z, y, x] = 0.5
+                    arrays["wind_v"][z, y, x] = 0.1
+                    arrays["wind_w"][z, y, x] = 0.35
+                    arrays["mode_prob_uplift"][z, y, x] = 0.7
+                    arrays["uncertainty"][z, y, x] = 0.05
+                    cell = belief_map.cells[z][y][x]
+                    cell.wind_u = 0.5
+                    cell.wind_v = 0.1
+                    cell.wind_w = 0.35
+                    cell.mode_prob_uplift = 0.7
+                    cell.uncertainty = 0.05
+        elev = [[10.0 for _ in range(width)] for _ in range(height)]
+        start = (2.0, height / 2.0, 0.0)
+        goal = (width - 3, height // 2, 0)
+        mission = Mission(
+            start=(2, height // 2, 0),
+            goal=goal,
+            max_steps=40,
+            step_distance_m=50.0,
+            altitude_step_m=50.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            cruise_band_step=0.5,
+            corridor_energy_margin=1.02,
+            elevation=elev,
+        )
+        fake_uplift = [label for label, _ in _energy_guide_paths(start, goal, belief_map, mission)]
+        self.assertFalse(
+            any(l.startswith("guide_corridor_") for l in fake_uplift),
+            msg=f"fake_uplift={fake_uplift}",
+        )
+        # Uniform moderate wind still has no lateral edge → no corridor.
+        uniform = _run(2.5, 2.5)
+        self.assertFalse(any(l.startswith("guide_corridor_") for l in uniform), msg=f"uniform={uniform}")
+
     def test_cruise_band_requires_evidence_to_leave_clearance(self) -> None:
         # Sub-5% "wins" at higher bands must not leave clearance (belief noise aloft).
         scores = {1.0: 1000.0, 1.35: 995.0, 2.0: 960.0}
@@ -382,8 +479,8 @@ class PipelineTest(unittest.TestCase):
             scores5, sticky=2.2, clearance=1.0, remaining_horiz=40.0, band_step=0.05, climb_earned=True
         )
         self.assertAlmostEqual(z5b, 2.2, places=5)
-        # Significant route terrain rise relaxes climb bar (3% enough).
-        scores6 = {1.0: 1000.0, 2.0: 960.0}
+        # First step above clearance on rising DEM: 3% enough (cold start).
+        scores6 = {1.0: 1000.0, 1.7: 960.0}
         z6 = _select_preferred_cruise_band(
             scores6,
             sticky=None,
@@ -393,7 +490,155 @@ class PipelineTest(unittest.TestCase):
             terrain_rise_m=80.0,
             altitude_step_m=50.0,
         )
-        self.assertAlmostEqual(z6, 2.0, places=5)
+        self.assertAlmostEqual(z6, 1.7, places=5)
+        # Further climb above clearance+1 still needs the full 5% even with terrain rise.
+        scores6b = {1.0: 1000.0, 1.5: 970.0, 2.5: 960.0}
+        z6b = _select_preferred_cruise_band(
+            scores6b,
+            sticky=1.5,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            terrain_rise_m=80.0,
+            altitude_step_m=50.0,
+            climb_earned=True,
+        )
+        self.assertAlmostEqual(z6b, 1.5, places=5)
+        # High band with ≥15% vs clearance unlocks soft ceiling; strong air may jump to argmin.
+        scores7 = {1.0: 1000.0, 1.35: 990.0, 2.5: 840.0}
+        z7 = _select_preferred_cruise_band(
+            scores7,
+            sticky=1.35,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=3.0,
+        )
+        self.assertGreaterEqual(z7, 2.4)
+        self.assertLessEqual(z7, 2.5 + 1e-9)
+        # Same 16% win in marginal air: not enough (≥20% required) → stay ≤ceiling.
+        z7m = _select_preferred_cruise_band(
+            scores7,
+            sticky=1.35,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=1.5,
+        )
+        self.assertLessEqual(z7m, 1.35 + 1e-9)
+        # 12% high-band win is not enough to unlock the soft ceiling.
+        scores7w = {1.0: 1000.0, 1.35: 990.0, 2.5: 880.0}
+        z7w = _select_preferred_cruise_band(
+            scores7w, sticky=1.35, clearance=1.0, remaining_horiz=40.0, band_step=0.05, climb_earned=True
+        )
+        self.assertLessEqual(z7w, 1.35 + 1e-9)
+        # Calm air: a 6% "win" at a mild higher band must not leave clearance.
+        scores_calm = {1.0: 1000.0, 1.2: 940.0}
+        z_calm = _select_preferred_cruise_band(
+            scores_calm,
+            sticky=None,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            ambient_wind_mps=0.6,
+        )
+        self.assertAlmostEqual(z_calm, 1.0, places=5)
+        # Moderate-band catch-up (≤clearance+1.2) may jump farther in one step.
+        scores7b = {1.0: 1000.0, 1.2: 990.0, 2.0: 850.0}
+        z7b = _select_preferred_cruise_band(
+            scores7b, sticky=1.2, clearance=1.0, remaining_horiz=40.0, band_step=0.05, climb_earned=True
+        )
+        self.assertGreaterEqual(z7b, 2.0 - 1e-9)
+        # Strong air + earned high sticky: ~4% lower-band "win" must NOT dump (need ≥8%).
+        scores_hold = {1.0: 1000.0, 1.3: 860.0, 2.57: 900.0}
+        z_hold = _select_preferred_cruise_band(
+            scores_hold,
+            sticky=2.57,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=3.5,
+            terrain_rise_m=80.0,
+            altitude_step_m=50.0,
+        )
+        self.assertAlmostEqual(z_hold, 2.57, places=5)
+        # ≥8% sticky-relative dump still allowed in strong air.
+        scores_dump = {1.0: 1000.0, 1.3: 820.0, 2.57: 900.0}
+        z_dump = _select_preferred_cruise_band(
+            scores_dump,
+            sticky=2.57,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=3.5,
+            terrain_rise_m=80.0,
+            altitude_step_m=50.0,
+        )
+        self.assertLess(z_dump, 2.57)
+        # Weak air keeps the old ~2% dump bar (protect against bad high sticky).
+        scores_weak_dump = {1.0: 1000.0, 1.3: 870.0, 2.0: 900.0}
+        z_weak_dump = _select_preferred_cruise_band(
+            scores_weak_dump,
+            sticky=2.0,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=1.5,
+        )
+        self.assertLess(z_weak_dump, 2.0)
+        # Approach + earned high sticky: hold cruise band (baseline polyline descends).
+        scores_appr = {1.0: 1000.0, 2.567: 820.0, 2.6: 822.0}
+        z_appr = _select_preferred_cruise_band(
+            scores_appr,
+            sticky=2.567,
+            clearance=1.0,
+            remaining_horiz=8.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=3.5,
+        )
+        self.assertAlmostEqual(z_appr, 2.567, places=5)
+        # Earned+strong: clearly cheaper thin upper band → one micro hop (capped).
+        scores_micro = {1.0: 1000.0, 2.567: 820.0, 2.667: 815.0}
+        z_micro = _select_preferred_cruise_band(
+            scores_micro,
+            sticky=2.567,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=3.5,
+        )
+        self.assertGreater(z_micro, 2.567 + 1e-9)
+        self.assertLessEqual(z_micro, 2.67 + 1e-9)
+        # Weak/marginal air: same scores must not micro-climb upward.
+        z_micro_w = _select_preferred_cruise_band(
+            scores_micro,
+            sticky=2.567,
+            clearance=1.0,
+            remaining_horiz=40.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=1.5,
+        )
+        self.assertLessEqual(z_micro_w, 2.567 + 1e-9)
+        # Approach + low sticky near clearance: still ease down toward clearance.
+        scores_appr_lo = {1.0: 1000.0, 1.35: 990.0}
+        z_appr_lo = _select_preferred_cruise_band(
+            scores_appr_lo,
+            sticky=1.35,
+            clearance=1.0,
+            remaining_horiz=8.0,
+            band_step=0.05,
+            climb_earned=True,
+            ambient_wind_mps=3.5,
+        )
+        self.assertLess(z_appr_lo, 1.35)
 
     def test_downscale_uses_100m_profile_aloft(self) -> None:
         elev = [[100.0, 110.0], [105.0, 115.0]]

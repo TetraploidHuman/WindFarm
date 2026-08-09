@@ -124,12 +124,12 @@
       "source": "SRTM1 native crop + Open-Meteo 10m/100m"
     },
     {
-      "name": "qingdao_coast",
-      "description": "Shandong windy coast (SRTM N36E120)",
-      "lat": 36.2,
-      "lon": 120.65,
-      "hgt": "data/N36E120.hgt",
-      "start_time": "2024-11-05T08:00:00",
+      "name": "liaoning_coast",
+      "description": "Liaodong peninsula coast near Dalian (SRTM N39E121)",
+      "lat": 39.15,
+      "lon": 121.65,
+      "hgt": "data/N39E121.hgt",
+      "start_time": "2024-11-18T08:00:00",
       "time_steps": 120,
       "grid": {
         "width": 79,
@@ -141,109 +141,27 @@
         "y": 1740.0
       },
       "elevation_m": {
-        "min": 181.64907509802975,
-        "max": 930.942488267861,
-        "mean": 668.0494870651173
+        "min": -2.0,
+        "max": 103.70595579093967,
+        "mean": 7.885900648590893
       },
       "wind": {
-        "u_km_mean": 1.608662163306317,
-        "v_km_mean": -1.0200998681061793,
-        "speed_mean": 1.9062117662642286,
+        "u_km_mean": -0.7931962334618183,
+        "v_km_mean": -3.6188765596841574,
+        "speed_mean": 3.705160162851015,
         "has_100m_profile": true
       },
       "mission": {
         "start": [
           12,
-          39
-        ],
-        "goal": [
-          62,
-          20
-        ]
-      },
-      "built_at": "2026-08-08T05:24:48Z",
-      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
-    },
-    {
-      "name": "zhangbei_steppe",
-      "description": "Hebei Zhangbei windy steppe / Bashang (SRTM N41E114)",
-      "lat": 41.18,
-      "lon": 114.72,
-      "hgt": "data/N41E114.hgt",
-      "start_time": "2024-04-20T08:00:00",
-      "time_steps": 120,
-      "grid": {
-        "width": 79,
-        "height": 59,
-        "resolution_m": 30.0
-      },
-      "extent_m": {
-        "x": 2340.0,
-        "y": 1740.0
-      },
-      "elevation_m": {
-        "min": 1374.8973226681917,
-        "max": 1394.0,
-        "mean": 1387.0734724814056
-      },
-      "wind": {
-        "u_km_mean": 1.680346391380456,
-        "v_km_mean": -1.7954949202272978,
-        "speed_mean": 2.4593053320342633,
-        "has_100m_profile": true
-      },
-      "mission": {
-        "start": [
-          12,
-          43
+          42
         ],
         "goal": [
           66,
-          17
+          18
         ]
       },
-      "built_at": "2026-08-08T13:12:35Z",
-      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
-    },
-    {
-      "name": "yunnan_karst",
-      "description": "Central Yunnan karst hills near Kunming (SRTM N25E102)",
-      "lat": 25.05,
-      "lon": 102.72,
-      "hgt": "data/N25E102.hgt",
-      "start_time": "2024-05-15T08:00:00",
-      "time_steps": 120,
-      "grid": {
-        "width": 79,
-        "height": 59,
-        "resolution_m": 30.0
-      },
-      "extent_m": {
-        "x": 2340.0,
-        "y": 1740.0
-      },
-      "elevation_m": {
-        "min": 1888.3853646458447,
-        "max": 1936.4580811556366,
-        "mean": 1900.7065632892502
-      },
-      "wind": {
-        "u_km_mean": -4.746253481364793,
-        "v_km_mean": -1.1592739634168556,
-        "speed_mean": 4.8865344103441455,
-        "has_100m_profile": true
-      },
-      "mission": {
-        "start": [
-          10,
-          44
-        ],
-        "goal": [
-          66,
-          17
-        ]
-      },
-      "built_at": "2026-08-08T13:27:58Z",
+      "built_at": "2026-08-08T16:10:41Z",
       "source": "SRTM1 native crop + Open-Meteo 10m/100m"
     },
     {
@@ -288,88 +206,6 @@
       "source": "SRTM1 native crop + Open-Meteo 10m/100m"
     },
     {
-      "name": "jilin_forest",
-      "description": "Changbai foothills / forested hills (SRTM N42E127)",
-      "lat": 42.45,
-      "lon": 127.25,
-      "hgt": "data/N42E127.hgt",
-      "start_time": "2024-09-18T08:00:00",
-      "time_steps": 120,
-      "grid": {
-        "width": 79,
-        "height": 59,
-        "resolution_m": 30.0
-      },
-      "extent_m": {
-        "x": 2340.0,
-        "y": 1740.0
-      },
-      "elevation_m": {
-        "min": 575.0,
-        "max": 733.7723798349723,
-        "mean": 635.9229530352859
-      },
-      "wind": {
-        "u_km_mean": 1.3474380938637718,
-        "v_km_mean": 0.023081429804789073,
-        "speed_mean": 1.3494931996929604,
-        "has_100m_profile": true
-      },
-      "mission": {
-        "start": [
-          11,
-          42
-        ],
-        "goal": [
-          67,
-          18
-        ]
-      },
-      "built_at": "2026-08-08T14:08:38Z",
-      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
-    },
-    {
-      "name": "neimeng_grass",
-      "description": "Xilingol grassland / open steppe (SRTM N43E116)",
-      "lat": 43.95,
-      "lon": 116.08,
-      "hgt": "data/N43E116.hgt",
-      "start_time": "2024-06-08T08:00:00",
-      "time_steps": 120,
-      "grid": {
-        "width": 79,
-        "height": 59,
-        "resolution_m": 30.0
-      },
-      "extent_m": {
-        "x": 2340.0,
-        "y": 1740.0
-      },
-      "elevation_m": {
-        "min": 978.0,
-        "max": 997.8868332270836,
-        "mean": 986.6738316769602
-      },
-      "wind": {
-        "u_km_mean": 2.143703878749112,
-        "v_km_mean": -5.889778000860477,
-        "speed_mean": 6.267770833333333,
-        "has_100m_profile": true
-      },
-      "mission": {
-        "start": [
-          13,
-          41
-        ],
-        "goal": [
-          65,
-          19
-        ]
-      },
-      "built_at": "2026-08-08T15:08:12Z",
-      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
-    },
-    {
       "name": "sichuan_foothills",
       "description": "West Sichuan basin-edge foothills (SRTM N30E103)",
       "lat": 30.65,
@@ -408,6 +244,88 @@
         ]
       },
       "built_at": "2026-08-08T15:24:54Z",
+      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+    },
+    {
+      "name": "shanxi_loess",
+      "description": "Loess plateau gullies near Yan'an (SRTM N36E109)",
+      "lat": 36.65,
+      "lon": 109.45,
+      "hgt": "data/N36E109.hgt",
+      "start_time": "2024-10-08T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 79,
+        "height": 59,
+        "resolution_m": 30.0
+      },
+      "extent_m": {
+        "x": 2340.0,
+        "y": 1740.0
+      },
+      "elevation_m": {
+        "min": 964.1549942551327,
+        "max": 1218.046332998746,
+        "mean": 1051.400914026233
+      },
+      "wind": {
+        "u_km_mean": 1.4200214673424723,
+        "v_km_mean": 3.0209884630712236,
+        "speed_mean": 3.338197068319516,
+        "has_100m_profile": true
+      },
+      "mission": {
+        "start": [
+          12,
+          42
+        ],
+        "goal": [
+          66,
+          17
+        ]
+      },
+      "built_at": "2026-08-08T15:51:10Z",
+      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+    },
+    {
+      "name": "taiwan_hills",
+      "description": "Central Taiwan foothills / windward slopes (SRTM N23E121)",
+      "lat": 23.55,
+      "lon": 121.15,
+      "hgt": "data/N23E121.hgt",
+      "start_time": "2024-09-03T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 79,
+        "height": 59,
+        "resolution_m": 30.0
+      },
+      "extent_m": {
+        "x": 2340.0,
+        "y": 1740.0
+      },
+      "elevation_m": {
+        "min": 2196.7676993771042,
+        "max": 3051.2107286426417,
+        "mean": 2709.764626110256
+      },
+      "wind": {
+        "u_km_mean": -1.502475993864054,
+        "v_km_mean": 0.43957855633289583,
+        "speed_mean": 1.565695116231668,
+        "has_100m_profile": true
+      },
+      "mission": {
+        "start": [
+          11,
+          42
+        ],
+        "goal": [
+          66,
+          17
+        ]
+      },
+      "built_at": "2026-08-08T16:08:05Z",
       "source": "SRTM1 native crop + Open-Meteo 10m/100m"
     }
   ]

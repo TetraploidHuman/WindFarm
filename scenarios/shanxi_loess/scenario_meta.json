@@ -1,0 +1,41 @@
+{
+  "name": "shanxi_loess",
+  "description": "Loess plateau gullies near Yan'an (SRTM N36E109)",
+  "lat": 36.65,
+  "lon": 109.45,
+  "hgt": "data/N36E109.hgt",
+  "start_time": "2024-10-08T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 964.1549942551327,
+    "max": 1218.046332998746,
+    "mean": 1051.400914026233
+  },
+  "wind": {
+    "u_km_mean": 1.4200214673424723,
+    "v_km_mean": 3.0209884630712236,
+    "speed_mean": 3.338197068319516,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      42
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-08T15:51:10Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

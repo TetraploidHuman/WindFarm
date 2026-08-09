@@ -404,6 +404,12 @@ def plan_path_details(
     )
     want_guides = horizontal_to_goal > guide_horizon_cells
     sticky_cruise = getattr(mission, "preferred_cruise_agl", None)
+    clearance_for_skip = float(getattr(mission, "clearance_agl_level", 1.0))
+    # High wind-layer sticky (>clearance+1.2): keep MPC so XY can exploit shear aloft.
+    # Mild sticky near clearance may still skip to greedy (guides override below).
+    high_wind_sticky = (
+        sticky_cruise is not None and float(sticky_cruise) > clearance_for_skip + 1.2 + 1e-9
+    )
     # After the first guide commit, energy guides dominate open-cruise legs — seed with
     # greedy progress instead of multi-round MPC (guides still override below).
     sticky_open_cruise = (
@@ -411,6 +417,7 @@ def plan_path_details(
         and want_guides
         and not use_return_map
         and horizontal_to_goal > max(guide_horizon_cells, 8.0)
+        and not high_wind_sticky
     )
     guide_future = None
     return_future = None
@@ -571,8 +578,33 @@ def plan_path_details(
     else:
         cruise_fair = _band_selection_scores(start, goal, belief_map, mission, bands)
         select_scores = cruise_fair
-    # Mild climb prior: belief noise aloft often looks "free"; tax ~1%/level above clearance.
     raw_band_scores = dict(select_scores) if select_scores else {}
+    sticky_now = getattr(mission, "preferred_cruise_agl", None)
+    sz_now = float(start[2])
+    route_terrain_rise = 0.0
+    if getattr(mission, "elevation", None) is not None:
+        route_terrain_rise = terrain_climb_along_line_m(
+            mission.elevation,
+            float(start[0]),
+            float(start[1]),
+            float(goal[0]),
+            float(goal[1]),
+            samples=8,
+        )
+    # Ambient horizontal wind on the preferred/clearance straight (calm → harder climb bar).
+    ambient_wind_mps = 0.0
+    probe_z = float(getattr(mission, "preferred_cruise_agl", None) or clearance)
+    probe_path = _agl_guide_polyline(
+        (float(start[0]), float(start[1]), probe_z),
+        goal,
+        belief_map,
+        mission,
+        via_xy=None,
+        cruise_z=probe_z,
+    )
+    if len(probe_path) > 1:
+        ambient_wind_mps, _, _ = _path_wind_utilization_stats(probe_path, belief_map)
+    # Mild climb prior: belief noise aloft often looks "free"; tax ~1%/level above clearance.
     if select_scores and step <= 0.26 + 1e-12:
         floor_z = min(select_scores.keys(), key=lambda z: abs(z - clearance))
         floor_e = max(select_scores[floor_z], 1.0)
@@ -580,8 +612,6 @@ def plan_path_details(
         select_scores = {
             z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
         }
-    sticky_now = getattr(mission, "preferred_cruise_agl", None)
-    sz_now = float(start[2])
     # Small anti-thrash only within ±0.5 of the hold — never block clearance recovery.
     if sticky_now is not None and sz_now >= clearance + 0.25 and select_scores and horizontal_to_goal > 8.0:
         climb_cost = float(getattr(mission, "climb_cost_per_level_j", 180.0))
@@ -606,16 +636,6 @@ def plan_path_details(
                     select_scores = {
                         z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
                     }
-    route_terrain_rise = 0.0
-    if getattr(mission, "elevation", None) is not None:
-        route_terrain_rise = terrain_climb_along_line_m(
-            mission.elevation,
-            float(start[0]),
-            float(start[1]),
-            float(goal[0]),
-            float(goal[1]),
-            samples=8,
-        )
     selected_band = _select_preferred_cruise_band(
         select_scores,
         sticky=getattr(mission, "preferred_cruise_agl", None),
@@ -626,17 +646,41 @@ def plan_path_details(
         terrain_rise_m=route_terrain_rise,
         altitude_step_m=float(getattr(mission, "altitude_step_m", 50.0)),
         climb_earned=bool(getattr(mission, "cruise_climb_earned", False)),
+        ambient_wind_mps=ambient_wind_mps,
     )
     # Soft rate-limit only — evidence gates live in _select_preferred_cruise_band.
     sticky_now = getattr(mission, "preferred_cruise_agl", None)
     if sticky_now is not None and selected_band is not None and horizontal_to_goal > 10.0:
-        # Faster climb/dump when DEM along-route already forces significant rise.
-        step_cap = 0.50 if route_terrain_rise >= max(float(getattr(mission, "altitude_step_m", 50.0)), 1.0) else 0.35
-        lo = float(sticky_now) - step_cap
-        hi = float(sticky_now) + step_cap
-        selected_band = float(min(max(float(selected_band), lo), hi))
+        # Earned + strong air + ≥15% clearance win: do not clamp upward (one-shot band commit).
+        skip_up_cap = False
+        if (
+            select_scores
+            and bool(getattr(mission, "cruise_climb_earned", False))
+            and float(ambient_wind_mps) >= CORRIDOR_MARGINAL_WIND_MPS
+            and float(selected_band) >= float(sticky_now) - 1e-9
+        ):
+            clr_k = min(select_scores.keys(), key=lambda z: abs(float(z) - float(clearance)))
+            sel_k = min(select_scores.keys(), key=lambda z: abs(float(z) - float(selected_band)))
+            if select_scores[sel_k] <= select_scores[clr_k] * 0.85:
+                skip_up_cap = True
+        if not skip_up_cap:
+            # Clear clearance-relative win → larger steps once climb is earned.
+            # Cap aggressive catch-up above clearance+1.2 (prevents taiwan-class z→3 overshoot).
+            step_cap = 0.50 if route_terrain_rise >= max(float(getattr(mission, "altitude_step_m", 50.0)), 1.0) else 0.35
+            if select_scores:
+                clr_k = min(select_scores.keys(), key=lambda z: abs(float(z) - float(clearance)))
+                sel_k = min(select_scores.keys(), key=lambda z: abs(float(z) - float(selected_band)))
+                high_band = float(selected_band) > float(clearance) + 1.2
+                if select_scores[sel_k] <= select_scores[clr_k] * 0.90:
+                    step_cap = max(step_cap, 0.70 if high_band else 0.95)
+                    if bool(getattr(mission, "cruise_climb_earned", False)) and horizontal_to_goal > 25.0:
+                        step_cap = max(step_cap, 0.85 if high_band else 1.25)
+            lo = float(sticky_now) - step_cap
+            hi = float(sticky_now) + step_cap
+            selected_band = float(min(max(float(selected_band), lo), hi))
     elif sticky_now is not None and selected_band is not None:
-        # Approach: allow faster descent than climb.
+        # Approach: allow faster descent than climb (low bands). High earned cruise
+        # is held by the band selector so the baseline polyline can descend cleanly.
         selected_band = float(min(float(selected_band), float(sticky_now)))
         selected_band = float(max(float(selected_band), float(sticky_now) - 0.50))
     preferred_straight_energy = (
@@ -674,18 +718,100 @@ def plan_path_details(
     for (label, path), energy in zip(ranked_candidates, ranked_energies):
         floor_e = preferred_straight_energy if preferred_straight_energy < math.inf else straight_guide_energy
         # Soft floor: non-straight may win if within ~5% of preferred straight (model Joules).
-        if not label.startswith("guide_straight_agl") and floor_e < math.inf and energy > floor_e * 1.05:
+        # Corridors use same-band floor below — do not kill them vs clearance sticky first.
+        if (
+            not label.startswith("guide_straight_agl")
+            and not label.startswith("guide_corridor_")
+            and floor_e < math.inf
+            and energy > floor_e * 1.05
+        ):
             continue
         if label.startswith("guide_corridor_"):
             corr_m = getattr(mission, "corridor_energy_margin", None)
             corr_m = 1.02 if corr_m is None else float(corr_m)
             if corr_m <= 0.0:
                 continue
-            # Commit only with a clear model-energy edge (belief noise otherwise detours).
-            win_need = min(float(corr_m), 0.992)
-            if floor_e < math.inf and energy > floor_e * win_need:
+            # Corridors are generated at best_band; judge amb/edge/Joules vs SAME-BAND straight.
+            # selected_band is often still clearance while the corridor cruises aloft — using
+            # clearance ambient (<HARD) hard-rejects taiwan-class shear even with a real edge.
+            corr_zs = [float(p[2]) for p in path[1:-1]] or [float(p[2]) for p in path]
+            corr_band = float(sorted(corr_zs)[len(corr_zs) // 2])
+            if straight_paths:
+                corr_band = float(min(straight_paths.keys(), key=lambda z: abs(float(z) - corr_band)))
+                pref_pair = straight_paths.get(corr_band)
+            else:
+                pref_pair = None
+            if pref_pair is None:
+                pref_straight = _agl_guide_polyline(
+                    start, goal, belief_map, mission, via_xy=None, cruise_z=corr_band
+                )
+                floor_e = (
+                    _completed_plan_energy_j(pref_straight, goal, belief_map, mission)
+                    if len(pref_straight) > 1
+                    else math.inf
+                )
+            else:
+                pref_straight = pref_pair[1]
+                floor_e = float(straight_energies.get(corr_band, preferred_straight_energy))
+            amb_speed, _, _ = _path_wind_utilization_stats(
+                pref_straight if pref_straight is not None and len(pref_straight) > 1 else path,
+                belief_map,
+            )
+            has_edge = _corridor_has_lateral_edge(path, belief_map, pref_straight)
+            # Dual ambient + path check; shear unlock only with a real lateral edge.
+            if not _corridor_ambient_ok(amb_speed, has_edge=has_edge):
                 continue
-            if mpc_completed_energy < math.inf and energy > mpc_completed_energy * min(float(corr_m), 1.0):
+            if not _corridor_wind_usable(
+                path, belief_map, straight_path=pref_straight, allow_shear_unlock=True
+            ):
+                continue
+            # Marginal ambient wind without a real lateral edge → reject (no Joules loophole).
+            if amb_speed < CORRIDOR_MARGINAL_WIND_MPS and not has_edge:
+                continue
+            win_need = _corridor_energy_win_need(
+                path,
+                pref_straight,
+                corr_m,
+                ambient_wind_mps=amb_speed,
+                has_lateral_edge=has_edge,
+            )
+            if not has_edge:
+                no_edge = (
+                    CORRIDOR_NO_EDGE_WIN_NEED
+                    if amb_speed < CORRIDOR_MARGINAL_WIND_MPS
+                    else CORRIDOR_NO_EDGE_WIN_NEED_STRONG
+                )
+                win_need = min(win_need, no_edge)
+            # In marginal wind, tax belief uncertainty at commit; strong wind keeps raw Joules.
+            # Proven shear-band edge: no tax (see CORRIDOR_SHEAR_COMMIT_UNCERTAINTY_GAIN).
+            commit_e = float(energy)
+            if amb_speed < CORRIDOR_MARGINAL_WIND_MPS:
+                shear_edged = (
+                    has_edge
+                    and CORRIDOR_HARD_FLOOR_MPS <= amb_speed < CORRIDOR_MIN_WIND_MPS
+                )
+                u_gain = (
+                    CORRIDOR_SHEAR_COMMIT_UNCERTAINTY_GAIN
+                    if shear_edged
+                    else CORRIDOR_COMMIT_UNCERTAINTY_GAIN
+                )
+                if u_gain > 0.0:
+                    risk_e = _polyline_risk_adjusted_energy_j(
+                        path, belief_map, mission, uncertainty_gain=u_gain
+                    )
+                    commit_e = max(commit_e, float(risk_e))
+            if floor_e < math.inf and commit_e > floor_e * win_need:
+                continue
+            # When selected≈corridor band, also beat that straight. Do NOT compare a high
+            # shear corridor against clearance sticky — that reintroduces the amb/floor bug.
+            if (
+                preferred_straight_energy < math.inf
+                and selected_band is not None
+                and abs(float(selected_band) - corr_band) <= 0.35 + 1e-9
+                and commit_e > preferred_straight_energy * win_need
+            ):
+                continue
+            if mpc_completed_energy < math.inf and commit_e > mpc_completed_energy * min(float(corr_m), 1.0):
                 continue
         elif label.startswith("guide_straight_agl"):
             band = _cruise_z_from_guide_label(label, clearance, mission)
@@ -718,6 +844,7 @@ def plan_path_details(
     if chosen is not None and best_label != planning_mode:
         best_path = chosen
         planning_mode = best_label
+        # Corridor supplies XY via; keep selected-band altitude policy (avoid forced climb).
         cruise_ref = (
             selected_band
             if selected_band is not None
@@ -915,6 +1042,191 @@ def _path_mean_uncertainty(
     pts = np.asarray(path[:-1], dtype=np.float64)
     samples = _sample_belief_states_batch(belief_map, pts[:, 0], pts[:, 1], pts[:, 2])
     return float(np.mean(samples["uncertainty"]))
+
+
+def _path_wind_utilization_stats(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    *,
+    max_samples: int = 24,
+    speed_q: float | None = None,
+) -> tuple[float, float, float]:
+    """Horizontal wind (m/s), mean w, mean uplift probability along a path.
+
+    ``speed_q``: if set (e.g. 0.75), use that quantile of path speed instead of the
+    mean — better for localized shear corridors without diluting the edge.
+    """
+    if len(path) <= 1:
+        return 0.0, 0.0, 0.0
+    pts = path[:-1]
+    if len(pts) > max_samples:
+        idx = np.linspace(0, len(pts) - 1, max_samples).astype(np.int32)
+        pts = [pts[int(i)] for i in idx]
+    arr = np.asarray(pts, dtype=np.float64)
+    samples = _sample_belief_states_batch(belief_map, arr[:, 0], arr[:, 1], arr[:, 2])
+    speed = np.hypot(samples["wind_u"], samples["wind_v"])
+    uplift = samples.get("mode_prob_uplift")
+    mean_uplift = float(np.mean(uplift)) if uplift is not None else 0.0
+    if speed_q is None:
+        speed_val = float(np.mean(speed))
+    else:
+        speed_val = float(np.quantile(speed, float(speed_q)))
+    return speed_val, float(np.mean(samples["wind_w"])), mean_uplift
+
+
+# Lateral corridors need horizontal wind; calm belief fields invent tiny Joules "wins".
+# Uplift / w alone must NOT unlock corridors (belief noise aloft is common in calm maps).
+# Hard floor: never corridor below this (blocks sichuan-class ~0.6 m/s).
+CORRIDOR_HARD_FLOOR_MPS = 1.20
+# Soft floor without a proven lateral edge.
+CORRIDOR_MIN_WIND_MPS = 1.80
+# Below this ambient horizontal wind, demand a real lateral *speed* edge + stricter Joules.
+CORRIDOR_MARGINAL_WIND_MPS = 2.00
+# Must also beat the straight ray — blocks uniform-calm "fake shear" (sichuan-class).
+CORRIDOR_WIND_ADVANTAGE_MPS = 0.35
+# Absolute speed edge inside the shear-unlock band (HARD..MIN); relative frac was too
+# strict vs ~1.5 m/s ambient (taiwan-class) while still blocking uniform calm (~0 Δ).
+CORRIDOR_SHEAR_SPEED_ADVANTAGE_MPS = 0.28
+CORRIDOR_W_ADVANTAGE_MPS = 0.08
+CORRIDOR_UPLIFT_ADVANTAGE = 0.08
+# Relative lateral edge (fraction of ambient) on top of absolute floors.
+CORRIDOR_WIND_ADVANTAGE_FRAC = 0.25
+CORRIDOR_W_ADVANTAGE_FRAC = 0.15
+CORRIDOR_UPLIFT_ADVANTAGE_FRAC = 0.15
+# Final commit base: need ~1.0% model-energy edge vs preferred straight.
+CORRIDOR_WIN_NEED = 0.990
+# Extra: each 1% XY detour demands ~0.5% additional model savings at final commit.
+CORRIDOR_DETOUR_WIN_BETA = 0.5
+# Without a lateral wind edge: calm ≈3%, stronger ambient ≈1.5%.
+CORRIDOR_NO_EDGE_WIN_NEED = 0.970
+CORRIDOR_NO_EDGE_WIN_NEED_STRONG = 0.985
+# Calm / marginal ambient wind: demand ~3% Joules even with a claimed edge.
+CORRIDOR_CALM_WIN_NEED = 0.970
+# Proven lateral edge in the shear-unlock band: ~1% Joules (raw shear often ~4%;
+# heavier 2%+detour bars killed taiwan-class commits after risk tax).
+CORRIDOR_SHEAR_WIN_NEED = 0.990
+# Uncertainty tax at commit — only applied in marginal ambient wind.
+CORRIDOR_COMMIT_UNCERTAINTY_GAIN = 0.06
+# Proven shear-band edge: light commit tax (belief unc is high but edge is real).
+CORRIDOR_SHEAR_COMMIT_UNCERTAINTY_GAIN = 0.02
+
+
+def _corridor_wind_usable(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    *,
+    straight_path: list[tuple[float, float, float]] | None = None,
+    allow_shear_unlock: bool = False,
+) -> bool:
+    """Horizontal-wind floor — blocks calm fields that invent tiny Joules wins.
+
+    Between HARD_FLOOR and MIN, corridors are allowed only with a proven lateral
+    edge vs the straight ray (weak-but-sheared routes; still blocks uniform calm).
+    """
+    speed, _w_mean, _uplift_p = _path_wind_utilization_stats(path, belief_map)
+    if speed < CORRIDOR_HARD_FLOOR_MPS:
+        return False
+    if speed >= CORRIDOR_MIN_WIND_MPS:
+        return True
+    if not allow_shear_unlock or straight_path is None:
+        return False
+    return _corridor_has_lateral_edge(path, belief_map, straight_path)
+
+
+def _corridor_ambient_ok(amb_speed: float, *, has_edge: bool) -> bool:
+    """Straight-ray ambient gate with shear unlock between hard and soft floors."""
+    if amb_speed < CORRIDOR_HARD_FLOOR_MPS:
+        return False
+    if amb_speed >= CORRIDOR_MIN_WIND_MPS:
+        return True
+    return bool(has_edge)
+
+
+def _corridor_has_lateral_edge(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    straight_path: list[tuple[float, float, float]] | None,
+) -> bool:
+    """True when the corridor shows a real wind edge vs the straight ray.
+
+    In marginal ambient wind only horizontal-speed edges count — belief w/uplift
+    noise otherwise invents "shear" on calm maps. Corridor speed uses p75 so a
+    localized shear lobe is not diluted by calm segments.
+    """
+    if straight_path is None or len(straight_path) <= 1:
+        return True
+    # Corridor: p75 captures localized shear; straight: mean ambient baseline.
+    speed, w_mean, uplift_p = _path_wind_utilization_stats(path, belief_map, speed_q=0.75)
+    s_speed, s_w, s_up = _path_wind_utilization_stats(straight_path, belief_map)
+    need_w = max(
+        CORRIDOR_W_ADVANTAGE_MPS,
+        CORRIDOR_W_ADVANTAGE_FRAC * min(max(abs(s_w), 0.05), 0.5),
+    )
+    need_up = max(
+        CORRIDOR_UPLIFT_ADVANTAGE,
+        CORRIDOR_UPLIFT_ADVANTAGE_FRAC * min(max(s_up, 0.05), 0.5),
+    )
+    if s_speed < CORRIDOR_MIN_WIND_MPS:
+        # Shear-unlock band: absolute horizontal |wind| edge only.
+        # Along-track-only edges were tried (taiwan headwind relief) but live commits
+        # worsened path-model energy on steep DEM — keep speed edge as the gate.
+        return speed >= s_speed + CORRIDOR_SHEAR_SPEED_ADVANTAGE_MPS
+    # Relative edge only scales with light/moderate ambient wind (cap).
+    need_speed = max(
+        CORRIDOR_WIND_ADVANTAGE_MPS,
+        CORRIDOR_WIND_ADVANTAGE_FRAC * min(max(s_speed, 0.0), 2.0),
+    )
+    speed_edge = speed >= s_speed + need_speed
+    vertical_edge = w_mean >= s_w + need_w or uplift_p >= s_up + need_up
+    if s_speed < CORRIDOR_MARGINAL_WIND_MPS:
+        # Marginal but above soft floor: mild horizontal + vertical confirmation.
+        mild_speed = speed >= s_speed + min(0.22, 0.55 * need_speed)
+        return speed_edge or (mild_speed and vertical_edge)
+    return speed_edge or vertical_edge
+
+
+def _corridor_wind_ok(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    straight_path: list[tuple[float, float, float]] | None = None,
+    *,
+    require_lateral_edge: bool = False,
+) -> bool:
+    """Usable wind required; lateral edge optional (enforced via stricter Joules when absent)."""
+    if not _corridor_wind_usable(path, belief_map):
+        return False
+    if not require_lateral_edge:
+        return True
+    return _corridor_has_lateral_edge(path, belief_map, straight_path)
+
+
+def _corridor_energy_win_need(
+    path: list[tuple[float, float, float]],
+    straight_path: list[tuple[float, float, float]] | None,
+    corridor_margin: float,
+    *,
+    ambient_wind_mps: float | None = None,
+    has_lateral_edge: bool = False,
+) -> float:
+    """Stricter Joules gate when the corridor adds XY length or ambient wind is calm."""
+    base = min(float(corridor_margin), CORRIDOR_WIN_NEED)
+    if ambient_wind_mps is not None and ambient_wind_mps < CORRIDOR_MARGINAL_WIND_MPS:
+        if (
+            has_lateral_edge
+            and ambient_wind_mps >= CORRIDOR_HARD_FLOOR_MPS
+            and ambient_wind_mps < CORRIDOR_MIN_WIND_MPS
+        ):
+            # Proven shear in the unlock band: ~2% Joules (not the full calm 3%).
+            base = min(base, CORRIDOR_SHEAR_WIN_NEED)
+        else:
+            base = min(base, CORRIDOR_CALM_WIN_NEED)
+    if straight_path is None or len(straight_path) <= 1 or len(path) <= 1:
+        return base
+    s_len = _path_xy_length(straight_path)
+    if s_len <= 1e-6:
+        return base
+    detour_frac = max(0.0, _path_xy_length(path) / s_len - 1.0)
+    return max(0.90, base - CORRIDOR_DETOUR_WIN_BETA * detour_frac)
 
 
 def _polyline_risk_adjusted_energy_j(
@@ -1165,25 +1477,43 @@ def _commit_preferred_cruise(
         clr = float(clearance)
         clr_e = _lookup(clr)
         # Align with band selector: climb ≥5% vs clearance; dump ≥2% vs sticky.
-        if z + 1e-9 < prev:
-            if new_e > prev_e * 0.98 and not (prev > clr + 0.5 * step and prev_e > clr_e * 1.02):
+        # Clear wins (≥10% vs clearance) may step by 0.70+ once climb is already earned.
+        already_earned = bool(getattr(mission, "cruise_climb_earned", False))
+        high_band = z > clr + 1.2
+        # Earned + ≥15% vs clearance: commit selected band in one step (no max_step clamp).
+        oneshot = already_earned and new_e <= clr_e * 0.85
+        max_step = 0.70 if new_e <= clr_e * 0.90 else 0.35
+        if already_earned and new_e <= clr_e * 0.90:
+            max_step = max(max_step, 0.85 if high_band else 1.25)
+        # Match band-selector hysteresis: earned high sticky needs ≥8% to dump.
+        commit_dump_need = 0.92 if (already_earned and prev > clr + 1.0) else 0.98
+        if oneshot:
+            pass  # keep selector z
+        elif z + 1e-9 < prev:
+            if new_e > prev_e * commit_dump_need and not (
+                prev > clr + 0.5 * step and prev_e > clr_e * 1.02
+            ):
                 z = prev
-            elif z < prev - 0.35 - 1e-9:
-                z = prev - 0.35
+            elif z < prev - max_step - 1e-9:
+                z = prev - max_step
         elif z > prev + 1e-9:
-            earned = new_e <= clr_e * 0.95 and new_e <= prev_e * 0.95
+            # First climb needs ≥5% vs sticky; once earned, 3% sticky-relative is enough to catch argmin.
+            sticky_need = 0.97 if already_earned else 0.95
+            earned = new_e <= clr_e * 0.95 and new_e <= prev_e * sticky_need
             if not earned:
                 z = prev
         else:
             if abs(new_e - prev_e) <= prev_e * 0.015:
                 z = prev
-        if z > argmin_z + 2.0 * step + 1e-9 and _lookup(z) > argmin_e * 1.05 and z >= prev - 1e-9:
-            if argmin_z + 1e-9 >= prev and argmin_e <= prev_e * 0.95:
-                z = min(argmin_z, prev + 0.35)
-        if z > prev + 0.35 + 1e-9:
-            z = prev + 0.35
-        if z + 1e-9 < prev - 0.35:
-            z = prev - 0.35
+        if not oneshot:
+            if z > argmin_z + 2.0 * step + 1e-9 and _lookup(z) > argmin_e * 1.05 and z >= prev - 1e-9:
+                sticky_need = 0.97 if already_earned else 0.95
+                if argmin_z + 1e-9 >= prev and argmin_e <= prev_e * sticky_need and argmin_e <= clr_e * 0.95:
+                    z = min(argmin_z, prev + max_step)
+            if z > prev + max_step + 1e-9:
+                z = prev + max_step
+            if z + 1e-9 < prev - max_step:
+                z = prev - max_step
     elif prev is not None:
         # No scores: allow free update toward newly selected cruise.
         pass
@@ -1196,11 +1526,12 @@ def _commit_preferred_cruise(
         step=step,
     )
     mission.preferred_cruise_agl = z
+    # Align earned flag with the climb bar (≥5% vs clearance), not the looser 3% sticky catch-up.
     if z > float(clearance) + 0.5 * step:
         if band_energies:
             clr_key = min(band_energies.keys(), key=lambda k: abs(k - float(clearance)))
             z_key = min(band_energies.keys(), key=lambda k: abs(k - z))
-            if band_energies[z_key] <= band_energies[clr_key] * 0.97:
+            if band_energies[z_key] <= band_energies[clr_key] * 0.95:
                 mission.cruise_climb_earned = True
         else:
             mission.cruise_climb_earned = True
@@ -1256,12 +1587,14 @@ def _select_preferred_cruise_band(
     terrain_rise_m: float = 0.0,
     altitude_step_m: float = 50.0,
     climb_earned: bool = False,
+    ambient_wind_mps: float | None = None,
 ) -> float | None:
     """Pick cruise AGL from full-path band scores with evidence-gated changes.
 
     Universal rules (no map-specific thresholds):
     - Flat routes: climb only if winner beats clearance by ≥5% (belief aloft is noisy).
     - Significant along-route terrain rise: relax to ≥3% (ridge-following needs height).
+    - Calm horizontal wind: require ≥10% vs clearance before any climb (sichuan-class).
     - Dump toward clearance if sticky is ≥2% worse than clearance.
     - Unearned sticky (never cleared the climb bar) eases down even if slightly cheaper.
     """
@@ -1269,25 +1602,75 @@ def _select_preferred_cruise_band(
     if not band_scores:
         return None
     step = max(float(band_step), 0.01)
-    # Terrain-aware but map-agnostic: more climb freedom when the DEM forces lift.
-    climb_need = 0.97 if terrain_rise_m >= max(float(altitude_step_m), 1.0) else 0.95
-    dump_need = 0.98  # ≥2% savings to dump toward a better lower band
+    dump_need = 0.98  # ≥2% savings to dump toward a better lower band (default / approach)
     best_z = float(min(band_scores.keys(), key=lambda z: band_scores[z]))
     best_e = band_scores[best_z]
     clearance_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance))))
     clearance_e = band_scores[clearance_key]
+    terrain_relief = terrain_rise_m >= max(float(altitude_step_m), 1.0)
+    # None = caller did not measure wind → do not apply the calm-air climb bar.
+    calm_air = ambient_wind_mps is not None and float(ambient_wind_mps) < CORRIDOR_MIN_WIND_MPS
+    # None ambient = treat as strong for dump hysteresis (legacy callers).
+    strong_air = ambient_wind_mps is None or float(ambient_wind_mps) >= CORRIDOR_MARGINAL_WIND_MPS
+    # Once a high band is earned in strong air, demand ≥8% sticky-relative before dumping
+    # (stops qinghai-class walk-down from ~2.6 → 1.3). Weak/marginal air keeps 2%.
+    cruise_dump_need = 0.92 if (climb_earned and strong_air) else dump_need
 
-    def _earned_climb(candidate_e: float) -> bool:
-        return candidate_e <= clearance_e * climb_need
+    def _climb_need_for(target_z: float, from_z: float | None) -> float:
+        """Relax to 3% only for the first step above clearance on rising DEM routes.
+
+        High bands need a clearer clearance-relative win — stops Taiwan-class z→3 cascades.
+        Calm air needs ≥10% before leaving clearance at all.
+        """
+        if calm_air and target_z > clearance_key + 0.5 * step:
+            return 0.90
+        base = from_z if from_z is not None else clearance_key
+        if terrain_relief and base <= clearance_key + 0.5 * step and target_z <= clearance_key + 1.0 + 1e-9:
+            return 0.97
+        if target_z > clearance_key + 1.5 + 1e-9:
+            return 0.90  # ≥10% vs clearance
+        if target_z > clearance_key + 1.0 + 1e-9:
+            return 0.92  # ≥8% vs clearance
+        return 0.95
+
+    def _earned_climb(candidate_e: float, target_z: float, from_z: float | None = None) -> bool:
+        return candidate_e <= clearance_e * _climb_need_for(target_z, from_z)
 
     if sticky is None or remaining_horiz <= 6.0:
         # Cold start / final approach: stay at clearance unless climb is clearly earned.
         if remaining_horiz <= 6.0:
+            # Earned high cruise: keep sticky so execution can descend on the baseline
+            # polyline from the true cruise band (avoid mid-air band staircase thrash).
+            if (
+                sticky is not None
+                and climb_earned
+                and float(sticky) > clearance_key + 1.0 + 1e-9
+            ):
+                sticky_key = float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(sticky))))
+                sticky_e = band_scores[sticky_key]
+                if sticky_e <= clearance_e * 1.02:
+                    if best_z + 1e-9 < sticky_key and best_e <= sticky_e * dump_need:
+                        return float(max(best_z, sticky_key - 0.35))
+                    return sticky_key
             if best_z + 1e-9 < clearance_key and best_e <= clearance_e * 0.98:
                 return best_z
             if remaining_horiz <= 3.5:
                 return float(min(band_scores.keys(), key=lambda z: abs(float(z) - float(clearance_key))))
-        if best_z > clearance_key + 0.5 * step and _earned_climb(best_e):
+        if best_z > clearance_key + 0.5 * step and _earned_climb(best_e, best_z, clearance_key):
+            # Soft ceiling also applies on cold start (avoid leaping to z≈3 immediately).
+            cold_unlock = 0.85
+            if best_z > clearance_key + 1.2 + 1e-9 and best_e > clearance_e * cold_unlock:
+                ceiling = clearance_key + 1.2
+                mid = {
+                    float(z): float(e)
+                    for z, e in band_scores.items()
+                    if float(z) <= ceiling + 1e-9
+                }
+                if mid:
+                    mid_best = float(min(mid.keys(), key=lambda z: mid[z]))
+                    if mid[mid_best] <= clearance_e * _climb_need_for(mid_best, clearance_key):
+                        return mid_best
+                return clearance_key
             return best_z
         return clearance_key
 
@@ -1298,34 +1681,122 @@ def _select_preferred_cruise_band(
     if sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * 1.02:
         return float(max(clearance_key, sticky_key - 0.35))
 
-    # Approach: gentle descent only.
+    # Approach: gentle descent only — but hold an earned high cruise band so the
+    # execution baseline polyline can own the last ~12% geometric descent.
     if remaining_horiz <= 10.0:
         if best_z + 1e-9 < sticky_key and best_e <= sticky_e * dump_need:
             return float(min(sticky_key, max(best_z, sticky_key - 0.35)))
+        if climb_earned and sticky_key > clearance_key + 1.0 + 1e-9:
+            return sticky_key
         if sticky_key > clearance_key + 0.5 * step:
             return float(max(clearance_key, sticky_key - 0.35))
         return sticky_key
 
     # Late cruise: hold unless a correction is available (wrong-layer recovery).
     if remaining_horiz <= 16.0:
-        if best_z + 1e-9 < sticky_key and best_e <= sticky_e * dump_need:
+        if best_z + 1e-9 < sticky_key and best_e <= sticky_e * cruise_dump_need:
             return float(max(best_z, sticky_key - 0.35))
-        if best_z >= sticky_key + 0.5 * step and _earned_climb(best_e) and best_e <= sticky_e * climb_need:
+        need = _climb_need_for(best_z, sticky_key)
+        if best_z >= sticky_key + 0.5 * step and _earned_climb(best_e, best_z, sticky_key) and best_e <= sticky_e * need:
             return float(min(best_z, sticky_key + 0.35))
         return sticky_key
 
     # Early/mid cruise: climb only with clearance-relative evidence; dump freely if better.
-    if best_z >= sticky_key + 0.5 * step and _earned_climb(best_e) and best_e <= sticky_e * climb_need:
-        return float(min(best_z, sticky_key + 0.35))
-    if best_z + 1e-9 < sticky_key - 0.5 * step and best_e <= sticky_e * dump_need:
-        return float(max(best_z, sticky_key - 0.35))
+    # Soft ceiling: ignore bands >clearance+1.2 unless they beat clearance clearly.
+    # Earned+strong+rising DEM: keep ceiling at clearance+1.8 so an already-won high sticky stays eligible.
+    # Strong ambient: ≥13% unlock once earned / on rising DEM (qinghai-class).
+    # Marginal/calm: ≥20% — belief aloft is much noisier (taiwan-class cascades).
+    ceiling = clearance_key + 1.2
+    if climb_earned and strong_air and terrain_relief:
+        ceiling = clearance_key + 1.8
+    if strong_air and (climb_earned or terrain_relief):
+        ceiling_unlock = 0.87
+    elif strong_air:
+        ceiling_unlock = 0.85
+    else:
+        ceiling_unlock = 0.80
+    eligible = {
+        float(z): float(e)
+        for z, e in band_scores.items()
+        if float(z) <= ceiling + 1e-9 or float(e) <= clearance_e * ceiling_unlock
+    }
+    # Keep an earned high sticky in the candidate set (soft ceiling must not erase it).
+    if climb_earned and strong_air:
+        eligible[sticky_key] = sticky_e
+    if not eligible:
+        eligible = {sticky_key: sticky_e}
+    climb_best_z = float(min(eligible.keys(), key=lambda z: eligible[z]))
+    climb_best_e = eligible[climb_best_z]
+
+    need = _climb_need_for(climb_best_z, sticky_key)
+    high_target = climb_best_z > clearance_key + 1.0 + 1e-9
+    sticky_need = need if high_target else (0.97 if climb_earned else need)
+    if (
+        climb_best_z >= sticky_key + 0.5 * step
+        and climb_best_e <= clearance_e * need
+        and climb_best_e <= sticky_e * sticky_need
+    ):
+        high_band = climb_best_z > clearance_key + 1.2
+        jump = 0.70 if climb_best_e <= clearance_e * 0.90 else 0.35
+        if climb_earned and (not high_target) and climb_best_e <= sticky_e * 0.97 and climb_best_e > clearance_e * 0.90:
+            jump = max(jump, 0.50)
+        if climb_earned and climb_best_e <= clearance_e * 0.90:
+            # Cap aggressive catch-up in marginal air (noisy high-band scores).
+            if high_band and not strong_air:
+                jump = max(jump, 0.50)
+            else:
+                jump = max(jump, 0.85 if high_band else 1.35)
+        # Clear ≥15% clearance-relative win in strong air: one-shot commit to argmin.
+        if (
+            climb_earned
+            and strong_air
+            and climb_best_e <= clearance_e * 0.85
+            and remaining_horiz > 22.0
+        ):
+            return float(climb_best_z)
+        return float(min(climb_best_z, sticky_key + jump))
+    if climb_best_z + 1e-9 < sticky_key - 0.5 * step and climb_best_e <= sticky_e * cruise_dump_need:
+        jump = 0.70 if climb_best_e <= sticky_e * 0.92 else 0.35
+        return float(max(climb_best_z, sticky_key - jump))
     # Sticky elevated but never earned the clearance-relative bar → ease down.
     if (
         sticky_key > clearance_key + 0.5 * step
         and not climb_earned
-        and not _earned_climb(sticky_e)
+        and not _earned_climb(sticky_e, sticky_key, clearance_key)
     ):
         return float(max(clearance_key, sticky_key - 0.35))
+    # Calm air: dump sticky height that lacks a ≥10% clearance-relative win.
+    if calm_air and sticky_key > clearance_key + 0.5 * step and sticky_e > clearance_e * 0.90:
+        return float(max(clearance_key, sticky_key - 0.35))
+    # Sticky parked above the soft ceiling without a clear clearance win → ease down.
+    # Earned+strong sticky that still beats clearance by ≥5%: hold (qinghai retain).
+    if sticky_key > ceiling + 1e-9 and sticky_e > clearance_e * ceiling_unlock:
+        if climb_earned and strong_air and sticky_e <= clearance_e * 0.95:
+            return sticky_key
+        step_down = 0.70 if not strong_air else 0.50
+        return float(max(ceiling, sticky_key - step_down))
+    # Micro-layer search: earned+strong high sticky may take ONE fine hop toward a
+    # clearly cheaper nearby band, hard-capped at clearance+1.67 (oracle-class layer;
+    # blocks belief-noise ratchet toward z≈3).
+    layer_cap = clearance_key + 1.67
+    if (
+        climb_earned
+        and strong_air
+        and sticky_key > clearance_key + 1.0 + 1e-9
+        and sticky_key + 1e-9 < layer_cap
+        and remaining_horiz > 18.0
+    ):
+        step_up = max(step, 0.10)
+        upper = {
+            float(z): float(e)
+            for z, e in eligible.items()
+            if sticky_key + 0.5 * step <= float(z) <= min(sticky_key + step_up, layer_cap) + 1e-9
+        }
+        if upper:
+            up_z = float(min(upper.keys(), key=lambda z: upper[z]))
+            # Require a real edge vs sticky (≥0.3%) — near-ties must not ratchet upward.
+            if upper[up_z] <= sticky_e * 0.997:
+                return float(up_z)
     return sticky_key
 
 
@@ -1436,8 +1907,38 @@ def _energy_guide_paths(
             )
             if corridor_margin is not None and len(locked_path) > 1:
                 locked_e = _polyline_model_energy_j(locked_path, belief_map, mission)
-                # Sticky via must remain a clear win; otherwise drop it.
-                if locked_e <= straight_floor * min(float(corridor_margin), 0.992):
+                straight_probe = _agl_guide_polyline(
+                    start, goal, belief_map, mission, via_xy=None, cruise_z=best_band
+                )
+                # Sticky via must remain a clear Joules win under usable wind; otherwise drop it.
+                s_spd, _, _ = _path_wind_utilization_stats(straight_probe, belief_map)
+                has_edge = _corridor_has_lateral_edge(locked_path, belief_map, straight_probe)
+                win_need = _corridor_energy_win_need(
+                    locked_path,
+                    straight_probe,
+                    float(corridor_margin),
+                    ambient_wind_mps=s_spd,
+                    has_lateral_edge=has_edge,
+                )
+                if not has_edge:
+                    no_edge = (
+                        CORRIDOR_NO_EDGE_WIN_NEED
+                        if s_spd < CORRIDOR_MARGINAL_WIND_MPS
+                        else CORRIDOR_NO_EDGE_WIN_NEED_STRONG
+                    )
+                    win_need = min(win_need, no_edge)
+                keep_locked = (
+                    _corridor_ambient_ok(s_spd, has_edge=has_edge)
+                    and _corridor_wind_usable(
+                        locked_path,
+                        belief_map,
+                        straight_path=straight_probe,
+                        allow_shear_unlock=True,
+                    )
+                    and not (s_spd < CORRIDOR_MARGINAL_WIND_MPS and not has_edge)
+                    and locked_e <= straight_floor * win_need
+                )
+                if keep_locked:
                     guides.append(("guide_corridor_locked", locked_path))
                 else:
                     mission.guide_via = None
@@ -1447,8 +1948,18 @@ def _energy_guide_paths(
     # Lateral corridors: generate near-parity candidates; final selector requires a clear win.
     if corridor_margin is None or float(corridor_margin) <= 0.0:
         return guides
+    # Probe wind on the preferred straight band; skip only below the hard floor.
+    cruise_band = float(best_band)
+    straight_probe = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=cruise_band)
+    s_speed, _, _ = _path_wind_utilization_stats(straight_probe, belief_map)
+    if s_speed < CORRIDOR_HARD_FLOOR_MPS:
+        # Truly calm route — no lateral hunting (sichuan-class).
+        return guides
     corridor_margin = float(corridor_margin)
-    gen_margin = min(max(corridor_margin, 0.95), 1.0)  # never generate worse-than-straight corridors
+    # Generate near-parity candidates; final selector applies CORRIDOR_WIN_NEED.
+    gen_margin = min(max(corridor_margin, 0.95), 1.0)
+    # Below soft floor / marginal: only generate corridors with a proven lateral edge.
+    require_edge = s_speed < CORRIDOR_MARGINAL_WIND_MPS
     ux, uy = dx / horiz, dy / horiz
     px, py = -uy, ux
     direct_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, gx, gy, samples=8)
@@ -1468,20 +1979,39 @@ def _energy_guide_paths(
             detour = (math.hypot(mx - sx, my - sy) + math.hypot(gx - mx, gy - my)) - horiz
             if detour > detour_max_cells:
                 continue
-            path = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=(mx, my), cruise_z=best_band)
+            path = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=(mx, my), cruise_z=cruise_band)
             if len(path) <= 1:
                 continue
+            has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
+            if not _corridor_ambient_ok(s_speed, has_edge=has_edge):
+                continue
+            if not _corridor_wind_usable(
+                path, belief_map, straight_path=straight_probe, allow_shear_unlock=True
+            ):
+                continue
+            if require_edge and not has_edge:
+                continue
             label = f"guide_corridor_{sign:+.0f}_{offset:.1f}"
-            corridor_candidates.append((label, path))
+            corridor_candidates.append((label, path, has_edge))
     if corridor_candidates:
         scored: list[tuple[float, str, list[tuple[float, float, float]]]] = []
-        for label, path in corridor_candidates:
+        for label, path, has_edge in corridor_candidates:
             raw = _polyline_model_energy_j(path, belief_map, mission)
+            # Generation stays near-parity; detour-scaled bar is enforced at final commit.
             if straight_floor < math.inf and raw > straight_floor * gen_margin:
                 continue
-            # Prefer corridors that also look good after a light uncertainty tax.
-            risk = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=0.04)
-            if straight_floor < math.inf and risk > straight_floor * (gen_margin + 0.04):
+            # Prefer corridors that also look good after an uncertainty tax.
+            # Strong ambient / proven shear-band edge: light tax (taiwan-class near-misses).
+            # Marginal air without a real edge: heavier tax to stop belief-noise detours.
+            shear_edged = (
+                has_edge and CORRIDOR_HARD_FLOOR_MPS <= s_speed < CORRIDOR_MIN_WIND_MPS
+            )
+            if s_speed >= CORRIDOR_MARGINAL_WIND_MPS or shear_edged:
+                u_gain, risk_slack = 0.04, 0.06
+            else:
+                u_gain, risk_slack = 0.07, 0.03
+            risk = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=u_gain)
+            if straight_floor < math.inf and risk > straight_floor * (gen_margin + risk_slack):
                 continue
             scored.append((0.9 * raw + 0.1 * risk, label, path))
         scored.sort(key=lambda item: item[0])
