@@ -306,6 +306,36 @@ class VectorizedPhysicsTest(unittest.TestCase):
         self.assertNotAlmostEqual(before, after)
         self.assertTrue(np.isfinite(belief.field_arrays["uncertainty"]).all())
 
+    def test_predict_edge_protect_holds_observed_shear(self) -> None:
+        """Smooth forecast must not fully wash an observed lateral shear lobe."""
+        belief = create_belief_map(8, 6, levels=2)
+        arrays = belief.field_arrays
+        assert arrays is not None
+        # Seed a strong north-side shear as if already observed.
+        arrays["wind_u"][:, :, :] = -2.0
+        arrays["wind_u"][:, 4:, :] = 6.0
+        arrays["last_update"][:, :, :] = 1.0
+        arrays["wind_var_u"][:, :, :] = 0.3
+        arrays["wind_var_v"][:, :, :] = 0.3
+        arrays["wind_var_w"][:, :, :] = 0.3
+        # Sync cells used by any non-array paths.
+        for z in range(2):
+            for y in range(6):
+                for x in range(8):
+                    cell = belief.cells[z][y][x]
+                    cell.wind_u = float(arrays["wind_u"][z, y, x])
+                    cell.last_update = 1
+        smooth = WindField(
+            u=np.full((2, 6, 8), 1.0),
+            v=np.zeros((2, 6, 8)),
+            w=np.zeros((2, 6, 8)),
+        )
+        before = float(arrays["wind_u"][0, 5, 3])
+        BeliefUpdater().apply_prediction(belief, smooth, step=2)
+        after = float(belief.field_arrays["wind_u"][0, 5, 3])
+        # Without edge_protect, Kalman would pull hard toward 1.0; hold should keep a clear lobe.
+        self.assertGreater(after, 3.0, msg=f"shear lobe washed out: before={before} after={after}")
+
 
 if __name__ == "__main__":
     unittest.main()
