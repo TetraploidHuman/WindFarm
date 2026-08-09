@@ -101,7 +101,7 @@ class Mission:
     # Planning grid for cruise AGL candidates (levels). 0.02 ≈ 1 m if altitude_step_m=50.
     cruise_band_step: float = 0.02
     # Lateral corridor generation ceiling vs straight (model Joules).
-    # None / ≤0 disables corridors; final commit still requires a clearer win (~0.8%).
+    # None / ≤0 disables corridors; final commit needs ~1.2% win + usable wind/uplift.
     corridor_energy_margin: float | None = 1.02
     # Optional DEM (meters). When set, constant-AGL moves pay terrain climb energy.
     elevation: list[list[float]] | None = None

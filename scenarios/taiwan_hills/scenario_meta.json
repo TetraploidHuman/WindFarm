@@ -1,0 +1,41 @@
+{
+  "name": "taiwan_hills",
+  "description": "Central Taiwan foothills / windward slopes (SRTM N23E121)",
+  "lat": 23.55,
+  "lon": 121.15,
+  "hgt": "data/N23E121.hgt",
+  "start_time": "2024-09-03T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 2196.7676993771042,
+    "max": 3051.2107286426417,
+    "mean": 2709.764626110256
+  },
+  "wind": {
+    "u_km_mean": -1.502475993864054,
+    "v_km_mean": 0.43957855633289583,
+    "speed_mean": 1.565695116231668,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      11,
+      42
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-08T16:08:05Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

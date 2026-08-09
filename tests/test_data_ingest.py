@@ -57,10 +57,20 @@ class DataIngestTests(unittest.TestCase):
         self.assertGreater(series[-1]["u_km"], 1.0)
 
     def test_default_scenario_catalog_diverse(self) -> None:
-        names = {spec.name for spec in DEFAULT_SCENARIOS}
-        self.assertGreaterEqual(len(names), 4)
-        self.assertIn("fujian_hills", names)
-        self.assertIn("beijing_plain", names)
+        names = [spec.name for spec in DEFAULT_SCENARIOS]
+        self.assertEqual(len(names), 8)
+        self.assertEqual(len(set(names)), 8)
+        for required in (
+            "fujian_hills",
+            "beijing_plain",
+            "qinghai_ridge",
+            "liaoning_coast",
+            "xinjiang_gobi",
+            "sichuan_foothills",
+            "shanxi_loess",
+            "taiwan_hills",
+        ):
+            self.assertIn(required, names)
 
 
 if __name__ == "__main__":
