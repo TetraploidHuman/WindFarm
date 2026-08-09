@@ -788,7 +788,7 @@ def plan_path_details(
                 and amb_speed >= CORRIDOR_LIGHT_FLOOR_MPS
                 and amb_speed < CORRIDOR_HARD_FLOOR_MPS
             ):
-                has_light_w = _corridor_has_light_vertical_edge(
+                has_light_w = _corridor_has_light_air_edge(
                     path,
                     belief_map,
                     pref_straight,
@@ -796,7 +796,7 @@ def plan_path_details(
                     windless_belief=commit_windless,
                     straight_geom_e=straight_geom_e,
                 )
-            # Dual ambient + path check; shear / terrain / light-vertical unlocks.
+            # Dual ambient + path check; shear / terrain / light-air unlocks.
             if not _corridor_ambient_ok(
                 amb_speed,
                 has_edge=has_edge,
@@ -1194,6 +1194,13 @@ CORRIDOR_LIGHT_GEOM_MAX_ER0 = 1.07
 CORRIDOR_LIGHT_RAW_WIN = 0.950
 # Uplift lobes sit off-ray — apply only a mild detour penalty vs horizontal corridors.
 CORRIDOR_LIGHT_DETOUR_WIN_BETA = 0.15
+# Below HARD_FLOOR: light-air horizontal |speed| unlock (taiwan-class shear lobes where
+# path-mean w stays near zero). Stricter Er0 than vertical unlock.
+CORRIDOR_LIGHT_SPEED_ADVANTAGE_MPS = 0.22
+CORRIDOR_LIGHT_SPEED_GEOM_MAX_ER0 = 1.07
+# Below-hard corridor hunt: farther vias (clearance-band lobes; no forced climb).
+CORRIDOR_LIGHT_OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0, 450.0, 550.0)
+CORRIDOR_LIGHT_DETOUR_MAX_M = 380.0
 
 
 def _windless_belief_map(belief_map: BeliefMap) -> BeliefMap:
@@ -1360,6 +1367,56 @@ def _corridor_has_light_vertical_edge(
     return True
 
 
+def _corridor_has_light_speed_edge(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    straight_path: list[tuple[float, float, float]] | None,
+    mission: Mission,
+    *,
+    windless_belief: BeliefMap | None = None,
+    straight_geom_e: float | None = None,
+) -> bool:
+    """Below-hard unlock: horizontal |speed| lobe with bounded geometry loss."""
+    if straight_path is None or len(straight_path) <= 1 or len(path) <= 1:
+        return False
+    speed, _w, _up = _path_wind_utilization_stats(path, belief_map, speed_q=0.75)
+    s_speed, _sw, _su = _path_wind_utilization_stats(straight_path, belief_map)
+    if float(speed) < float(s_speed) + CORRIDOR_LIGHT_SPEED_ADVANTAGE_MPS:
+        return False
+    if windless_belief is not None and straight_geom_e is not None and float(straight_geom_e) > 1e-6:
+        path_geom_e = _polyline_model_energy_j(path, windless_belief, mission)
+        if float(path_geom_e) > float(straight_geom_e) * CORRIDOR_LIGHT_SPEED_GEOM_MAX_ER0:
+            return False
+    return True
+
+
+def _corridor_has_light_air_edge(
+    path: list[tuple[float, float, float]],
+    belief_map: BeliefMap,
+    straight_path: list[tuple[float, float, float]] | None,
+    mission: Mission,
+    *,
+    windless_belief: BeliefMap | None = None,
+    straight_geom_e: float | None = None,
+) -> bool:
+    """Below-hard wind unlock: vertical uplift lobe or horizontal speed lobe."""
+    return _corridor_has_light_vertical_edge(
+        path,
+        belief_map,
+        straight_path,
+        mission,
+        windless_belief=windless_belief,
+        straight_geom_e=straight_geom_e,
+    ) or _corridor_has_light_speed_edge(
+        path,
+        belief_map,
+        straight_path,
+        mission,
+        windless_belief=windless_belief,
+        straight_geom_e=straight_geom_e,
+    )
+
+
 def _corridor_wind_usable(
     path: list[tuple[float, float, float]],
     belief_map: BeliefMap,
@@ -1373,7 +1430,7 @@ def _corridor_wind_usable(
 
     Between HARD_FLOOR and MIN, corridors are allowed only with a proven lateral
     edge vs the straight ray (weak-but-sheared routes; still blocks uniform calm).
-    Below HARD_FLOOR, terrain-relief or light vertical-wind unlocks may pass.
+    Below HARD_FLOOR, terrain-relief or light-air (w / |speed|) unlocks may pass.
     """
     if allow_terrain_relief or allow_light_vertical:
         return True
@@ -2213,7 +2270,7 @@ def _energy_guide_paths(
                     and s_spd >= CORRIDOR_LIGHT_FLOOR_MPS
                     and s_spd < CORRIDOR_HARD_FLOOR_MPS
                 ):
-                    has_light_w = _corridor_has_light_vertical_edge(
+                    has_light_w = _corridor_has_light_air_edge(
                         locked_path,
                         belief_map,
                         straight_probe,
@@ -2271,7 +2328,7 @@ def _energy_guide_paths(
     if corridor_margin is None or float(corridor_margin) <= 0.0:
         return guides
     # Probe wind on the preferred straight band. Below HARD_FLOOR still hunt
-    # terrain-relief and light vertical-wind corridors; horizontal shear stays off.
+    # terrain-relief and light-air (w / |speed|) corridors; no forced climb.
     cruise_band = float(best_band)
     straight_probe = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=cruise_band)
     s_speed, _, _ = _path_wind_utilization_stats(straight_probe, belief_map)
@@ -2280,14 +2337,16 @@ def _energy_guide_paths(
     # Generate near-parity candidates; final selector applies CORRIDOR_WIN_NEED.
     gen_margin = min(max(corridor_margin, 0.95), 1.0)
     # Below soft floor / marginal: only generate corridors with a proven lateral edge
-    # (or terrain/geometry / light-vertical relief — see has_* below).
+    # (or terrain/geometry / light-air relief — see has_* below).
     require_edge = (not below_hard) and s_speed < CORRIDOR_MARGINAL_WIND_MPS
     ux, uy = dx / horiz, dy / horiz
     px, py = -uy, ux
     direct_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, gx, gy, samples=8)
-    # Physical offsets (m); denser near-path samples catch mild wind shear without huge detours.
-    offsets = tuple(offset_m / cell_m for offset_m in (100.0, 150.0, 200.0, 250.0, 350.0))
-    detour_max_cells = 300.0 / cell_m
+    # Physical offsets (m); light air hunts farther lobes (taiwan-class).
+    offset_m_list = CORRIDOR_LIGHT_OFFSETS_M if below_hard else (100.0, 150.0, 200.0, 250.0, 350.0)
+    offsets = tuple(offset_m / cell_m for offset_m in offset_m_list)
+    detour_max_m = CORRIDOR_LIGHT_DETOUR_MAX_M if below_hard else 300.0
+    detour_max_cells = detour_max_m / cell_m
     windless = _windless_belief_map(belief_map) if below_hard or require_edge else None
     straight_geom_e = (
         _polyline_model_energy_j(straight_probe, windless, mission)
@@ -2331,7 +2390,7 @@ def _energy_guide_paths(
                 and not has_relief
                 and s_speed >= CORRIDOR_LIGHT_FLOOR_MPS
             ):
-                has_light_w = _corridor_has_light_vertical_edge(
+                has_light_w = _corridor_has_light_air_edge(
                     path,
                     belief_map,
                     straight_probe,
@@ -2339,7 +2398,7 @@ def _energy_guide_paths(
                     windless_belief=windless,
                     straight_geom_e=straight_geom_e,
                 )
-            # Below hard floor: geometry/DEM or light vertical unlock only.
+            # Below hard floor: geometry/DEM or light-air unlock only.
             if below_hard and not has_relief and not has_light_w:
                 continue
             has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
