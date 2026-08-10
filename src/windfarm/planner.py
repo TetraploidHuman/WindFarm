@@ -588,16 +588,10 @@ def plan_path_details(
     raw_band_scores = dict(select_scores) if select_scores else {}
     sticky_now = getattr(mission, "preferred_cruise_agl", None)
     sz_now = float(start[2])
-    route_terrain_rise = 0.0
-    if getattr(mission, "elevation", None) is not None:
-        route_terrain_rise = terrain_climb_along_line_m(
-            mission.elevation,
-            float(start[0]),
-            float(start[1]),
-            float(goal[0]),
-            float(goal[1]),
-            samples=8,
-        )
+    # Band-select terrain_relief must use mission start→goal, not the mid-flight
+    # remainder — otherwise Taiwan-class maps look "flat" near the goal and a
+    # flat+strong climb bar incorrectly dumps an earned high sticky.
+    route_terrain_rise = _mission_route_terrain_rise_m(mission)
     # Ambient horizontal wind on the preferred/clearance straight (calm → harder climb bar).
     ambient_wind_mps = 0.0
     probe_z = float(getattr(mission, "preferred_cruise_agl", None) or clearance)
@@ -820,6 +814,7 @@ def plan_path_details(
             prior_soft = (
                 is_prior
                 and not has_relief
+                and _prior_soft_allowed_for_mission(mission, ambient_wind_mps=truth_amb)
                 and truth_amb >= CORRIDOR_HARD_FLOOR_MPS
                 and _corridor_truth_beats_straight(
                     path,
@@ -1210,10 +1205,14 @@ CORRIDOR_TRUTH_WIN_NEED = 0.995
 # Shanxi commit a locally-ok prior that lost on the full mission.
 CORRIDOR_PRIOR_TRUTH_WIN_NEED = 0.995
 # When distilled prior fails belief Joules/edge but truth still clears ~1.5%, soft-admit
-# so Jilin/Yunnan-class priors can lock (dual-agree alone was not enough for guide_via).
+# so Jilin/Shanxi-class priors can lock (dual-agree alone was not enough for guide_via).
 CORRIDOR_PRIOR_SOFT_TRUTH_NEED = 0.985
 CORRIDOR_PRIOR_SOFT_GEN_SLACK = 0.045
 CORRIDOR_PRIOR_SOFT_COMMIT_SLACK = 0.035
+# Flat-ray ambient ceiling for soft-prior *and* lateral corridor hunt — Fujian-class
+# coastal (~2 m/s) stays eligible; Shandong-class strong-flat (~4.6 m/s) skips
+# corridors (closed-loop detour thrash ≈ −14…−20% while open-loop via looks +7%).
+CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS = 3.0
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
@@ -1313,6 +1312,54 @@ def _corridor_truth_beats_straight(
     return path_e <= straight_e * float(win_need)
 
 
+def _mission_route_terrain_rise_m(mission: Mission) -> float:
+    """Home→goal DEM rise for the whole mission (stable; not mid-flight remainder).
+
+    Prefer ``home`` over replan ``start`` so Taiwan-class sticky near the goal
+    still sees the full-route rise (and Shandong stays flat for the strong-flat gate).
+    """
+    elev = getattr(mission, "elevation", None)
+    if elev is None:
+        return 0.0
+    home = getattr(mission, "home", None)
+    start = home if home is not None else getattr(mission, "start", None)
+    goal = getattr(mission, "goal", None)
+    if start is None or goal is None:
+        return 0.0
+    return float(
+        terrain_climb_along_line_m(
+            elev,
+            float(start[0]),
+            float(start[1]),
+            float(goal[0]),
+            float(goal[1]),
+            samples=8,
+        )
+    )
+
+
+def _mission_has_route_terrain_relief(mission: Mission) -> bool:
+    step_m = max(float(getattr(mission, "altitude_step_m", 50.0)), 1.0)
+    return _mission_route_terrain_rise_m(mission) >= step_m
+
+
+def _prior_soft_allowed_for_mission(
+    mission: Mission,
+    *,
+    ambient_wind_mps: float | None,
+) -> bool:
+    """Mission-level soft prior eligibility (universal; no map names).
+
+    Rising DEM rays always allowed. Flat rays only when path ambient is mild
+    (keeps Fujian soft gains; blocks Shandong strong-flat thrash).
+    """
+    if _mission_has_route_terrain_relief(mission):
+        return True
+    if ambient_wind_mps is None:
+        return False
+    return float(ambient_wind_mps) < CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS
+
+
 def _prior_truth_soft_ok(
     path: list[tuple[float, float, float]],
     straight_path: list[tuple[float, float, float]] | None,
@@ -1325,12 +1372,14 @@ def _prior_truth_soft_ok(
 ) -> bool:
     """True when a distilled prior still wins clearly under offline truth wind.
 
-    Skips Taiwan-class DEM shortcuts (has_relief) and calm air — soft-admit is for
-    strong-ambient belief-blind lobes (Jilin/Shanxi/Liaoning), not terrain corridors.
+    Skips Taiwan-class DEM shortcuts (has_relief) and calm air. Soft-admit is for
+    belief-blind shear lobes; flat+strong-ambient missions are excluded (Shandong).
     Also requires a truth lateral speed edge so arid control maps (Gansu) cannot
     soft-commit a mild Joules flicker with no shear lobe.
     """
     if has_terrain_relief:
+        return False
+    if not _prior_soft_allowed_for_mission(mission, ambient_wind_mps=ambient_wind_mps):
         return False
     if ambient_wind_mps is not None and float(ambient_wind_mps) < CORRIDOR_HARD_FLOOR_MPS:
         return False
@@ -2404,7 +2453,30 @@ def _energy_guide_paths(
     min_level, max_level = _search_level_bounds(belief_map, mission)
     lo = max(clearance, float(min_level))
     hi = min(clearance + span, float(max_level))
+    # Strong-flat: cap cruise near clearance. Truth aloft can look −14% vs z=1 while
+    # closed-loop climb/STF locks guide_straight_agl_2 and pays −20% (Shandong).
+    # Rising-DEM (Qinghai/Taiwan) and mild-flat (Fujian ~2 m/s) keep full span.
+    probe_clr = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=clearance)
+    gate_speed = 0.0
+    if len(probe_clr) > 1:
+        gate_speed, _, _ = _path_wind_utilization_stats(probe_clr, belief_map)
+    if truth_field is not None and "u" in truth_field and "v" in truth_field:
+        truth_belief_gate = _belief_map_from_truth_field(belief_map, truth_field)
+        if truth_belief_gate is not None and len(probe_clr) > 1:
+            t_speed, _, _ = _path_wind_utilization_stats(probe_clr, truth_belief_gate)
+            gate_speed = max(float(gate_speed), float(t_speed))
+    strong_flat = (
+        not _mission_has_route_terrain_relief(mission)
+        and float(gate_speed) >= CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS
+    )
+    if strong_flat:
+        hi = min(float(hi), float(clearance) + 0.15)
+        sticky0 = getattr(mission, "preferred_cruise_agl", None)
+        if sticky0 is not None and float(sticky0) > float(clearance) + 0.15 + 1e-9:
+            mission.preferred_cruise_agl = float(clearance)
+            mission.cruise_climb_earned = False
     bands = _cruise_band_candidates(belief_map, mission)
+    bands = [float(z) for z in bands if lo - 1e-12 <= float(z) <= hi + 1e-12] or [float(clearance)]
     guides: list[tuple[str, list[tuple[float, float, float]]]] = []
     straight_energy_by_band: dict[float, float] = {}
     pending_zs: list[float] = []
@@ -2497,6 +2569,25 @@ def _energy_guide_paths(
     # terrain-relief and light-air (w / |speed|) corridors; no forced climb.
     primary_probe = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=best_band)
     s_speed, _, _ = _path_wind_utilization_stats(primary_probe, belief_map)
+    # Gate ambient: belief may under-read early; truth (when present) catches
+    # Shandong-class strong-flat before belief fills in.
+    gate_speed = float(s_speed)
+    if truth_field is not None and "u" in truth_field and "v" in truth_field:
+        truth_belief_gate = _belief_map_from_truth_field(belief_map, truth_field)
+        if truth_belief_gate is not None:
+            t_speed, _, _ = _path_wind_utilization_stats(primary_probe, truth_belief_gate)
+            gate_speed = max(gate_speed, float(t_speed))
+    flat_route = not _mission_has_route_terrain_relief(mission)
+    # Strong-flat: skip all lateral corridors (prior soft alone left −14%). Mild-flat
+    # (Fujian ~2 m/s) keeps corridors. Flat+below-hard: no light-air hunt either —
+    # those lobes need DEM relief; empty early belief must not invent Shandong detours.
+    if flat_route and (
+        gate_speed >= CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS
+        or gate_speed < CORRIDOR_HARD_FLOOR_MPS
+    ):
+        if locked is not None:
+            mission.guide_via = None
+        return guides
     below_hard = s_speed < CORRIDOR_HARD_FLOOR_MPS
     # Dual-band: sticky vs raw argmin when they diverge. Light-air stays on clearance only.
     probe_bands: list[float] = [float(best_band)]
