@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .execution import NavigationEngine, _goal_reached
-from .io import coarse_samples_from_dict, observations_from_dict, read_json, write_json
+from .io import coarse_samples_from_dict, load_truth_fields, observations_from_dict, read_json, write_json
 from .types import Observation
 
 
@@ -27,7 +27,7 @@ class MissionRunner:
         obs_by_time = {item.timestamp: item for item in observations}
         truth_by_time = {}
         if truth_path:
-            truth_by_time = {item["timestamp"]: item for item in read_json(truth_path)["truth_fields"]}
+            truth_by_time = {item["timestamp"]: item for item in load_truth_fields(truth_path)}
 
         requested_start = start or self.config.mission.start
         requested_goal = goal or self.config.mission.goal

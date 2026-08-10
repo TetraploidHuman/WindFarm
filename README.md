@@ -65,6 +65,9 @@ WindFarm 是一个面向不确定风环境下自主飞行的 Python 工程原型
 - u/v/w 三个残差模型并行训练（每模型均分线程）
 - 网格预测改为批量 XGBoost/LightGBM 推理
 - 任务循环尊重 `mission.max_steps`（不再被粗风时序拖到 360 步）
+- 场景旁缓存 `model.json`（默认复用；`WINDFARM_FORCE_TRAIN=1` 强制重训；`WINDFARM_SKIP_TRAIN=1` 要求已有缓存）
+- `terrain.npz` / `truth.npz` 旁路缓存，避免反复解析百兆级 JSON
+- `WINDFARM_SKIP_DASHBOARD=1` 精简 trace；规划侧 arrays-only 评分图、走廊 polyline 复用、numpy window merge
 
 ## 信念与规划模型
 

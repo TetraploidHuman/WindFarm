@@ -7,7 +7,12 @@ from pathlib import Path
 from .api_server import serve_api
 from .config import TaskConfig, load_task_config, save_task_config
 from .dashboard import build_dashboard_from_report, build_live_dashboard_html
-from .io import write_json
+from .io import (
+    ensure_terrain_npz,
+    ensure_truth_npz,
+    read_json,
+    write_json,
+)
 from .live_server import serve_interactive_dashboard, serve_live_dashboard
 from .mission_runner import MissionRunner
 from .pipeline import WindFarmPipeline, train_from_files
@@ -15,6 +20,25 @@ from .repository import ModelRepository
 from .sample_data import generate_sample_dataset
 from .simulator import EnvironmentSimulator
 from .types import Mission
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip() in {"1", "true", "True", "yes"}
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    try:
+        os.link(src, dst)
+    except OSError:
+        import shutil
+
+        shutil.copy2(src, dst)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -257,16 +281,32 @@ def main() -> None:
                 config = load_task_config(scenario_cfg)
         save_task_config(artifacts.run_dir / "config.json", config)
         if scenario_dir is not None:
-            for name in ("terrain.json", "coarse_wind.json", "training.json", "observations.json", "truth.json"):
+            # training.json is only needed when (re)fitting the residual model.
+            force_train = _env_flag("WINDFARM_FORCE_TRAIN")
+            scenario_model = scenario_dir / "model.json"
+            will_reuse_model = scenario_model.exists() and not force_train
+            if _env_flag("WINDFARM_SKIP_TRAIN") and not will_reuse_model:
+                raise SystemExit(
+                    f"WINDFARM_SKIP_TRAIN=1 but cached model missing: {scenario_model}. "
+                    "Run once without SKIP_TRAIN (caches model.json) or unset the flag."
+                )
+            asset_names = ["terrain.json", "coarse_wind.json", "observations.json", "truth.json"]
+            if not will_reuse_model:
+                asset_names.append("training.json")
+            for name in asset_names:
                 src = scenario_dir / name
                 if not src.exists():
                     raise SystemExit(f"Scenario missing {name}: {src}")
-                dst = artifacts.run_dir / name
-                # Prefer hardlink for large artifacts (truth/training ~60MB each).
-                try:
-                    os.link(src, dst)
-                except OSError:
-                    shutil.copy2(src, dst)
+                _link_or_copy(src, artifacts.run_dir / name)
+            # Prefer binary sidecars beside the scenario JSON (shared across runs).
+            if (scenario_dir / "truth.json").exists():
+                ensure_truth_npz(scenario_dir / "truth.json")
+            if (scenario_dir / "terrain.json").exists():
+                ensure_terrain_npz(scenario_dir / "terrain.json")
+            for stem in ("terrain", "truth"):
+                cache_src = scenario_dir / f"{stem}.npz"
+                if cache_src.exists():
+                    _link_or_copy(cache_src, artifacts.run_dir / f"{stem}.npz")
             meta_src = scenario_dir / "scenario_meta.json"
             if meta_src.exists():
                 shutil.copy2(meta_src, artifacts.run_dir / "scenario_meta.json")
@@ -281,13 +321,41 @@ def main() -> None:
                 sample_interval_seconds=config.simulation.sample_interval_seconds,
             )
             simulator.write_dataset(dataset, str(artifacts.run_dir))
-        metrics = train_from_files(
-            artifacts.terrain_path,
-            artifacts.run_dir / "training.json",
-            artifacts.model_path,
-            artifacts.metrics_path,
-            config.model,
-        )
+            ensure_terrain_npz(artifacts.terrain_path)
+            ensure_truth_npz(artifacts.run_dir / "truth.json")
+            force_train = _env_flag("WINDFARM_FORCE_TRAIN")
+            will_reuse_model = False
+            scenario_model = None
+
+        cache_model = _env_flag("WINDFARM_CACHE_MODEL", default=True)
+        scenario_metrics = (scenario_dir / "metrics.json") if scenario_dir is not None else None
+        reuse_model = bool(will_reuse_model)
+        if reuse_model:
+            assert scenario_model is not None
+            _link_or_copy(scenario_model, artifacts.model_path)
+            if scenario_metrics is not None and scenario_metrics.exists():
+                _link_or_copy(scenario_metrics, artifacts.metrics_path)
+                metrics = read_json(artifacts.metrics_path)
+            else:
+                metrics = {"reused_model": True, "source": str(scenario_model)}
+                write_json(artifacts.metrics_path, metrics)
+        else:
+            metrics = train_from_files(
+                artifacts.terrain_path,
+                artifacts.run_dir / "training.json",
+                artifacts.model_path,
+                artifacts.metrics_path,
+                config.model,
+            )
+            if (
+                cache_model
+                and scenario_dir is not None
+                and artifacts.model_path.exists()
+            ):
+                _link_or_copy(artifacts.model_path, scenario_dir / "model.json")
+                if artifacts.metrics_path.exists():
+                    _link_or_copy(artifacts.metrics_path, scenario_dir / "metrics.json")
+
         pipeline = WindFarmPipeline.from_paths(
             artifacts.terrain_path,
             artifacts.model_path,
@@ -300,7 +368,7 @@ def main() -> None:
             artifacts.mission_path,
             artifacts.run_dir / "truth.json",
         )
-        skip_dash = os.environ.get("WINDFARM_SKIP_DASHBOARD", "").strip() in {"1", "true", "True", "yes"}
+        skip_dash = _env_flag("WINDFARM_SKIP_DASHBOARD")
         if not skip_dash:
             build_dashboard_from_report(artifacts.mission_path, artifacts.dashboard_path)
             artifacts.live_dashboard_path.write_text(build_live_dashboard_html(), encoding="utf-8")
@@ -319,6 +387,7 @@ def main() -> None:
                     "live_dashboard": str(artifacts.live_dashboard_path) if not skip_dash else None,
                     "mission_report": str(artifacts.mission_path),
                 },
+                "model_reused": bool(reuse_model),
             },
         )
         return
