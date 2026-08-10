@@ -370,28 +370,42 @@ class BeliefUpdater:
         predicted_v: float,
         predicted_w: float,
         step: int,
+        *,
+        observation_radius: int | None = None,
+        advect: bool = True,
     ) -> None:
         level = _clamp_level(observation.z, belief_map.levels)
         energy_gain = 0.5 * (observation.ground_speed - max(observation.airspeed, 0.0)) + observation.climb_rate
         observed_modes = _observe_mode_probs(observation.w_obs, energy_gain)
+        radius = self.observation_radius if observation_radius is None else max(0, int(observation_radius))
         arrays = belief_map.field_arrays
         if arrays is None or "wind_u" not in arrays:
             # Legacy cell-only path (tests without field_arrays).
             self._update_with_observation_cells(
-                belief_map, observation, predicted_u, predicted_v, predicted_w, step, level, energy_gain, observed_modes
+                belief_map,
+                observation,
+                predicted_u,
+                predicted_v,
+                predicted_w,
+                step,
+                level,
+                energy_gain,
+                observed_modes,
+                observation_radius=radius,
+                advect=advect,
             )
             return
 
-        y0 = max(0, observation.y - self.observation_radius)
-        y1 = min(belief_map.height, observation.y + self.observation_radius + 1)
-        x0 = max(0, observation.x - self.observation_radius)
-        x1 = min(belief_map.width, observation.x + self.observation_radius + 1)
+        y0 = max(0, observation.y - radius)
+        y1 = min(belief_map.height, observation.y + radius + 1)
+        x0 = max(0, observation.x - radius)
+        x1 = min(belief_map.width, observation.x + radius + 1)
         if y1 <= y0 or x1 <= x0:
             return
 
         yy, xx = np.mgrid[y0:y1, x0:x1]
         distance = np.hypot(xx - observation.x, yy - observation.y)
-        influence = np.maximum(0.0, 1.0 - distance / (self.observation_radius + 1))
+        influence = np.maximum(0.0, 1.0 - distance / (radius + 1))
         mask = influence > 0.0
         if not np.any(mask):
             return
@@ -527,7 +541,8 @@ class BeliefUpdater:
             cell.belief_entropy = float(arrays["belief_entropy"][level, oy, ox])
             cell.confidence = float(arrays["confidence"][level, oy, ox])
             cell.last_update = step
-        self._advect_along_wind(belief_map, observation.x, observation.y, level)
+        if advect:
+            self._advect_along_wind(belief_map, observation.x, observation.y, level)
 
     def _update_with_observation_cells(
         self,
@@ -540,13 +555,17 @@ class BeliefUpdater:
         level: int,
         energy_gain: float,
         observed_modes: tuple[float, float, float],
+        *,
+        observation_radius: int | None = None,
+        advect: bool = True,
     ) -> None:
-        for y in range(max(0, observation.y - self.observation_radius),
-                       min(belief_map.height, observation.y + self.observation_radius + 1)):
-            for x in range(max(0, observation.x - self.observation_radius),
-                           min(belief_map.width, observation.x + self.observation_radius + 1)):
+        radius = self.observation_radius if observation_radius is None else max(0, int(observation_radius))
+        for y in range(max(0, observation.y - radius),
+                       min(belief_map.height, observation.y + radius + 1)):
+            for x in range(max(0, observation.x - radius),
+                           min(belief_map.width, observation.x + radius + 1)):
                 distance = math.hypot(x - observation.x, y - observation.y)
-                influence = max(0.0, 1.0 - distance / (self.observation_radius + 1))
+                influence = max(0.0, 1.0 - distance / (radius + 1))
                 if influence <= 0.0:
                     continue
                 cell = belief_map.cells[level][y][x]
@@ -620,7 +639,8 @@ class BeliefUpdater:
                 )
                 cell.confidence = 1.0 / (1.0 + cell.uncertainty)
                 cell.last_update = step
-        self._advect_along_wind(belief_map, observation.x, observation.y, level)
+        if advect:
+            self._advect_along_wind(belief_map, observation.x, observation.y, level)
 
     def _advect_along_wind(self, belief_map: BeliefMap, x: int, y: int, z: int) -> None:
         arrays = belief_map.field_arrays

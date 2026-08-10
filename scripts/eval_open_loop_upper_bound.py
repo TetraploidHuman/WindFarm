@@ -178,7 +178,13 @@ def _eval_scenario(name: str, runs: Path) -> dict:
                     path, field, elev, kw, stf_as, nominal_airspeed=nominal, energy_gate=True
                 )
                 if best_corr is None or e < best_corr[0]:
-                    best_corr = (e, e_stf, z, "1via", {"sign": sign, "offset_m": off_m})
+                    best_corr = (
+                        e,
+                        e_stf,
+                        z,
+                        "1via",
+                        {"sign": sign, "offset_m": off_m, "via_xy": [mx, my]},
+                    )
         for off_m in (150.0, 250.0, 350.0):
             off = off_m / cell
             for sign_a, sign_b in ((-1.0, 1.0), (1.0, -1.0)):
