@@ -25,9 +25,12 @@ from .controller import (
 from .mathutils import bilinear_sample, clamp, magnitude, magnitude3, trilinear_sample
 from .planner import (
     CORRIDOR_HARD_FLOOR_MPS,
+    CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS,
     _agl_guide_polyline,
     _belief_map_from_truth_field,
     _cruise_z_from_guide_label,
+    _mission_has_route_terrain_relief,
+    _path_wind_utilization_stats,
     distill_truth_1via,
     plan_path_details,
 )
@@ -1236,10 +1239,28 @@ class NavigationEngine:
         if preferred is not None and float(preferred) > clearance + 1.2 + 1e-9:
             context.mission.prior_via = None
             return
+        # Strong-flat missions (Shandong-class): skip prior distill entirely.
+        # Open-loop truth via can look +7% while closed-loop corridor thrash is −14%.
+        cruise_z_probe = self._resolved_guide_cruise_agl(context)
+        if not _mission_has_route_terrain_relief(context.mission):
+            truth_belief = _belief_map_from_truth_field(context.belief_map, truth_field)
+            if truth_belief is not None:
+                st = _agl_guide_polyline(
+                    (context.state.x, context.state.y, context.state.z),
+                    context.mission.goal,
+                    truth_belief,
+                    context.mission,
+                    via_xy=None,
+                    cruise_z=float(cruise_z_probe),
+                )
+                amb, _, _ = _path_wind_utilization_stats(st, truth_belief)
+                if amb >= CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS:
+                    context.mission.prior_via = None
+                    return
         interval = max(PRIOR_VIA_REFRESH_STEPS, int(getattr(self.config.planner, "replan_interval_steps", 2) or 2))
         if context.step > 1 and context.step % interval != 0:
             return
-        cruise_z = self._resolved_guide_cruise_agl(context)
+        cruise_z = float(cruise_z_probe)
         start = (context.state.x, context.state.y, context.state.z)
         goal = context.mission.goal
         # Teach: if belief cannot yet dual-agree, seed sparse truth along the
@@ -1286,7 +1307,7 @@ class NavigationEngine:
             )
             # Jilin-class: teach may still leave belief short of dual-agree.
             # Inject the truth-best via anyway — gen/commit soft-admit must still
-            # clear CORRIDOR_PRIOR_SOFT_TRUTH_NEED (and skips DEM-relief / calm).
+            # clear CORRIDOR_PRIOR_SOFT_TRUTH_NEED.
             if via is None:
                 via = via_truth
         context.mission.prior_via = via
