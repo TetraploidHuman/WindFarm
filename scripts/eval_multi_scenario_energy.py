@@ -43,6 +43,11 @@ HOLDOUT_SCENARIOS = (
     "jilin_forest",
     "neimeng_grass",
     "yunnan_karst",
+    # Fresh holdout (overfit probe — evaluate, do not tune on these alone).
+    "zhejiang_hills",
+    "shandong_taishan",
+    "chongqing_hills",
+    "guangxi_guilin",
 )
 SCENARIOS = CORE_SCENARIOS + HOLDOUT_SCENARIOS
 

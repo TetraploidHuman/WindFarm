@@ -1,0 +1,41 @@
+{
+  "name": "guangxi_guilin",
+  "description": "Guilin karst tower plain / S China (SRTM N25E110)",
+  "lat": 25.25,
+  "lon": 110.35,
+  "hgt": "data/N25E110.hgt",
+  "start_time": "2024-08-14T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 145.38950772547378,
+    "max": 294.82883508992836,
+    "mean": 164.40340014011898
+  },
+  "wind": {
+    "u_km_mean": 0.6806964087999574,
+    "v_km_mean": 0.6761536728024041,
+    "speed_mean": 0.9807588101126229,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      11,
+      42
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-10T09:30:38Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

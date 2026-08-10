@@ -655,6 +655,170 @@
       },
       "built_at": "2026-08-08T13:27:58Z",
       "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+    },
+    {
+      "name": "zhejiang_hills",
+      "description": "West Zhejiang humid hills near Quzhou (SRTM N29E119)",
+      "lat": 29.55,
+      "lon": 119.55,
+      "hgt": "data/N29E119.hgt",
+      "start_time": "2024-04-08T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 79,
+        "height": 59,
+        "resolution_m": 30.0
+      },
+      "extent_m": {
+        "x": 2340.0,
+        "y": 1740.0
+      },
+      "elevation_m": {
+        "min": 20.0,
+        "max": 136.76027791383726,
+        "mean": 28.115192368861553
+      },
+      "wind": {
+        "u_km_mean": -0.513307428899013,
+        "v_km_mean": -2.8310306229588234,
+        "speed_mean": 2.879793214850547,
+        "has_100m_profile": true
+      },
+      "mission": {
+        "start": [
+          11,
+          42
+        ],
+        "goal": [
+          66,
+          17
+        ]
+      },
+      "built_at": "2026-08-10T09:21:56Z",
+      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+    },
+    {
+      "name": "shandong_taishan",
+      "description": "Tai Shan foothills / N China hills (SRTM N36E117)",
+      "lat": 36.25,
+      "lon": 117.15,
+      "hgt": "data/N36E117.hgt",
+      "start_time": "2024-10-22T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 79,
+        "height": 59,
+        "resolution_m": 30.0
+      },
+      "extent_m": {
+        "x": 2340.0,
+        "y": 1740.0
+      },
+      "elevation_m": {
+        "min": 209.18702680466862,
+        "max": 588.1736302395566,
+        "mean": 331.9496749078568
+      },
+      "wind": {
+        "u_km_mean": 1.0307736335226003,
+        "v_km_mean": -4.269462158825468,
+        "speed_mean": 4.392713655710723,
+        "has_100m_profile": true
+      },
+      "mission": {
+        "start": [
+          12,
+          41
+        ],
+        "goal": [
+          66,
+          18
+        ]
+      },
+      "built_at": "2026-08-10T09:25:21Z",
+      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+    },
+    {
+      "name": "chongqing_hills",
+      "description": "Chongqing basin-edge humid hills (SRTM N29E106)",
+      "lat": 29.55,
+      "lon": 106.55,
+      "hgt": "data/N29E106.hgt",
+      "start_time": "2024-07-28T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 79,
+        "height": 59,
+        "resolution_m": 30.0
+      },
+      "extent_m": {
+        "x": 2340.0,
+        "y": 1740.0
+      },
+      "elevation_m": {
+        "min": 150.6576514557989,
+        "max": 350.6753358842269,
+        "mean": 206.99922122436877
+      },
+      "wind": {
+        "u_km_mean": 2.3512627440215015,
+        "v_km_mean": -0.30543567844775593,
+        "speed_mean": 2.371040564238243,
+        "has_100m_profile": true
+      },
+      "mission": {
+        "start": [
+          11,
+          42
+        ],
+        "goal": [
+          66,
+          17
+        ]
+      },
+      "built_at": "2026-08-10T09:26:44Z",
+      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+    },
+    {
+      "name": "guangxi_guilin",
+      "description": "Guilin karst tower plain / S China (SRTM N25E110)",
+      "lat": 25.25,
+      "lon": 110.35,
+      "hgt": "data/N25E110.hgt",
+      "start_time": "2024-08-14T08:00:00",
+      "time_steps": 120,
+      "grid": {
+        "width": 79,
+        "height": 59,
+        "resolution_m": 30.0
+      },
+      "extent_m": {
+        "x": 2340.0,
+        "y": 1740.0
+      },
+      "elevation_m": {
+        "min": 145.38950772547378,
+        "max": 294.82883508992836,
+        "mean": 164.40340014011898
+      },
+      "wind": {
+        "u_km_mean": 0.6806964087999574,
+        "v_km_mean": 0.6761536728024041,
+        "speed_mean": 0.9807588101126229,
+        "has_100m_profile": true
+      },
+      "mission": {
+        "start": [
+          11,
+          42
+        ],
+        "goal": [
+          66,
+          17
+        ]
+      },
+      "built_at": "2026-08-10T09:30:38Z",
+      "source": "SRTM1 native crop + Open-Meteo 10m/100m"
     }
   ]
 }

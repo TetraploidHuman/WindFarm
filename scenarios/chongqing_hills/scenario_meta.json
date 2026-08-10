@@ -1,0 +1,41 @@
+{
+  "name": "chongqing_hills",
+  "description": "Chongqing basin-edge humid hills (SRTM N29E106)",
+  "lat": 29.55,
+  "lon": 106.55,
+  "hgt": "data/N29E106.hgt",
+  "start_time": "2024-07-28T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 150.6576514557989,
+    "max": 350.6753358842269,
+    "mean": 206.99922122436877
+  },
+  "wind": {
+    "u_km_mean": 2.3512627440215015,
+    "v_km_mean": -0.30543567844775593,
+    "speed_mean": 2.371040564238243,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      11,
+      42
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-10T09:26:44Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}
