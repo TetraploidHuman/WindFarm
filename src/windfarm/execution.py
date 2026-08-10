@@ -1426,35 +1426,75 @@ def _clamp_xy(x: int, y: int, width: int, height: int) -> tuple[int, int]:
 
 
 def _merge_window_into_grid(base_grid: dict | None, window_grid: dict) -> dict:
+    """Paste a local predict/physics window into a full grid (numpy slice assign)."""
     if base_grid is None:
-        merged = dict(window_grid)
-        merged.pop("x_bounds", None)
-        merged.pop("y_bounds", None)
-        return merged
-    merged = {
-        "timestamp": window_grid["timestamp"],
-        "altitude_level": window_grid["altitude_level"],
-        "u": [row[:] for row in base_grid["u"]],
-        "v": [row[:] for row in base_grid["v"]],
-        "w": [row[:] for row in base_grid["w"]],
-        "u_layers": [[row[:] for row in layer] for layer in base_grid["u_layers"]],
-        "v_layers": [[row[:] for row in layer] for layer in base_grid["v_layers"]],
-        "w_layers": [[row[:] for row in layer] for layer in base_grid["w_layers"]],
-    }
+        u_layers = np.asarray(window_grid["u_layers"], dtype=np.float64)
+        v_layers = np.asarray(window_grid["v_layers"], dtype=np.float64)
+        w_layers = np.asarray(window_grid["w_layers"], dtype=np.float64)
+        active = int(window_grid.get("altitude_level", 0) or 0)
+        if u_layers.ndim == 3 and u_layers.shape[0] > 0:
+            active = max(0, min(active, int(u_layers.shape[0]) - 1))
+            u = u_layers[active]
+            v = v_layers[active]
+            w = w_layers[active]
+        else:
+            u = np.asarray(window_grid["u"], dtype=np.float64)
+            v = np.asarray(window_grid["v"], dtype=np.float64)
+            w = np.asarray(window_grid["w"], dtype=np.float64)
+        return {
+            "timestamp": window_grid["timestamp"],
+            "altitude_level": window_grid["altitude_level"],
+            "u": u,
+            "v": v,
+            "w": w,
+            "u_layers": u_layers,
+            "v_layers": v_layers,
+            "w_layers": w_layers,
+        }
+
+    u_layers = np.array(base_grid["u_layers"], dtype=np.float64, copy=True)
+    v_layers = np.array(base_grid["v_layers"], dtype=np.float64, copy=True)
+    w_layers = np.array(base_grid["w_layers"], dtype=np.float64, copy=True)
     x0, x1 = window_grid["x_bounds"]
     y0, y1 = window_grid["y_bounds"]
-    for local_y, y in enumerate(range(y0, y1)):
-        for local_x, x in enumerate(range(x0, x1)):
-            merged["u"][y][x] = window_grid["u"][local_y][local_x]
-            merged["v"][y][x] = window_grid["v"][local_y][local_x]
-            merged["w"][y][x] = window_grid["w"][local_y][local_x]
-    for level in range(len(merged["u_layers"])):
-        for local_y, y in enumerate(range(y0, y1)):
-            for local_x, x in enumerate(range(x0, x1)):
-                merged["u_layers"][level][y][x] = window_grid["u_layers"][level][local_y][local_x]
-                merged["v_layers"][level][y][x] = window_grid["v_layers"][level][local_y][local_x]
-                merged["w_layers"][level][y][x] = window_grid["w_layers"][level][local_y][local_x]
-    return merged
+    wu = np.asarray(window_grid["u_layers"], dtype=np.float64)
+    wv = np.asarray(window_grid["v_layers"], dtype=np.float64)
+    ww = np.asarray(window_grid["w_layers"], dtype=np.float64)
+    if u_layers.ndim == 3 and wu.ndim == 3:
+        u_layers[:, y0:y1, x0:x1] = wu
+        v_layers[:, y0:y1, x0:x1] = wv
+        w_layers[:, y0:y1, x0:x1] = ww
+    else:
+        # Rare list/ragged fallback — preserve prior per-cell write semantics.
+        for level in range(len(u_layers)):
+            for local_y, y in enumerate(range(y0, y1)):
+                for local_x, x in enumerate(range(x0, x1)):
+                    u_layers[level][y][x] = window_grid["u_layers"][level][local_y][local_x]
+                    v_layers[level][y][x] = window_grid["v_layers"][level][local_y][local_x]
+                    w_layers[level][y][x] = window_grid["w_layers"][level][local_y][local_x]
+    active = int(window_grid.get("altitude_level", base_grid.get("altitude_level", 0)) or 0)
+    if isinstance(u_layers, np.ndarray) and u_layers.ndim == 3 and u_layers.shape[0] > 0:
+        active = max(0, min(active, int(u_layers.shape[0]) - 1))
+        u = u_layers[active]
+        v = v_layers[active]
+        w = w_layers[active]
+    else:
+        u = np.asarray(base_grid["u"], dtype=np.float64).copy()
+        v = np.asarray(base_grid["v"], dtype=np.float64).copy()
+        w = np.asarray(base_grid["w"], dtype=np.float64).copy()
+        u[y0:y1, x0:x1] = np.asarray(window_grid["u"], dtype=np.float64)
+        v[y0:y1, x0:x1] = np.asarray(window_grid["v"], dtype=np.float64)
+        w[y0:y1, x0:x1] = np.asarray(window_grid["w"], dtype=np.float64)
+    return {
+        "timestamp": window_grid["timestamp"],
+        "altitude_level": window_grid["altitude_level"],
+        "u": u,
+        "v": v,
+        "w": w,
+        "u_layers": u_layers,
+        "v_layers": v_layers,
+        "w_layers": w_layers,
+    }
 
 
 def _clamp_xyz(
