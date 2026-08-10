@@ -816,7 +816,19 @@ def plan_path_details(
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
             ):
-                continue
+                if not (
+                    label.startswith("guide_corridor_prior_")
+                    and not has_relief
+                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
+                    and _corridor_truth_beats_straight(
+                        path,
+                        pref_straight,
+                        commit_truth,
+                        mission,
+                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+                    )
+                ):
+                    continue
             if not _corridor_wind_usable(
                 path,
                 belief_map,
@@ -825,7 +837,19 @@ def plan_path_details(
                 allow_terrain_relief=has_relief,
                 allow_light_vertical=has_light_w,
             ):
-                continue
+                if not (
+                    label.startswith("guide_corridor_prior_")
+                    and not has_relief
+                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
+                    and _corridor_truth_beats_straight(
+                        path,
+                        pref_straight,
+                        commit_truth,
+                        mission,
+                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+                    )
+                ):
+                    continue
             # Marginal ambient wind without edge/relief/light-w → reject.
             if (
                 amb_speed < CORRIDOR_MARGINAL_WIND_MPS
@@ -833,7 +857,18 @@ def plan_path_details(
                 and not has_relief
                 and not has_light_w
             ):
-                continue
+                if not (
+                    label.startswith("guide_corridor_prior_")
+                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
+                    and _corridor_truth_beats_straight(
+                        path,
+                        pref_straight,
+                        commit_truth,
+                        mission,
+                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+                    )
+                ):
+                    continue
             win_need = _corridor_energy_win_need(
                 path,
                 pref_straight,
@@ -871,7 +906,22 @@ def plan_path_details(
                     )
                     commit_e = max(commit_e, float(risk_e))
             if floor_e < math.inf and commit_e > floor_e * win_need:
-                continue
+                is_prior = label.startswith("guide_corridor_prior_")
+                soft = (
+                    is_prior
+                    and not has_relief
+                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
+                    and commit_e <= floor_e * (win_need + CORRIDOR_PRIOR_SOFT_COMMIT_SLACK)
+                    and _corridor_truth_beats_straight(
+                        path,
+                        pref_straight,
+                        commit_truth,
+                        mission,
+                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+                    )
+                )
+                if not soft:
+                    continue
             if (
                 has_light_w
                 and floor_e < math.inf
@@ -886,7 +936,23 @@ def plan_path_details(
                 and abs(float(selected_band) - corr_band) <= 0.35 + 1e-9
                 and commit_e > preferred_straight_energy * win_need
             ):
-                continue
+                is_prior = label.startswith("guide_corridor_prior_")
+                soft = (
+                    is_prior
+                    and not has_relief
+                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
+                    and commit_e
+                    <= preferred_straight_energy * (win_need + CORRIDOR_PRIOR_SOFT_COMMIT_SLACK)
+                    and _corridor_truth_beats_straight(
+                        path,
+                        pref_straight,
+                        commit_truth,
+                        mission,
+                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+                    )
+                )
+                if not soft:
+                    continue
             if mpc_completed_energy < math.inf and commit_e > mpc_completed_energy * min(float(corr_m), 1.0):
                 continue
             # Offline truth gate: reject belief-only false wins (Shanxi-class).
@@ -1188,6 +1254,11 @@ CORRIDOR_TRUTH_WIN_NEED = 0.995
 # Distilled prior vias: demand a clearer truth edge (~1.5%) — mild 0.5% still let
 # Shanxi commit a locally-ok prior that lost on the full mission.
 CORRIDOR_PRIOR_TRUTH_WIN_NEED = 0.995
+# When distilled prior fails belief Joules/edge but truth still clears ~1.5%, soft-admit
+# so Jilin/Yunnan-class priors can lock (dual-agree alone was not enough for guide_via).
+CORRIDOR_PRIOR_SOFT_TRUTH_NEED = 0.985
+CORRIDOR_PRIOR_SOFT_GEN_SLACK = 0.045
+CORRIDOR_PRIOR_SOFT_COMMIT_SLACK = 0.035
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
@@ -1287,6 +1358,41 @@ def _corridor_truth_beats_straight(
     return path_e <= straight_e * float(win_need)
 
 
+def _prior_truth_soft_ok(
+    path: list[tuple[float, float, float]],
+    straight_path: list[tuple[float, float, float]] | None,
+    truth_field: dict | None,
+    belief_map: BeliefMap,
+    mission: Mission,
+    *,
+    ambient_wind_mps: float | None = None,
+    has_terrain_relief: bool = False,
+) -> bool:
+    """True when a distilled prior still wins clearly under offline truth wind.
+
+    Skips Taiwan-class DEM shortcuts (has_relief) and calm air — soft-admit is for
+    strong-ambient belief-blind lobes (Jilin/Shanxi/Liaoning), not terrain corridors.
+    """
+    if has_terrain_relief:
+        return False
+    if ambient_wind_mps is not None and float(ambient_wind_mps) < CORRIDOR_HARD_FLOOR_MPS:
+        return False
+    if truth_field is None or "u" not in truth_field or "v" not in truth_field:
+        return False
+    if straight_path is None or len(straight_path) <= 1 or len(path) <= 1:
+        return False
+    truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
+    if truth_belief is None:
+        return False
+    return _corridor_truth_beats_straight(
+        path,
+        straight_path,
+        truth_belief,
+        mission,
+        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+    )
+
+
 def distill_truth_1via(
     start: tuple[float, float, float],
     goal: State3D | tuple[float, float, float],
@@ -1333,6 +1439,7 @@ def distill_truth_1via(
         return None
     best_via: tuple[float, float] | None = None
     best_truth_e = straight_truth_e
+    require_belief = float(min_belief_save) >= 0.0
     for sign in (-1.0, 1.0):
         for off_m in offsets_m:
             offset = float(off_m) / cell_m
@@ -1346,12 +1453,13 @@ def distill_truth_1via(
             e_t = _polyline_model_energy_j(path, truth_belief, mission)
             if not math.isfinite(e_t) or e_t >= best_truth_e:
                 continue
-            # Dual-agree: live belief must also like this via vs the same straight.
-            e_b = _polyline_model_energy_j(path, belief_map, mission)
-            if not math.isfinite(e_b):
-                continue
-            if e_b > straight_belief_e * (1.0 - float(min_belief_save)):
-                continue
+            if require_belief:
+                # Dual-agree: live belief must also like this via vs the same straight.
+                e_b = _polyline_model_energy_j(path, belief_map, mission)
+                if not math.isfinite(e_b):
+                    continue
+                if e_b > straight_belief_e * (1.0 - float(min_belief_save)):
+                    continue
             best_truth_e = e_t
             best_via = (float(mx), float(my))
     if best_via is None:
@@ -2691,17 +2799,60 @@ def _energy_guide_paths(
             ):
                 continue
             if require_edge and not has_edge and not has_relief and not has_light_w:
-                continue
+                # Soft: truth-clear prior may enter even when belief edge is still dark.
+                if not _prior_truth_soft_ok(
+                    path,
+                    straight_probe,
+                    truth_field,
+                    belief_map,
+                    mission,
+                    ambient_wind_mps=band_speed,
+                    has_terrain_relief=has_relief,
+                ):
+                    continue
             label = f"guide_corridor_prior_{pmx:.1f}_{pmy:.1f}_z{cruise_band:g}"
             corridor_candidates.append(
                 (label, path, has_edge, has_relief, has_light_w, band_speed)
             )
 
     scored: list[tuple[float, float, str, list[tuple[float, float, float]]]] = []
+
+    def _prior_gen_soft_rescue(
+        path: list[tuple[float, float, float]],
+        belief_e: float,
+        bar: float,
+        *,
+        band_speed: float,
+        has_relief: bool,
+    ) -> bool:
+        if straight_floor >= math.inf:
+            return False
+        if belief_e > straight_floor * (bar + CORRIDOR_PRIOR_SOFT_GEN_SLACK):
+            return False
+        zs = [float(p[2]) for p in path[1:-1]] or [float(p[2]) for p in path]
+        band = float(sorted(zs)[len(zs) // 2])
+        st = _agl_guide_polyline(start, goal, belief_map, mission, via_xy=None, cruise_z=band)
+        return _prior_truth_soft_ok(
+            path,
+            st,
+            truth_field,
+            belief_map,
+            mission,
+            ambient_wind_mps=band_speed,
+            has_terrain_relief=has_relief,
+        )
+
     for label, path, has_edge, has_relief, has_light_w, band_speed in corridor_candidates:
         raw = _polyline_model_energy_j(path, belief_map, mission)
+        is_prior = label.startswith("guide_corridor_prior_")
         if straight_floor < math.inf and raw > straight_floor * gen_margin:
-            continue
+            if not (
+                is_prior
+                and _prior_gen_soft_rescue(
+                    path, raw, gen_margin, band_speed=band_speed, has_relief=has_relief
+                )
+            ):
+                continue
         shear_edged = has_edge and CORRIDOR_HARD_FLOOR_MPS <= band_speed < CORRIDOR_MIN_WIND_MPS
         if band_speed >= CORRIDOR_MARGINAL_WIND_MPS or shear_edged:
             u_gain, risk_slack = 0.04, 0.06
@@ -2714,8 +2865,15 @@ def _energy_guide_paths(
         else:
             u_gain, risk_slack = 0.07, 0.03
         risk = _polyline_risk_adjusted_energy_j(path, belief_map, mission, uncertainty_gain=u_gain)
-        if straight_floor < math.inf and risk > straight_floor * (gen_margin + risk_slack):
-            continue
+        risk_bar = gen_margin + risk_slack
+        if straight_floor < math.inf and risk > straight_floor * risk_bar:
+            if not (
+                is_prior
+                and _prior_gen_soft_rescue(
+                    path, risk, risk_bar, band_speed=band_speed, has_relief=has_relief
+                )
+            ):
+                continue
         scored.append((0.9 * raw + 0.1 * risk, raw, label, path))
     scored.sort(key=lambda item: item[0])
     best_fresh_e = scored[0][1] if scored else None

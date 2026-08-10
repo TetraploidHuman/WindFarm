@@ -16,7 +16,12 @@ from windfarm.config import TaskConfig, save_task_config
 from windfarm.api_server import _api_schema
 from windfarm.dashboard import build_dashboard_from_report, build_live_dashboard_html
 from windfarm.belief import BeliefUpdater
-from windfarm.execution import LATERAL_PROBE_OFFSET_M, NavigationContext, NavigationEngine
+from windfarm.execution import (
+    LATERAL_PROBE_OFFSET_M,
+    LATERAL_PROBE_OFFSETS_M,
+    NavigationContext,
+    NavigationEngine,
+)
 from windfarm.io import coarse_samples_from_dict, observations_from_dict
 from windfarm.mission_runner import MissionRunner
 from windfarm.pipeline import WindFarmPipeline
@@ -1218,9 +1223,21 @@ class PipelineTest(unittest.TestCase):
         tags = {p["tag"] for p in payload}
         self.assertIn("left", tags)
         self.assertIn("right", tags)
-        offset_cells = LATERAL_PROBE_OFFSET_M / 30.0
-        left_y = int(round(mid_y + offset_cells))  # path east → left is +y
-        right_y = int(round(mid_y - offset_cells))
+        # Primary ring ≈100–120 m; assert at least one offset painted off-track.
+        painted = False
+        for off_m in LATERAL_PROBE_OFFSETS_M or (LATERAL_PROBE_OFFSET_M,):
+            offset_cells = float(off_m) / 30.0
+            left_y = int(round(mid_y + offset_cells))  # path east → left is +y
+            right_y = int(round(mid_y - offset_cells))
+            if 0 <= left_y < height and float(arrays["confidence"][1, left_y, 20]) > 0.0:
+                painted = True
+            if 0 <= right_y < height and float(arrays["confidence"][1, right_y, 20]) > 0.0:
+                painted = True
+        self.assertTrue(painted, msg="multi-range lateral probes should raise off-track confidence")
+        # Stronger lobe is north of track (left when flying east).
+        off0 = float((LATERAL_PROBE_OFFSETS_M or (LATERAL_PROBE_OFFSET_M,))[0]) / 30.0
+        left_y = int(round(mid_y + off0))
+        right_y = int(round(mid_y - off0))
         self.assertGreater(float(arrays["confidence"][1, left_y, 20]), 0.0)
         self.assertGreater(float(arrays["confidence"][1, right_y, 20]), 0.0)
         self.assertGreater(
