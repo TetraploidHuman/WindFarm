@@ -738,103 +738,124 @@ class WindFarmPipeline:
         # Sparse cell history: default prev_* = current physics, patch known keys only.
         hist = active_session.cell_history
         hist_win = active_session.cell_history_window
-        prev_u = np.array(u_win, dtype=np.float64, copy=True)
-        prev_v = np.array(v_win, dtype=np.float64, copy=True)
-        prev_w = np.array(w_win, dtype=np.float64, copy=True)
-        prev2_u = np.array(prev_u, copy=True)
-        prev2_v = np.array(prev_v, copy=True)
-        prev2_w = np.array(prev_w, copy=True)
-        prev3_u = np.array(prev_u, copy=True)
-        prev3_v = np.array(prev_v, copy=True)
-        prev3_w = np.array(prev_w, copy=True)
-        local_u_mean = np.array(prev_u, copy=True)
-        local_v_mean = np.array(prev_v, copy=True)
-        local_w_mean = np.array(prev_w, copy=True)
-        x_index = {int(x): j for j, x in enumerate(x_values)}
-        y_index = {int(y): i for i, y in enumerate(y_values)}
-        for (hx, hy, hz), prev in hist.items():
-            level = int(hz)
-            if level < 0 or level >= level_count:
-                continue
-            li = y_index.get(int(hy))
-            lj = x_index.get(int(hx))
-            if li is None or lj is None:
-                continue
-            prev_u[level, li, lj] = prev["u_local"]
-            prev_v[level, li, lj] = prev["v_local"]
-            prev_w[level, li, lj] = prev["w_local"]
-            window = list(hist_win.get((hx, hy, hz), ()))
-            if window:
-                local_u_mean[level, li, lj] = sum(item[0] for item in window) / len(window)
-                local_v_mean[level, li, lj] = sum(item[1] for item in window) / len(window)
-                local_w_mean[level, li, lj] = sum(item[2] for item in window) / len(window)
-                prev2 = window[-2] if len(window) >= 2 else (prev["u_local"], prev["v_local"], prev["w_local"])
-                prev3 = window[-3] if len(window) >= 3 else prev2
-                prev2_u[level, li, lj], prev2_v[level, li, lj], prev2_w[level, li, lj] = prev2
-                prev3_u[level, li, lj], prev3_v[level, li, lj], prev3_w[level, li, lj] = prev3
+        if not hist:
+            prev_u = prev_v = prev_w = u_win
+            prev2_u = prev2_v = prev2_w = u_win
+            prev3_u = prev3_v = prev3_w = u_win
+            local_u_mean = local_v_mean = local_w_mean = u_win
+        else:
+            prev_u = np.array(u_win, dtype=np.float64, copy=True)
+            prev_v = np.array(v_win, dtype=np.float64, copy=True)
+            prev_w = np.array(w_win, dtype=np.float64, copy=True)
+            prev2_u = np.array(u_win, dtype=np.float64, copy=True)
+            prev2_v = np.array(v_win, dtype=np.float64, copy=True)
+            prev2_w = np.array(w_win, dtype=np.float64, copy=True)
+            prev3_u = np.array(u_win, dtype=np.float64, copy=True)
+            prev3_v = np.array(v_win, dtype=np.float64, copy=True)
+            prev3_w = np.array(w_win, dtype=np.float64, copy=True)
+            local_u_mean = np.array(u_win, dtype=np.float64, copy=True)
+            local_v_mean = np.array(v_win, dtype=np.float64, copy=True)
+            local_w_mean = np.array(w_win, dtype=np.float64, copy=True)
+            x_index = {int(x): j for j, x in enumerate(x_values)}
+            y_index = {int(y): i for i, y in enumerate(y_values)}
+            for (hx, hy, hz), prev in hist.items():
+                level = int(hz)
+                if level < 0 or level >= level_count:
+                    continue
+                li = y_index.get(int(hy))
+                lj = x_index.get(int(hx))
+                if li is None or lj is None:
+                    continue
+                prev_u[level, li, lj] = prev["u_local"]
+                prev_v[level, li, lj] = prev["v_local"]
+                prev_w[level, li, lj] = prev["w_local"]
+                window = hist_win.get((hx, hy, hz))
+                if window:
+                    n_win = len(window)
+                    su = sv = sw = 0.0
+                    for item in window:
+                        su += item[0]
+                        sv += item[1]
+                        sw += item[2]
+                    inv = 1.0 / n_win
+                    local_u_mean[level, li, lj] = su * inv
+                    local_v_mean[level, li, lj] = sv * inv
+                    local_w_mean[level, li, lj] = sw * inv
+                    prev2 = window[-2] if n_win >= 2 else (prev["u_local"], prev["v_local"], prev["w_local"])
+                    prev3 = window[-3] if n_win >= 3 else prev2
+                    prev2_u[level, li, lj], prev2_v[level, li, lj], prev2_w[level, li, lj] = prev2
+                    prev3_u[level, li, lj], prev3_v[level, li, lj], prev3_w[level, li, lj] = prev3
 
-        # Build full (Z, H_win, W_win) feature volumes once (no per-level Python assembly).
-        def _tile_hw(plane: np.ndarray) -> np.ndarray:
-            return np.broadcast_to(plane[None, :, :], (level_count, rows, cols))
-
+        # Pack features into X without allocating a full (Z,H,W) volume per column.
+        hw = rows * cols
         slope = grids["slope"][ys][:, xs]
         aspect_sin = grids["aspect_sin"][ys][:, xs]
         aspect_cos = grids["aspect_cos"][ys][:, xs]
-        levels = np.arange(level_count, dtype=np.float64)[:, None, None]
-        block: dict[str, np.ndarray] = {
-            "x_norm": _tile_hw(grids["x_norm"][ys][:, xs]),
-            "y_norm": _tile_hw(grids["y_norm"][ys][:, xs]),
-            "z_norm": np.broadcast_to(levels / alt_levels, (level_count, rows, cols)),
-            "altitude_m": np.broadcast_to(levels * float(self.altitude_step_m), (level_count, rows, cols)),
-            "elev": _tile_hw(grids["elev"][ys][:, xs]),
-            "slope": _tile_hw(slope),
-            "aspect": _tile_hw(grids["aspect"][ys][:, xs]),
-            "aspect_sin": _tile_hw(aspect_sin),
-            "aspect_cos": _tile_hw(aspect_cos),
-            "terrain_wave_sin": _tile_hw(grids["terrain_wave_sin"][ys][:, xs]),
-            "terrain_wave_cos": _tile_hw(grids["terrain_wave_cos"][ys][:, xs]),
-            "lee_wave_sin": _tile_hw(grids["lee_wave_sin"][ys][:, xs]),
-            "lee_wave_cos": _tile_hw(grids["lee_wave_cos"][ys][:, xs]),
-            "roughness": _tile_hw(grids["roughness"][ys][:, xs]),
-            "u_km": np.full((level_count, rows, cols), u_km, dtype=np.float64),
-            "v_km": np.full((level_count, rows, cols), v_km, dtype=np.float64),
-            "w_km": np.full((level_count, rows, cols), w_km, dtype=np.float64),
-            "wind_speed_km": np.full((level_count, rows, cols), wind_speed_km, dtype=np.float64),
-            "u_phy": u_win,
-            "v_phy": v_win,
-            "w_phy": w_win,
-            "u_km_slope": _tile_hw(u_km * slope),
-            "v_km_slope": _tile_hw(v_km * slope),
-            "w_km_slope": _tile_hw(w_km * slope),
-            "f_slope": _tile_hw(f_slope[ys][:, xs]),
-            "f_rough": _tile_hw(f_rough[ys][:, xs]),
-            "delta_elev": _tile_hw(delta_elev[ys][:, xs]),
-            "hour_sin": np.full((level_count, rows, cols), hour_sin, dtype=np.float64),
-            "hour_cos": np.full((level_count, rows, cols), hour_cos, dtype=np.float64),
-            "aspect_time_sin": _tile_hw(aspect_sin * hour_cos + aspect_cos * hour_sin),
-            "aspect_time_cos": _tile_hw(aspect_cos * hour_cos - aspect_sin * hour_sin),
-            "prev_local_u": prev_u,
-            "prev_local_v": prev_v,
-            "prev_local_w": prev_w,
-            "prev_local_speed": np.sqrt(prev_u * prev_u + prev_v * prev_v + prev_w * prev_w),
-            "local_trend_u": u_win - prev_u,
-            "local_trend_v": v_win - prev_v,
-            "local_trend_w": w_win - prev_w,
-            "prev2_local_u": prev2_u,
-            "prev2_local_v": prev2_v,
-            "prev2_local_w": prev2_w,
-            "prev3_local_u": prev3_u,
-            "prev3_local_v": prev3_v,
-            "prev3_local_w": prev3_w,
-            "local_u_mean": local_u_mean,
-            "local_v_mean": local_v_mean,
-            "local_w_mean": local_w_mean,
-        }
-        for key, value in coarse_defaults.items():
-            block[key] = np.full((level_count, rows, cols), value, dtype=np.float64)
+        col = {name: i for i, name in enumerate(FEATURE_NAMES)}
 
-        for col_i, name in enumerate(FEATURE_NAMES):
-            X[:, col_i] = np.asarray(block[name], dtype=np.float32).ravel()
+        def _fill_const(name: str, value: float) -> None:
+            X[:, col[name]] = np.float32(value)
+
+        def _fill_hw(name: str, plane) -> None:
+            flat = np.asarray(plane, dtype=np.float32).reshape(rows, cols).ravel()
+            X[:, col[name]] = np.tile(flat, level_count)
+
+        def _fill_vol(name: str, volume) -> None:
+            X[:, col[name]] = np.asarray(volume, dtype=np.float32).ravel()
+
+        _fill_hw("x_norm", grids["x_norm"][ys][:, xs])
+        _fill_hw("y_norm", grids["y_norm"][ys][:, xs])
+        z_vals = (np.arange(level_count, dtype=np.float64) / alt_levels).astype(np.float32)
+        alt_vals = (np.arange(level_count, dtype=np.float64) * float(self.altitude_step_m)).astype(np.float32)
+        for z in range(level_count):
+            sl = slice(z * hw, (z + 1) * hw)
+            X[sl, col["z_norm"]] = z_vals[z]
+            X[sl, col["altitude_m"]] = alt_vals[z]
+        _fill_hw("elev", grids["elev"][ys][:, xs])
+        _fill_hw("slope", slope)
+        _fill_hw("aspect", grids["aspect"][ys][:, xs])
+        _fill_hw("aspect_sin", aspect_sin)
+        _fill_hw("aspect_cos", aspect_cos)
+        _fill_hw("terrain_wave_sin", grids["terrain_wave_sin"][ys][:, xs])
+        _fill_hw("terrain_wave_cos", grids["terrain_wave_cos"][ys][:, xs])
+        _fill_hw("lee_wave_sin", grids["lee_wave_sin"][ys][:, xs])
+        _fill_hw("lee_wave_cos", grids["lee_wave_cos"][ys][:, xs])
+        _fill_hw("roughness", grids["roughness"][ys][:, xs])
+        _fill_const("u_km", u_km)
+        _fill_const("v_km", v_km)
+        _fill_const("w_km", w_km)
+        _fill_const("wind_speed_km", wind_speed_km)
+        _fill_vol("u_phy", u_win)
+        _fill_vol("v_phy", v_win)
+        _fill_vol("w_phy", w_win)
+        _fill_hw("u_km_slope", u_km * slope)
+        _fill_hw("v_km_slope", v_km * slope)
+        _fill_hw("w_km_slope", w_km * slope)
+        _fill_hw("f_slope", f_slope[ys][:, xs])
+        _fill_hw("f_rough", f_rough[ys][:, xs])
+        _fill_hw("delta_elev", delta_elev[ys][:, xs])
+        _fill_const("hour_sin", hour_sin)
+        _fill_const("hour_cos", hour_cos)
+        _fill_hw("aspect_time_sin", aspect_sin * hour_cos + aspect_cos * hour_sin)
+        _fill_hw("aspect_time_cos", aspect_cos * hour_cos - aspect_sin * hour_sin)
+        for key, value in coarse_defaults.items():
+            _fill_const(key, value)
+        _fill_vol("prev_local_u", prev_u)
+        _fill_vol("prev_local_v", prev_v)
+        _fill_vol("prev_local_w", prev_w)
+        _fill_vol("prev_local_speed", np.sqrt(prev_u * prev_u + prev_v * prev_v + prev_w * prev_w))
+        _fill_vol("local_trend_u", u_win - prev_u)
+        _fill_vol("local_trend_v", v_win - prev_v)
+        _fill_vol("local_trend_w", w_win - prev_w)
+        _fill_vol("prev2_local_u", prev2_u)
+        _fill_vol("prev2_local_v", prev2_v)
+        _fill_vol("prev2_local_w", prev2_w)
+        _fill_vol("prev3_local_u", prev3_u)
+        _fill_vol("prev3_local_v", prev3_v)
+        _fill_vol("prev3_local_w", prev3_w)
+        _fill_vol("local_u_mean", local_u_mean)
+        _fill_vol("local_v_mean", local_v_mean)
+        _fill_vol("local_w_mean", local_w_mean)
 
         du, dv, dw = self.residual_model.predict_batch(X)
         du = np.asarray(du, dtype=np.float64).reshape(level_count, rows, cols)
