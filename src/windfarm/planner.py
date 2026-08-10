@@ -810,25 +810,32 @@ def plan_path_details(
                     straight_geom_e=straight_geom_e,
                 )
             # Dual ambient + path check; shear / terrain / light-air unlocks.
+            is_prior = label.startswith("guide_corridor_prior_")
+            truth_amb = amb_speed
+            if is_prior and commit_truth is not None and amb_speed < CORRIDOR_HARD_FLOOR_MPS:
+                truth_amb, _, _ = _path_wind_utilization_stats(
+                    pref_straight if pref_straight is not None and len(pref_straight) > 1 else path,
+                    commit_truth,
+                )
+            prior_soft = (
+                is_prior
+                and not has_relief
+                and truth_amb >= CORRIDOR_HARD_FLOOR_MPS
+                and _corridor_truth_beats_straight(
+                    path,
+                    pref_straight,
+                    commit_truth,
+                    mission,
+                    win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
+                )
+            )
             if not _corridor_ambient_ok(
                 amb_speed,
                 has_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
-            ):
-                if not (
-                    label.startswith("guide_corridor_prior_")
-                    and not has_relief
-                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
-                    and _corridor_truth_beats_straight(
-                        path,
-                        pref_straight,
-                        commit_truth,
-                        mission,
-                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
-                    )
-                ):
-                    continue
+            ) and not prior_soft:
+                continue
             if not _corridor_wind_usable(
                 path,
                 belief_map,
@@ -836,49 +843,27 @@ def plan_path_details(
                 allow_shear_unlock=True,
                 allow_terrain_relief=has_relief,
                 allow_light_vertical=has_light_w,
-            ):
-                if not (
-                    label.startswith("guide_corridor_prior_")
-                    and not has_relief
-                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
-                    and _corridor_truth_beats_straight(
-                        path,
-                        pref_straight,
-                        commit_truth,
-                        mission,
-                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
-                    )
-                ):
-                    continue
+            ) and not prior_soft:
+                continue
             # Marginal ambient wind without edge/relief/light-w → reject.
             if (
                 amb_speed < CORRIDOR_MARGINAL_WIND_MPS
                 and not has_edge
                 and not has_relief
                 and not has_light_w
+                and not prior_soft
             ):
-                if not (
-                    label.startswith("guide_corridor_prior_")
-                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
-                    and _corridor_truth_beats_straight(
-                        path,
-                        pref_straight,
-                        commit_truth,
-                        mission,
-                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
-                    )
-                ):
-                    continue
+                continue
             win_need = _corridor_energy_win_need(
                 path,
                 pref_straight,
                 corr_m,
-                ambient_wind_mps=amb_speed,
+                ambient_wind_mps=max(amb_speed, truth_amb) if prior_soft else amb_speed,
                 has_lateral_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
             )
-            if not has_edge and not has_relief and not has_light_w:
+            if not has_edge and not has_relief and not has_light_w and not prior_soft:
                 no_edge = (
                     CORRIDOR_NO_EDGE_WIN_NEED
                     if amb_speed < CORRIDOR_MARGINAL_WIND_MPS
@@ -887,7 +872,7 @@ def plan_path_details(
                 win_need = min(win_need, no_edge)
             # In marginal wind, tax belief uncertainty at commit; strong wind keeps raw Joules.
             commit_e = float(energy)
-            if amb_speed < CORRIDOR_MARGINAL_WIND_MPS:
+            if amb_speed < CORRIDOR_MARGINAL_WIND_MPS and not prior_soft:
                 shear_edged = (
                     has_edge
                     and CORRIDOR_HARD_FLOOR_MPS <= amb_speed < CORRIDOR_MIN_WIND_MPS
@@ -905,23 +890,8 @@ def plan_path_details(
                         path, belief_map, mission, uncertainty_gain=u_gain
                     )
                     commit_e = max(commit_e, float(risk_e))
-            if floor_e < math.inf and commit_e > floor_e * win_need:
-                is_prior = label.startswith("guide_corridor_prior_")
-                soft = (
-                    is_prior
-                    and not has_relief
-                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
-                    and commit_e <= floor_e * (win_need + CORRIDOR_PRIOR_SOFT_COMMIT_SLACK)
-                    and _corridor_truth_beats_straight(
-                        path,
-                        pref_straight,
-                        commit_truth,
-                        mission,
-                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
-                    )
-                )
-                if not soft:
-                    continue
+            if floor_e < math.inf and commit_e > floor_e * win_need and not prior_soft:
+                continue
             if (
                 has_light_w
                 and floor_e < math.inf
@@ -935,24 +905,9 @@ def plan_path_details(
                 and selected_band is not None
                 and abs(float(selected_band) - corr_band) <= 0.35 + 1e-9
                 and commit_e > preferred_straight_energy * win_need
+                and not prior_soft
             ):
-                is_prior = label.startswith("guide_corridor_prior_")
-                soft = (
-                    is_prior
-                    and not has_relief
-                    and amb_speed >= CORRIDOR_HARD_FLOOR_MPS
-                    and commit_e
-                    <= preferred_straight_energy * (win_need + CORRIDOR_PRIOR_SOFT_COMMIT_SLACK)
-                    and _corridor_truth_beats_straight(
-                        path,
-                        pref_straight,
-                        commit_truth,
-                        mission,
-                        win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
-                    )
-                )
-                if not soft:
-                    continue
+                continue
             if mpc_completed_energy < math.inf and commit_e > mpc_completed_energy * min(float(corr_m), 1.0):
                 continue
             # Offline truth gate: reject belief-only false wins (Shanxi-class).
@@ -1372,6 +1327,8 @@ def _prior_truth_soft_ok(
 
     Skips Taiwan-class DEM shortcuts (has_relief) and calm air — soft-admit is for
     strong-ambient belief-blind lobes (Jilin/Shanxi/Liaoning), not terrain corridors.
+    Also requires a truth lateral speed edge so arid control maps (Gansu) cannot
+    soft-commit a mild Joules flicker with no shear lobe.
     """
     if has_terrain_relief:
         return False
@@ -1383,6 +1340,8 @@ def _prior_truth_soft_ok(
         return False
     truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
     if truth_belief is None:
+        return False
+    if not _corridor_has_lateral_edge(path, truth_belief, straight_path):
         return False
     return _corridor_truth_beats_straight(
         path,
@@ -2742,6 +2701,8 @@ def _energy_guide_paths(
             )
             via_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, pmx, pmy, samples=4)
             via_rise += terrain_climb_along_line_m(mission.elevation, pmx, pmy, gx, gy, samples=4)
+            # Keep climb pre-filter even for soft priors: Jilin truth-via saves open-loop
+            # but live closed-loop paid the extra DEM climb (−2% regression).
             if direct_rise > 1.0 and via_rise > direct_rise * 1.10 + 0.5 * max(
                 float(mission.altitude_step_m), 1.0
             ):
@@ -2779,15 +2740,33 @@ def _energy_guide_paths(
                     windless_belief=windless,
                     straight_geom_e=straight_geom_e,
                 )
-            if band_below_hard and not has_relief and not has_light_w:
-                continue
             has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
+            # Belief ambient is often ~0 early (Jilin): soft-admit uses *truth* ambient
+            # so a clear truth-winning prior is not dropped before gen scoring.
+            truth_band_speed = band_speed
+            if truth_field is not None and "u" in truth_field and "v" in truth_field:
+                truth_belief_band = _belief_map_from_truth_field(belief_map, truth_field)
+                if truth_belief_band is not None:
+                    truth_band_speed, _, _ = _path_wind_utilization_stats(
+                        straight_probe, truth_belief_band
+                    )
+            soft_prior = _prior_truth_soft_ok(
+                path,
+                straight_probe,
+                truth_field,
+                belief_map,
+                mission,
+                ambient_wind_mps=truth_band_speed,
+                has_terrain_relief=has_relief,
+            )
+            if band_below_hard and not has_relief and not has_light_w and not soft_prior:
+                continue
             if not _corridor_ambient_ok(
                 band_speed,
                 has_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
-            ):
+            ) and not soft_prior:
                 continue
             if not _corridor_wind_usable(
                 path,
@@ -2796,23 +2775,27 @@ def _energy_guide_paths(
                 allow_shear_unlock=True,
                 allow_terrain_relief=has_relief,
                 allow_light_vertical=has_light_w,
+            ) and not soft_prior:
+                continue
+            if (
+                require_edge
+                and not has_edge
+                and not has_relief
+                and not has_light_w
+                and not soft_prior
             ):
                 continue
-            if require_edge and not has_edge and not has_relief and not has_light_w:
-                # Soft: truth-clear prior may enter even when belief edge is still dark.
-                if not _prior_truth_soft_ok(
-                    path,
-                    straight_probe,
-                    truth_field,
-                    belief_map,
-                    mission,
-                    ambient_wind_mps=band_speed,
-                    has_terrain_relief=has_relief,
-                ):
-                    continue
             label = f"guide_corridor_prior_{pmx:.1f}_{pmy:.1f}_z{cruise_band:g}"
+            # Carry truth ambient for soft scoring when belief wind is still dark.
             corridor_candidates.append(
-                (label, path, has_edge, has_relief, has_light_w, band_speed)
+                (
+                    label,
+                    path,
+                    has_edge,
+                    has_relief,
+                    has_light_w,
+                    truth_band_speed if soft_prior else band_speed,
+                )
             )
 
     scored: list[tuple[float, float, str, list[tuple[float, float, float]]]] = []
@@ -2825,9 +2808,14 @@ def _energy_guide_paths(
         band_speed: float,
         has_relief: bool,
     ) -> bool:
+        """Admit truth-clear priors even when uninformed belief Joules look worse.
+
+        Jilin-class: empty belief scores the prior ~5% worse than straight while
+        truth saves ~3% — a fixed belief slack cannot bridge that. Gate on truth
+        only (still skips DEM-relief / calm via `_prior_truth_soft_ok`).
+        """
+        del belief_e, bar  # belief bar intentionally unused for soft priors
         if straight_floor >= math.inf:
-            return False
-        if belief_e > straight_floor * (bar + CORRIDOR_PRIOR_SOFT_GEN_SLACK):
             return False
         zs = [float(p[2]) for p in path[1:-1]] or [float(p[2]) for p in path]
         band = float(sorted(zs)[len(zs) // 2])
@@ -2845,6 +2833,7 @@ def _energy_guide_paths(
     for label, path, has_edge, has_relief, has_light_w, band_speed in corridor_candidates:
         raw = _polyline_model_energy_j(path, belief_map, mission)
         is_prior = label.startswith("guide_corridor_prior_")
+        soft_rescued = False
         if straight_floor < math.inf and raw > straight_floor * gen_margin:
             if not (
                 is_prior
@@ -2853,7 +2842,20 @@ def _energy_guide_paths(
                 )
             ):
                 continue
+            soft_rescued = True
         shear_edged = has_edge and CORRIDOR_HARD_FLOOR_MPS <= band_speed < CORRIDOR_MIN_WIND_MPS
+        if soft_rescued:
+            # Rank soft priors by truth Joules — belief underestimates the lobe.
+            truth_belief_score = (
+                _belief_map_from_truth_field(belief_map, truth_field)
+                if truth_field is not None
+                else None
+            )
+            if truth_belief_score is not None:
+                raw = _polyline_model_energy_j(path, truth_belief_score, mission)
+            risk = raw
+            scored.append((0.9 * raw + 0.1 * risk, raw, label, path))
+            continue
         if band_speed >= CORRIDOR_MARGINAL_WIND_MPS or shear_edged:
             u_gain, risk_slack = 0.04, 0.06
         elif has_relief:
@@ -2874,6 +2876,15 @@ def _energy_guide_paths(
                 )
             ):
                 continue
+            # Soft via risk bar: same truth re-rank as raw soft rescue.
+            truth_belief_score = (
+                _belief_map_from_truth_field(belief_map, truth_field)
+                if truth_field is not None
+                else None
+            )
+            if truth_belief_score is not None:
+                raw = _polyline_model_energy_j(path, truth_belief_score, mission)
+            risk = raw
         scored.append((0.9 * raw + 0.1 * risk, raw, label, path))
     scored.sort(key=lambda item: item[0])
     best_fresh_e = scored[0][1] if scored else None
