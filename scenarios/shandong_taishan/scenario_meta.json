@@ -1,0 +1,41 @@
+{
+  "name": "shandong_taishan",
+  "description": "Tai Shan foothills / N China hills (SRTM N36E117)",
+  "lat": 36.25,
+  "lon": 117.15,
+  "hgt": "data/N36E117.hgt",
+  "start_time": "2024-10-22T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 209.18702680466862,
+    "max": 588.1736302395566,
+    "mean": 331.9496749078568
+  },
+  "wind": {
+    "u_km_mean": 1.0307736335226003,
+    "v_km_mean": -4.269462158825468,
+    "speed_mean": 4.392713655710723,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      12,
+      41
+    ],
+    "goal": [
+      66,
+      18
+    ]
+  },
+  "built_at": "2026-08-10T09:25:21Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

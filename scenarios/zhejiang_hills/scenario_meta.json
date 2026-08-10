@@ -1,0 +1,41 @@
+{
+  "name": "zhejiang_hills",
+  "description": "West Zhejiang humid hills near Quzhou (SRTM N29E119)",
+  "lat": 29.55,
+  "lon": 119.55,
+  "hgt": "data/N29E119.hgt",
+  "start_time": "2024-04-08T08:00:00",
+  "time_steps": 120,
+  "grid": {
+    "width": 79,
+    "height": 59,
+    "resolution_m": 30.0
+  },
+  "extent_m": {
+    "x": 2340.0,
+    "y": 1740.0
+  },
+  "elevation_m": {
+    "min": 20.0,
+    "max": 136.76027791383726,
+    "mean": 28.115192368861553
+  },
+  "wind": {
+    "u_km_mean": -0.513307428899013,
+    "v_km_mean": -2.8310306229588234,
+    "speed_mean": 2.879793214850547,
+    "has_100m_profile": true
+  },
+  "mission": {
+    "start": [
+      11,
+      42
+    ],
+    "goal": [
+      66,
+      17
+    ]
+  },
+  "built_at": "2026-08-10T09:21:56Z",
+  "source": "SRTM1 native crop + Open-Meteo 10m/100m"
+}

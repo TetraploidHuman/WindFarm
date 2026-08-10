@@ -46,6 +46,10 @@ HOLDOUT = (
     "jilin_forest",
     "neimeng_grass",
     "yunnan_karst",
+    "zhejiang_hills",
+    "shandong_taishan",
+    "chongqing_hills",
+    "guangxi_guilin",
 )
 SCENARIOS = CORE + HOLDOUT
 OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0, 450.0, 550.0)
