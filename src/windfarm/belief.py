@@ -17,6 +17,22 @@ def create_belief_map(width: int, height: int, levels: int = 1) -> BeliefMap:
     return belief_map
 
 
+def create_scoring_belief_map(width: int, height: int, levels: int = 1) -> BeliefMap:
+    """Arrays-only belief map for planner scoring (no BeliefCell grid).
+
+    Hot corridor / truth / windless paths only sample ``field_arrays`` via
+    trilinear kernels — allocating ~width×height×levels cells is pure overhead.
+    """
+    z_n = max(1, levels)
+    return BeliefMap(
+        width=width,
+        height=height,
+        levels=z_n,
+        cells=[],
+        field_arrays=_default_field_arrays(z_n, height, width),
+    )
+
+
 def _default_field_arrays(z_n: int, height: int, width: int) -> dict[str, np.ndarray]:
     shape = (z_n, height, width)
     return {

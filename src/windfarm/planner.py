@@ -20,7 +20,11 @@ from .altitude import (
     terrain_delta_m,
     terrain_delta_m_batch,
 )
-from .belief import create_belief_map, ensure_belief_field_arrays, pack_belief_field
+from .belief import (
+    create_scoring_belief_map,
+    ensure_belief_field_arrays,
+    pack_belief_field,
+)
 from .controller import (
     DEFAULT_ENVELOPE,
     best_thermalling_bank,
@@ -1270,25 +1274,51 @@ CORRIDOR_LIGHT_DETOUR_MAX_M = 380.0
 CORRIDOR_STRONG_DETOUR_MAX_M = 300.0
 
 
+# Immutable zero-wind scoring maps are safe to share across replans.
+_WINDLESS_BELIEF_CACHE: dict[tuple[int, int, int], BeliefMap] = {}
+# Truth scoring maps keyed by grid shape + id(u); cleared when it grows.
+_TRUTH_BELIEF_CACHE: dict[tuple[int, int, int, int], BeliefMap] = {}
+_ROUTE_TERRAIN_RISE_CACHE: dict[int, float] = {}
+
+
 def _windless_belief_map(belief_map: BeliefMap) -> BeliefMap:
-    """Fresh belief with zero wind — scores DEM/geometry energy without wind flattery."""
-    return create_belief_map(belief_map.width, belief_map.height, belief_map.levels)
+    """Zero-wind belief for DEM/geometry energy (arrays-only; cached by shape)."""
+    key = (int(belief_map.width), int(belief_map.height), int(belief_map.levels))
+    hit = _WINDLESS_BELIEF_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = create_scoring_belief_map(belief_map.width, belief_map.height, belief_map.levels)
+    _WINDLESS_BELIEF_CACHE[key] = out
+    return out
 
 
 def _belief_map_from_truth_field(
     belief_map: BeliefMap,
     truth_field: dict,
 ) -> BeliefMap | None:
-    """Fresh belief whose wind_* layers are a copy of truth (scoring only)."""
+    """Belief whose wind_* layers mirror truth (scoring only; arrays-only + cached)."""
     if truth_field is None or "u" not in truth_field or "v" not in truth_field:
         return None
-    out = create_belief_map(belief_map.width, belief_map.height, belief_map.levels)
-    for attr, key in (("wind_u", "u"), ("wind_v", "v"), ("wind_w", "w")):
-        if key not in truth_field:
+    u_obj = truth_field["u"]
+    key = (
+        int(belief_map.width),
+        int(belief_map.height),
+        int(belief_map.levels),
+        id(u_obj),
+    )
+    hit = _TRUTH_BELIEF_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = create_scoring_belief_map(belief_map.width, belief_map.height, belief_map.levels)
+    for attr, key_name in (("wind_u", "u"), ("wind_v", "v"), ("wind_w", "w")):
+        if key_name not in truth_field:
             continue
-        arr = np.asarray(truth_field[key], dtype=np.float64)
+        arr = np.asarray(truth_field[key_name], dtype=np.float64)
         levels = min(out.levels, int(arr.shape[0]))
         out.field_arrays[attr][:levels] = arr[:levels]
+    if len(_TRUTH_BELIEF_CACHE) >= 8:
+        _TRUTH_BELIEF_CACHE.clear()
+    _TRUTH_BELIEF_CACHE[key] = out
     return out
 
 
@@ -1318,15 +1348,21 @@ def _mission_route_terrain_rise_m(mission: Mission) -> float:
     Prefer ``home`` over replan ``start`` so Taiwan-class sticky near the goal
     still sees the full-route rise (and Shandong stays flat for the strong-flat gate).
     """
+    mid = id(mission)
+    cached = _ROUTE_TERRAIN_RISE_CACHE.get(mid)
+    if cached is not None:
+        return cached
     elev = getattr(mission, "elevation", None)
     if elev is None:
+        _ROUTE_TERRAIN_RISE_CACHE[mid] = 0.0
         return 0.0
     home = getattr(mission, "home", None)
     start = home if home is not None else getattr(mission, "start", None)
     goal = getattr(mission, "goal", None)
     if start is None or goal is None:
+        _ROUTE_TERRAIN_RISE_CACHE[mid] = 0.0
         return 0.0
-    return float(
+    rise = float(
         terrain_climb_along_line_m(
             elev,
             float(start[0]),
@@ -1336,6 +1372,10 @@ def _mission_route_terrain_rise_m(mission: Mission) -> float:
             samples=8,
         )
     )
+    if len(_ROUTE_TERRAIN_RISE_CACHE) >= 64:
+        _ROUTE_TERRAIN_RISE_CACHE.clear()
+    _ROUTE_TERRAIN_RISE_CACHE[mid] = rise
+    return rise
 
 
 def _mission_has_route_terrain_relief(mission: Mission) -> bool:
@@ -3348,33 +3388,48 @@ def _path_cost(
 ) -> float:
     if len(path) <= 1:
         return 0.0
-    total = 0.0
-    for current, nxt in zip(path, path[1:]):
-        local = _sample_belief_state(belief_map, nxt[0], nxt[1], nxt[2])
-        discrete_current = normalize_state(current)
-        discrete_next = normalize_state(nxt)
-        total += transition_energy_j(
-            airspeed=mission.nominal_airspeed,
-            current=current,
-            nxt=nxt,
-            local_u=local["wind_u"],
-            local_v=local["wind_v"],
-            local_w=local["wind_w"],
-            step_distance_m=mission.step_distance_m,
-            altitude_step_m=mission.altitude_step_m,
-            climb_cost_per_level_j=mission.climb_cost_per_level_j,
-            hover_power_w=mission.hover_power_w,
-            cruise_power_w=mission.cruise_power_w,
-            hotel_power_w=mission.hotel_power_w,
-            headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
-            climb_power_per_mps_w=mission.climb_power_per_mps_w,
-            descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
-            terrain_dz_m=_mission_terrain_dz(mission, current[0], current[1], nxt[0], nxt[1]),
+    currents = np.asarray(path[:-1], dtype=np.float64)
+    nexts = np.asarray(path[1:], dtype=np.float64)
+    samples = _sample_belief_states_batch(belief_map, nexts[:, 0], nexts[:, 1], nexts[:, 2])
+    elev = getattr(mission, "elevation", None)
+    if elev is not None:
+        terrain_dz = terrain_delta_m_batch(
+            elev,
+            currents[:, 0],
+            currents[:, 1],
+            nexts[:, 0],
+            nexts[:, 1],
         )
-        total += 22.0 * risk_weight * local["uncertainty"] + 28.0 * safety_weight * local["safety_penalty"]
-        total -= 18.0 * local["expected_energy_gain"]
-        total += 10.0 * abs(discrete_next[2] - discrete_current[2])
-    return total
+    else:
+        terrain_dz = np.zeros(currents.shape[0], dtype=np.float64)
+    step_e = transition_energy_batch(
+        airspeed=mission.nominal_airspeed,
+        currents=currents,
+        nexts=nexts,
+        local_u=samples["wind_u"],
+        local_v=samples["wind_v"],
+        local_w=samples["wind_w"],
+        step_distance_m=mission.step_distance_m,
+        altitude_step_m=mission.altitude_step_m,
+        climb_cost_per_level_j=mission.climb_cost_per_level_j,
+        hover_power_w=mission.hover_power_w,
+        cruise_power_w=mission.cruise_power_w,
+        hotel_power_w=mission.hotel_power_w,
+        headwind_power_per_mps_w=mission.headwind_power_per_mps_w,
+        climb_power_per_mps_w=mission.climb_power_per_mps_w,
+        descent_power_reduction_per_mps_w=mission.descent_power_reduction_per_mps_w,
+        terrain_dz_m=terrain_dz,
+    )
+    # Match normalize_state: trunc toward zero via float→int cast.
+    dz_levels = np.abs(nexts[:, 2].astype(np.int64) - currents[:, 2].astype(np.int64)).astype(np.float64)
+    total = (
+        step_e
+        + 22.0 * risk_weight * samples["uncertainty"]
+        + 28.0 * safety_weight * samples["safety_penalty"]
+        - 18.0 * samples["expected_energy_gain"]
+        + 10.0 * dz_levels
+    )
+    return float(np.sum(total))
 
 
 def _path_cost_breakdown(
@@ -4010,14 +4065,7 @@ def _sample_belief_state(belief_map: BeliefMap, x: float, y: float, z: float) ->
 def _sample_attr(belief_map: BeliefMap, attr: str, x: float, y: float, z: float) -> float:
     arrays = belief_map.field_arrays
     if arrays is not None and attr in arrays:
-        return float(
-            trilinear_sample_batch(
-                arrays[attr],
-                np.asarray([x], dtype=np.float64),
-                np.asarray([y], dtype=np.float64),
-                np.asarray([z], dtype=np.float64),
-            )[0]
-        )
+        return float(trilinear_sample(arrays[attr], x, y, z))
     z = clamp(z, 0.0, belief_map.levels - 1)
     z0 = int(math.floor(z))
     z1 = min(z0 + 1, belief_map.levels - 1)
