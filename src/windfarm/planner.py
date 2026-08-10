@@ -688,6 +688,44 @@ def plan_path_details(
         # is held by the band selector so the baseline polyline can descend cleanly.
         selected_band = float(min(float(selected_band), float(sticky_now)))
         selected_band = float(max(float(selected_band), float(sticky_now) - 0.50))
+    # Truth gate high bands: reject speculative climb when truth says clearance is cheaper
+    # (qinghai/taiwan r4 over-climb; keep mild +1 m exploration for shear).
+    if (
+        truth_field is not None
+        and selected_band is not None
+        and float(selected_band) > float(clearance) + 1.0 + 1e-9
+    ):
+        truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
+        clear_entry = straight_paths.get(clearance)
+        high_entry = straight_paths.get(selected_band)
+        clear_path = clear_entry[1] if isinstance(clear_entry, tuple) else clear_entry
+        high_path = high_entry[1] if isinstance(high_entry, tuple) else high_entry
+        if clear_path is None or len(clear_path) <= 1:
+            clear_path = _agl_guide_polyline(
+                start, goal, belief_map, mission, via_xy=None, cruise_z=clearance
+            )
+        if high_path is None or len(high_path) <= 1:
+            high_path = _agl_guide_polyline(
+                start, goal, belief_map, mission, via_xy=None, cruise_z=selected_band
+            )
+        if clear_path and high_path and len(clear_path) > 1 and len(high_path) > 1:
+            e_clear, e_high = _completed_plans_energy_j(
+                [clear_path, high_path], goal, truth_belief, mission
+            )
+            if e_clear < math.inf and (
+                e_high >= math.inf or e_high > e_clear * TRUTH_HIGH_BAND_WIN_NEED
+            ):
+                # Prefer best non-high band under current select_scores; else clearance.
+                fallback = None
+                if select_scores:
+                    candidates = [
+                        z
+                        for z in select_scores
+                        if float(z) <= float(clearance) + 1.0 + 1e-9
+                    ]
+                    if candidates:
+                        fallback = min(candidates, key=lambda z: float(select_scores[z]))
+                selected_band = float(clearance if fallback is None else fallback)
     preferred_straight_energy = (
         straight_energies.get(selected_band, straight_guide_energy)
         if selected_band is not None
@@ -861,6 +899,8 @@ def plan_path_details(
                 has_lateral_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
+                route_aspect=_route_axis_aspect(start, goal),
+                along_wind_mps=_along_track_wind_mps([start, goal], belief_map),
             )
             if not has_edge and not has_relief and not has_light_w and not prior_soft:
                 no_edge = (
@@ -1217,6 +1257,14 @@ CORRIDOR_PRIOR_SOFT_COMMIT_SLACK = 0.035
 # coastal (~2 m/s) stays eligible; Shandong-class strong-flat (~4.6 m/s) skips
 # corridors (closed-loop detour thrash ≈ −14…−20% while open-loop via looks +7%).
 CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS = 3.0
+# Axis-like OD (min(|dx|,|dy|)/max): mid-box horizontal/vertical routes (r4–r7).
+ROUTE_AXIS_ASPECT_MAX = 0.30
+# Axis + headwind: demand ~3% corridor Joules (blocks fujian_hills/r4-class weak commits).
+CORRIDOR_AXIS_HEADWIND_WIN_NEED = 0.970
+# Other axis OD: mild ~2% bar (still allows helpful shear corridors).
+CORRIDOR_AXIS_WIN_NEED = 0.980
+# Truth must show ≥3% vs clearance before belief may lock bands >clearance+1.0.
+TRUTH_HIGH_BAND_WIN_NEED = 0.970
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
@@ -1381,6 +1429,37 @@ def _mission_route_terrain_rise_m(mission: Mission) -> float:
 def _mission_has_route_terrain_relief(mission: Mission) -> bool:
     step_m = max(float(getattr(mission, "altitude_step_m", 50.0)), 1.0)
     return _mission_route_terrain_rise_m(mission) >= step_m
+
+
+def _route_axis_aspect(start, goal) -> float:
+    """min(|dx|,|dy|)/max(|dx|,|dy|); 0 = pure axis, ~1 = 45° diagonal."""
+    dx = abs(float(goal[0]) - float(start[0]))
+    dy = abs(float(goal[1]) - float(start[1]))
+    return min(dx, dy) / max(dx, dy, 1e-6)
+
+
+def _along_track_wind_mps(path, belief_map) -> float:
+    """Mean along-track wind (+tailwind) on a polyline under belief."""
+    if path is None or len(path) < 2:
+        return 0.0
+    pts = path[:-1]
+    if len(pts) > 24:
+        idx = np.linspace(0, len(pts) - 1, 24).astype(np.int32)
+        pts = [pts[int(i)] for i in idx]
+    arr = np.asarray(pts, dtype=np.float64)
+    samples = _sample_belief_states_batch(belief_map, arr[:, 0], arr[:, 1], arr[:, 2])
+    total = 0.0
+    n = 0
+    for i, pt in enumerate(pts):
+        nxt = path[min(i + 1, len(path) - 1)]
+        dx = float(nxt[0]) - float(pt[0])
+        dy = float(nxt[1]) - float(pt[1])
+        norm = math.hypot(dx, dy)
+        if norm < 1e-9:
+            continue
+        total += (float(samples["wind_u"][i]) * dx + float(samples["wind_v"][i]) * dy) / norm
+        n += 1
+    return total / max(n, 1)
 
 
 def _prior_soft_allowed_for_mission(
@@ -1839,6 +1918,8 @@ def _corridor_energy_win_need(
     has_lateral_edge: bool = False,
     has_terrain_relief: bool = False,
     has_light_vertical: bool = False,
+    route_aspect: float | None = None,
+    along_wind_mps: float | None = None,
 ) -> float:
     """Stricter Joules gate when the corridor adds XY length or ambient wind is calm."""
     base = min(float(corridor_margin), CORRIDOR_WIN_NEED)
@@ -1861,6 +1942,12 @@ def _corridor_energy_win_need(
             base = min(base, CORRIDOR_SHEAR_WIN_NEED)
         else:
             base = min(base, CORRIDOR_CALM_WIN_NEED)
+    # Axis mid-box OD: weak lateral commits often lose closed-loop (fujian r4).
+    if route_aspect is not None and float(route_aspect) <= ROUTE_AXIS_ASPECT_MAX:
+        if along_wind_mps is not None and float(along_wind_mps) < 0.15:
+            base = min(base, CORRIDOR_AXIS_HEADWIND_WIN_NEED)
+        else:
+            base = min(base, CORRIDOR_AXIS_WIN_NEED)
     if straight_path is None or len(straight_path) <= 1 or len(path) <= 1:
         return base
     s_len = _path_xy_length(straight_path)
@@ -3122,6 +3209,8 @@ def _energy_guide_paths(
                 has_lateral_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
+                route_aspect=_route_axis_aspect(start, goal),
+                along_wind_mps=_along_track_wind_mps([start, goal], belief_map),
             )
             if not has_edge and not has_relief and not has_light_w:
                 no_edge = (
