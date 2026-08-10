@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import deque
 import math
+import os
 
 import numpy as np
 
@@ -919,6 +920,24 @@ class NavigationEngine:
         state_level = _state_level(state.z, context.belief_map.levels)
         state_x = clamp(state.x, 0.0, max(context.belief_map.width - 1, 0))
         state_y = clamp(state.y, 0.0, max(context.belief_map.height - 1, 0))
+        # Eval / batch runs: keep only fields needed for energy accounting + path.
+        # Does not affect replan / move (already done before this call).
+        skip_heavy = os.environ.get("WINDFARM_SKIP_DASHBOARD", "").strip() in {
+            "1",
+            "true",
+            "True",
+            "yes",
+        }
+        if skip_heavy:
+            return {
+                "timestamp": timestamp,
+                "position": [_round_state_value(state_x), _round_state_value(state_y), _round_state_value(state.z)],
+                "battery_ratio": state.battery_ratio,
+                "remaining_battery_j": context.battery_j,
+                "is_keyframe": is_keyframe,
+                "planning_mode": context.latest_planning.get("planning_mode", "mpc_strict_return"),
+                "planned_path": context.planned_path,
+            }
         current_u = trilinear_sample(prediction["u_layers"], state_x, state_y, state.z)
         current_v = trilinear_sample(prediction["v_layers"], state_x, state_y, state.z)
         current_w = trilinear_sample(prediction["w_layers"], state_x, state_y, state.z)
@@ -942,20 +961,26 @@ class NavigationEngine:
                 "v": truth_v,
                 "w": truth_w,
                 "speed": magnitude3(truth_u, truth_v, truth_w),
-                "u_grid": truth_field["u"][state_level],
-                "v_grid": truth_field["v"][state_level],
-                "w_grid": truth_field["w"][state_level],
-                "wind_speed_grid": _wind_speed_grid(truth_field["u"][state_level], truth_field["v"][state_level], truth_field["w"][state_level]),
                 "profile": _profile_from_layers(truth_field["u"], truth_field["v"], truth_field["w"], state_x, state_y),
             }
-        snapshot = belief_snapshot(context.belief_map, state_level)
+            # Grids only feed keyframe maps — skip on delta frames.
+            if is_keyframe:
+                truth_payload["u_grid"] = truth_field["u"][state_level]
+                truth_payload["v_grid"] = truth_field["v"][state_level]
+                truth_payload["w_grid"] = truth_field["w"][state_level]
+                truth_payload["wind_speed_grid"] = _wind_speed_grid(
+                    truth_field["u"][state_level],
+                    truth_field["v"][state_level],
+                    truth_field["w"][state_level],
+                )
         physics_profile = _profile_from_layers(physics["u_layers"], physics["v_layers"], physics["w_layers"], state_x, state_y)
         prediction_profile = _profile_from_layers(prediction["u_layers"], prediction["v_layers"], prediction["w_layers"], state_x, state_y)
-        belief_profiles = _belief_layer_stacks(context.belief_map)
         return_cost_map = context.latest_planning.get("return_cost_map")
         return_budget_j = context.latest_planning.get("return_budget_j")
         maps = None
         if is_keyframe:
+            snapshot = belief_snapshot(context.belief_map, state_level)
+            belief_profiles = _belief_layer_stacks(context.belief_map)
             maps = {
                 "physics_wind_speed": _wind_speed_grid(physics["u"], physics["v"], physics["w"]),
                 "physics_wind_u": physics["u"],
@@ -995,7 +1020,7 @@ class NavigationEngine:
                 "physics_wind_u_layers": physics["u_layers"],
                 "physics_wind_v_layers": physics["v_layers"],
                 "physics_wind_w_layers": physics["w_layers"],
-                "truth_wind_speed": truth_payload["wind_speed_grid"] if truth_payload else None,
+                "truth_wind_speed": truth_payload.get("wind_speed_grid") if truth_payload else None,
                 "physics_vertical_profile": physics_profile["speed"],
                 "prediction_vertical_profile": prediction_profile["speed"],
                 "prediction_vertical_w_profile": prediction_profile["w"],
@@ -1004,7 +1029,6 @@ class NavigationEngine:
                 maps["truth_wind_u_layers"] = truth_field["u"]
                 maps["truth_wind_v_layers"] = truth_field["v"]
                 maps["truth_wind_w_layers"] = truth_field["w"]
-            if truth_payload:
                 truth_grid = truth_field_from_payload(truth_payload)
                 maps["prediction_residual_speed"] = _residual_speed_grid(prediction["u"], prediction["v"], prediction["w"], truth_field=truth_grid)
                 maps["physics_residual_speed"] = _residual_speed_grid(physics["u"], physics["v"], physics["w"], truth_field=truth_grid)
@@ -1470,6 +1494,9 @@ def _state_near_waypoint(state: DroneState, waypoint: tuple[int, int, int]) -> b
 def _sample_belief_scalar(belief_map, attr: str, x: float, y: float, z: float) -> float:
     if belief_map.levels <= 0 or belief_map.height <= 0 or belief_map.width <= 0:
         return 0.0
+    # Intentionally sample BeliefCell grid (not field_arrays): prediction writes
+    # arrays only, and live move/STF historically used the cell-side safety read.
+    # Switching to arrays changes closed-loop paths — keep cells for result parity.
     z = clamp(z, 0.0, belief_map.levels - 1)
     z0 = int(math.floor(z))
     z1 = min(z0 + 1, belief_map.levels - 1)
