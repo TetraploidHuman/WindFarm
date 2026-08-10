@@ -25,6 +25,7 @@ from .controller import (
 from .mathutils import bilinear_sample, clamp, magnitude, magnitude3, trilinear_sample
 from .planner import (
     CORRIDOR_HARD_FLOOR_MPS,
+    _agl_guide_polyline,
     _belief_map_from_truth_field,
     _cruise_z_from_guide_label,
     distill_truth_1via,
@@ -34,7 +35,11 @@ from .types import CoarseWindSample, DroneState, Mission, Observation, TerrainFi
 
 # Offline / truth-available sensing: sample on-path + ±path-normal so belief can see
 # lateral shear lobes that pre-baked observation tracks miss (Shanxi/Jilin-class).
-LATERAL_PROBE_OFFSET_M = 120.0
+# Multi-range + short lookahead: a single 120 m ring often sits inside the lobe
+# (Jilin/Shanxi open-loop 1-via is ~200–350 m). Still radius=0 / no advection.
+LATERAL_PROBE_OFFSET_M = 120.0  # primary / test alias
+LATERAL_PROBE_OFFSETS_M = (100.0, 160.0, 240.0)
+LATERAL_PROBE_LOOKAHEAD_CELLS = (0.0, 5.0)
 LATERAL_PROBE_NOISE_MPS = 0.05
 # Scenario configs often use replan_interval_steps=1; still don't paint every tick.
 LATERAL_PROBE_MIN_INTERVAL_STEPS = 2
@@ -45,13 +50,21 @@ LATERAL_PROBE_MIN_SHEAR_MPS = 0.70
 # Also require shear as a fraction of on-track ambient (blocks mild coastal noise).
 LATERAL_PROBE_MIN_SHEAR_FRAC = 0.18
 # Only fuse cells that belief still treats as uncertain (on-track is usually confident).
-LATERAL_PROBE_MIN_UNCERTAINTY = 0.55
+# Slightly below 0.55 so moving L/R rings can keep painting as confidence creeps up.
+LATERAL_PROBE_MIN_UNCERTAINTY = 0.45
 # Truth 1-via distillation: dual-agree + early sparse refresh (balanced 135523/140034).
 PRIOR_VIA_MIN_TRUTH_SAVE = 0.005
 PRIOR_VIA_MIN_BELIEF_SAVE = 0.005
 PRIOR_VIA_OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0)
 PRIOR_VIA_REFRESH_STEPS = 8
 PRIOR_VIA_MAX_STEP = 24
+# When dual-agree fails, paint sparse truth samples along the truth-best via so
+# belief gen_margin / edge checks can see the lobe (Jilin/Shanxi open-loop gap).
+# Still radius=0 / no advection; only high-uncertainty cells; capped per refresh.
+PRIOR_VIA_TEACH_MIN_TRUTH_SAVE = 0.015
+PRIOR_VIA_TEACH_MAX_CELLS = 10
+PRIOR_VIA_TEACH_STRIDE = 3
+PRIOR_VIA_TEACH_MIN_UNCERTAINTY = 0.40
 
 
 @dataclass(slots=True)
@@ -1097,8 +1110,10 @@ class NavigationEngine:
         if context.step > 1 and context.step % interval != 0:
             return None
         res_m = float(getattr(context.mission, "step_distance_m", 30.0) or 30.0)
-        offset_cells = LATERAL_PROBE_OFFSET_M / max(res_m, 1e-6)
-        if offset_cells < 0.5:
+        offsets_m = LATERAL_PROBE_OFFSETS_M or (LATERAL_PROBE_OFFSET_M,)
+        offset_cells_list = [float(o) / max(res_m, 1e-6) for o in offsets_m]
+        offset_cells_list = [c for c in offset_cells_list if c >= 0.5]
+        if not offset_cells_list:
             return None
         sx = float(context.state.x)
         sy = float(context.state.y)
@@ -1128,31 +1143,40 @@ class NavigationEngine:
         if u_layers is None or v_layers is None or w_layers is None:
             return None
         truth_w = truth_field.get("w")
-        left = (sx + nx * offset_cells, sy + ny * offset_cells)
-        right = (sx - nx * offset_cells, sy - ny * offset_cells)
         center_speed = magnitude(float(cu), float(cv))
         arrays = context.belief_map.field_arrays
         site_uv: list[tuple[str, int, int, float, float, float]] = []
         speeds: list[float] = [center_speed]
-        for tag, px, py in (("left", *left), ("right", *right)):
-            ix = int(round(clamp(px, 0.0, float(max(width - 1, 0)))))
-            iy = int(round(clamp(py, 0.0, float(max(height - 1, 0)))))
-            if ix == int(round(sx)) and iy == int(round(sy)):
-                continue
-            unc = 1.0
-            if arrays is not None and "uncertainty" in arrays:
-                unc = float(arrays["uncertainty"][z_level, iy, ix])
-            if unc < LATERAL_PROBE_MIN_UNCERTAINTY:
-                continue
-            tu = float(trilinear_sample(truth_field["u"], float(ix), float(iy), sz))
-            tv = float(trilinear_sample(truth_field["v"], float(ix), float(iy), sz))
-            tw = (
-                float(trilinear_sample(truth_w, float(ix), float(iy), sz))
-                if truth_w is not None
-                else 0.0
-            )
-            site_uv.append((tag, ix, iy, tu, tv, tw))
-            speeds.append(magnitude(tu, tv))
+        seen_cells: set[tuple[int, int]] = set()
+        ox, oy = int(round(sx)), int(round(sy))
+        seen_cells.add((ox, oy))
+        lookahads = LATERAL_PROBE_LOOKAHEAD_CELLS or (0.0,)
+        for la in lookahads:
+            cx = sx + hx * float(la)
+            cy = sy + hy * float(la)
+            for off_cells in offset_cells_list:
+                left = (cx + nx * off_cells, cy + ny * off_cells)
+                right = (cx - nx * off_cells, cy - ny * off_cells)
+                for tag, px, py in (("left", *left), ("right", *right)):
+                    ix = int(round(clamp(px, 0.0, float(max(width - 1, 0)))))
+                    iy = int(round(clamp(py, 0.0, float(max(height - 1, 0)))))
+                    if (ix, iy) in seen_cells:
+                        continue
+                    unc = 1.0
+                    if arrays is not None and "uncertainty" in arrays:
+                        unc = float(arrays["uncertainty"][z_level, iy, ix])
+                    if unc < LATERAL_PROBE_MIN_UNCERTAINTY:
+                        continue
+                    tu = float(trilinear_sample(truth_field["u"], float(ix), float(iy), sz))
+                    tv = float(trilinear_sample(truth_field["v"], float(ix), float(iy), sz))
+                    tw = (
+                        float(trilinear_sample(truth_w, float(ix), float(iy), sz))
+                        if truth_w is not None
+                        else 0.0
+                    )
+                    site_uv.append((tag, ix, iy, tu, tv, tw))
+                    speeds.append(magnitude(tu, tv))
+                    seen_cells.add((ix, iy))
         if len(site_uv) < 1 or len(speeds) < 2:
             return None
         shear = max(speeds) - min(speeds)
@@ -1161,8 +1185,6 @@ class NavigationEngine:
         if shear < LATERAL_PROBE_MIN_SHEAR_FRAC * max(center_speed, 1e-6):
             return None
         noise = LATERAL_PROBE_NOISE_MPS
-        # Snapshot on-track wind so we can assert cruise-band isolation in tests.
-        ox, oy = int(round(sx)), int(round(sy))
         payload: list[dict] = []
         for i, (tag, ix, iy, tu, tv, tw) in enumerate(site_uv):
             sign = 1.0 if (context.step + i) % 2 == 0 else -1.0
@@ -1218,9 +1240,24 @@ class NavigationEngine:
         if context.step > 1 and context.step % interval != 0:
             return
         cruise_z = self._resolved_guide_cruise_agl(context)
+        start = (context.state.x, context.state.y, context.state.z)
+        goal = context.mission.goal
+        # Teach: if belief cannot yet dual-agree, seed sparse truth along the
+        # truth-best via (clear ≥1.5% save) so subsequent edge/Joules see the lobe.
+        via_truth = distill_truth_1via(
+            start,
+            goal,
+            context.belief_map,
+            context.mission,
+            truth_field,
+            cruise_z=float(cruise_z),
+            offsets_m=PRIOR_VIA_OFFSETS_M,
+            min_truth_save=PRIOR_VIA_TEACH_MIN_TRUTH_SAVE,
+            min_belief_save=-1.0,
+        )
         via = distill_truth_1via(
-            (context.state.x, context.state.y, context.state.z),
-            context.mission.goal,
+            start,
+            goal,
             context.belief_map,
             context.mission,
             truth_field,
@@ -1229,7 +1266,95 @@ class NavigationEngine:
             min_truth_save=PRIOR_VIA_MIN_TRUTH_SAVE,
             min_belief_save=PRIOR_VIA_MIN_BELIEF_SAVE,
         )
+        if via is None and via_truth is not None:
+            self._paint_truth_via_seed(
+                context,
+                truth_field,
+                via_truth,
+                cruise_z=float(cruise_z),
+            )
+            via = distill_truth_1via(
+                start,
+                goal,
+                context.belief_map,
+                context.mission,
+                truth_field,
+                cruise_z=float(cruise_z),
+                offsets_m=PRIOR_VIA_OFFSETS_M,
+                min_truth_save=PRIOR_VIA_MIN_TRUTH_SAVE,
+                min_belief_save=PRIOR_VIA_MIN_BELIEF_SAVE,
+            )
+            # Jilin-class: teach may still leave belief short of dual-agree.
+            # Inject the truth-best via anyway — gen/commit soft-admit must still
+            # clear CORRIDOR_PRIOR_SOFT_TRUTH_NEED (and skips DEM-relief / calm).
+            if via is None:
+                via = via_truth
         context.mission.prior_via = via
+
+    def _paint_truth_via_seed(
+        self,
+        context: NavigationContext,
+        truth_field: dict,
+        via_xy: tuple[float, float],
+        *,
+        cruise_z: float,
+    ) -> int:
+        """Sparse radius=0 truth fuse along start→via→goal (no advection)."""
+        path = _agl_guide_polyline(
+            (context.state.x, context.state.y, context.state.z),
+            context.mission.goal,
+            context.belief_map,
+            context.mission,
+            via_xy=(float(via_xy[0]), float(via_xy[1])),
+            cruise_z=float(cruise_z),
+        )
+        if len(path) < 3:
+            return 0
+        arrays = context.belief_map.field_arrays
+        truth_w = truth_field.get("w")
+        painted = 0
+        stride = max(1, int(PRIOR_VIA_TEACH_STRIDE))
+        # Skip endpoints (on-track / goal); sample interior via corridor.
+        idxs = list(range(1, len(path) - 1, stride))
+        for idx in idxs:
+            if painted >= PRIOR_VIA_TEACH_MAX_CELLS:
+                break
+            x, y, z = path[idx]
+            ix = int(round(clamp(float(x), 0.0, float(max(context.belief_map.width - 1, 0)))))
+            iy = int(round(clamp(float(y), 0.0, float(max(context.belief_map.height - 1, 0)))))
+            iz = int(round(clamp(float(z), 0.0, float(max(context.belief_map.levels - 1, 0)))))
+            if arrays is not None and "uncertainty" in arrays:
+                unc = float(arrays["uncertainty"][iz, iy, ix])
+                if unc < PRIOR_VIA_TEACH_MIN_UNCERTAINTY:
+                    continue
+            tu = float(trilinear_sample(truth_field["u"], float(ix), float(iy), float(iz)))
+            tv = float(trilinear_sample(truth_field["v"], float(ix), float(iy), float(iz)))
+            tw = (
+                float(trilinear_sample(truth_w, float(ix), float(iy), float(iz)))
+                if truth_w is not None
+                else 0.0
+            )
+            obs = Observation(
+                timestamp=f"teach-{context.step}-{painted}",
+                x=ix,
+                y=iy,
+                z=iz,
+                u_obs=tu,
+                v_obs=tv,
+                w_obs=tw,
+            )
+            self.updater.update_with_observation(
+                context.belief_map,
+                obs,
+                tu,
+                tv,
+                tw,
+                context.step,
+                observation_radius=0,
+                advect=False,
+            )
+            painted += 1
+        return painted
 
     @staticmethod
     def _clamp_observation(observation: Observation, width: int, height: int) -> Observation:
