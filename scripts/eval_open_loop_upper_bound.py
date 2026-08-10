@@ -27,7 +27,7 @@ from windfarm.altitude import terrain_delta_m
 from windfarm.belief import create_belief_map
 from windfarm.config import load_task_config
 from windfarm.controller import horizontal_headwind_mps, speed_to_fly_airspeed, transition_energy_j
-from windfarm.io import read_json
+from windfarm.io import load_terrain_document, load_truth_fields, read_json
 from windfarm.mathutils import clamp, trilinear_sample
 from windfarm.planner import _agl_guide_polyline, _polyline_model_energy_j
 from windfarm.types import Mission
@@ -120,15 +120,16 @@ def _eval_scenario(name: str, runs: Path) -> dict:
     if run is None:
         return {"scenario": name, "error": "no eval run"}
     cfg = load_task_config(run / "config.json")
-    elev = read_json(run / "terrain.json")["terrain"]["elevation"]
-    truth_fields = read_json(run / "truth.json")["truth_fields"]
+    elev = load_terrain_document(run / "terrain.json")["terrain"]["elevation"]
+    truth_fields = load_truth_fields(run / "truth.json")
     field = truth_fields[min(40, len(truth_fields) - 1)]
     report = read_json(run / "mission_report.json")
     closed_j = float(report["path_model_energy_j"])
     m = cfg.mission
     kw = _mission_kw(m)
     nominal = float(m.nominal_airspeed)
-    h, w = len(elev), len(elev[0])
+    elev_arr = __import__("numpy").asarray(elev)
+    h, w = int(elev_arr.shape[0]), int(elev_arr.shape[1])
     belief = create_belief_map(w, h, cfg.model.altitude_levels)
     for attr, key in (("wind_u", "u"), ("wind_v", "v"), ("wind_w", "w")):
         arr = np.asarray(field[key], dtype=np.float64)

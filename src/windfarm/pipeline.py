@@ -10,7 +10,15 @@ import numpy as np
 
 from .config import ModelConfig, TaskConfig, detect_cpu_count, resolve_n_jobs
 from .execution import NavigationEngine, PredictSession, _goal_reached
-from .io import coarse_samples_from_dict, observations_from_dict, read_json, terrain_from_dict, training_samples_from_dict, write_json
+from .io import (
+    coarse_samples_from_dict,
+    load_terrain_document,
+    observations_from_dict,
+    read_json,
+    terrain_from_dict,
+    training_samples_from_dict,
+    write_json,
+)
 from .mathutils import hour_features, magnitude, magnitude3
 from .ml import (
     ResidualWindModel,
@@ -1082,7 +1090,7 @@ class WindFarmPipeline:
         model_config: ModelConfig | None = None,
         altitude_step_m: float | None = None,
     ) -> "WindFarmPipeline":
-        terrain = terrain_from_dict(read_json(terrain_path)["terrain"])
+        terrain = terrain_from_dict(load_terrain_document(terrain_path)["terrain"])
         pipeline = cls(
             terrain=terrain,
             model_config=model_config or ModelConfig(),

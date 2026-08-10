@@ -3626,15 +3626,15 @@ def _rank_continuous_successors(
         terrain_dz_m=terrain_dz,
     )
 
-    # Phase 3: batch residual energies + along-track wind (once for all proposals).
+    # Phase 3: residual energy-to-goal + along-track wind (batched).
+    # local_winds unused when belief_map is set — skip building per-proposal dicts.
     n_prop = len(proposals)
     current_energy_to_goal = estimate_energy_to_goal_j(
         (current.x, current.y, current.z), goal, mission, local, belief_map=belief_map
     )
     next_pts = [item["point"] for item in proposals]
-    next_winds = [{key: float(next_locals[key][i]) for key in next_locals} for i in range(n_prop)]
     next_energies = estimate_energies_to_goal_batch(
-        next_pts, goal, mission, belief_map=belief_map, local_winds=next_winds
+        next_pts, goal, mission, belief_map=belief_map, local_winds=None
     )
 
     segs = np.empty((n_prop * 3, 5), dtype=np.float64)
@@ -3673,15 +3673,25 @@ def _rank_continuous_successors(
     else:
         terrain_rises.fill(0.0)
 
+    # Unpack belief samples once (avoid per-proposal dict allocation).
+    nl_w = next_locals["wind_w"]
+    nl_unc = next_locals["uncertainty"]
+    nl_safe = next_locals["safety_penalty"]
+    nl_gain = next_locals["expected_energy_gain"]
+    nl_up = next_locals["mode_prob_uplift"]
+    nl_sink = next_locals["mode_prob_sink"]
+
     scored: list[dict] = []
     near_goal = horizontal <= 5.0
     final_approach = horizontal <= 3.5
+    alt_step = max(mission.altitude_step_m, 1e-6)
+    climb_cost = mission.climb_cost_per_level_j
     for i, item in enumerate(proposals):
         next_state = item["state"]
         point = item["point"]
         aero_energy = item["aero_energy"]
         control = item["control"]
-        next_local = next_winds[i]
+        wind_w_i = float(nl_w[i])
         terrain_rise_m = float(terrain_rises[i])
         terrain_energy = float(terrain_energies[i])
         step_energy = 0.55 * aero_energy + 0.45 * terrain_energy
@@ -3711,7 +3721,7 @@ def _rank_continuous_successors(
         if not near_goal:
             band_progress = abs(current.z - preferred_z) - abs(point[2] - preferred_z)
             wind_assist += 40.0 * band_progress - 12.0 * abs(point[2] - preferred_z)
-            free_lift = max(0.0, next_local["wind_w"] - 0.1)
+            free_lift = max(0.0, wind_w_i - 0.1)
             climb_dz = point[2] - current.z
             if abs(current.z - preferred_z) <= 0.3 and abs(point[2] - preferred_z) <= 0.35:
                 wind_assist += 18.0 - 40.0 * abs(climb_dz)
@@ -3723,9 +3733,7 @@ def _rank_continuous_successors(
                 else:
                     wind_assist -= 50.0 * climb_dz
             if terrain_rise_m > 2.0:
-                terrain_cost = (
-                    terrain_rise_m / max(mission.altitude_step_m, 1e-6)
-                ) * mission.climb_cost_per_level_j
+                terrain_cost = (terrain_rise_m / alt_step) * climb_cost
                 wind_payoff = max(0.0, 55.0 * blend_tw + 40.0 * max(0.0, blend_w))
                 if wind_payoff < 1.25 * terrain_cost:
                     wind_assist -= terrain_cost - 0.4 * wind_payoff
@@ -3744,7 +3752,7 @@ def _rank_continuous_successors(
             wind_assist -= 55.0 * max(0.0, blend_w)
             energy_progress_reward = min(energy_progress_reward, 10.0)
 
-        risk_cost = 30.0 * risk_weight * next_local["uncertainty"] + 36.0 * safety_weight * next_local["safety_penalty"]
+        risk_cost = 30.0 * risk_weight * float(nl_unc[i]) + 36.0 * safety_weight * float(nl_safe[i])
         revisit_penalty = _continuous_revisit_penalty(path_history, point) * 0.25
         speed_penalty = 8.0 * abs(next_state.airspeed - DEFAULT_ENVELOPE.best_glide_speed)
         step_cost = step_energy + risk_cost + speed_penalty + revisit_penalty
@@ -3763,9 +3771,9 @@ def _rank_continuous_successors(
 
         uplift_scale = 0.08 if final_approach else (0.45 if near_goal else 1.15)
         belief_energy_bonus = uplift_scale * (
-            40.0 * next_local["expected_energy_gain"]
-            + 55.0 * next_local["mode_prob_uplift"]
-            - 30.0 * next_local["mode_prob_sink"]
+            40.0 * float(nl_gain[i])
+            + 55.0 * float(nl_up[i])
+            - 30.0 * float(nl_sink[i])
         )
         if is_thermal:
             belief_energy_bonus *= 1.25

@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from windfarm.altitude import cruise_agl_band_grid, format_agl_band_token, sample_elevation, terrain_delta_m
 from windfarm.controller import transition_energy_j
-from windfarm.io import read_json
+from windfarm.io import load_terrain_document, load_truth_fields, read_json
 from windfarm.mathutils import trilinear_sample
 
 
@@ -159,8 +159,8 @@ def analyze_run(run_dir: Path) -> dict:
     report = json.loads((run_dir / "mission_report.json").read_text())
     config = json.loads((run_dir / "config.json").read_text())
     mission = config["mission"]
-    truth_fields = read_json(run_dir / "truth.json")["truth_fields"]
-    elevation = read_json(run_dir / "terrain.json")["terrain"]["elevation"]
+    truth_fields = load_truth_fields(run_dir / "truth.json")
+    elevation = load_terrain_document(run_dir / "terrain.json")["terrain"]["elevation"]
     path = report["executed_path"]
     start = path[0]
     goal = (report.get("route_summary") or {}).get("actual_goal") or mission["goal"]
