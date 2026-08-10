@@ -23,8 +23,35 @@ from .controller import (
     transition_energy_j,
 )
 from .mathutils import bilinear_sample, clamp, magnitude, magnitude3, trilinear_sample
-from .planner import _cruise_z_from_guide_label, plan_path_details
+from .planner import (
+    CORRIDOR_HARD_FLOOR_MPS,
+    _belief_map_from_truth_field,
+    _cruise_z_from_guide_label,
+    distill_truth_1via,
+    plan_path_details,
+)
 from .types import CoarseWindSample, DroneState, Mission, Observation, TerrainField, WindField
+
+# Offline / truth-available sensing: sample on-path + ±path-normal so belief can see
+# lateral shear lobes that pre-baked observation tracks miss (Shanxi/Jilin-class).
+LATERAL_PROBE_OFFSET_M = 120.0
+LATERAL_PROBE_NOISE_MPS = 0.05
+# Scenario configs often use replan_interval_steps=1; still don't paint every tick.
+LATERAL_PROBE_MIN_INTERVAL_STEPS = 2
+# Skip uniform-air maps (Beijing ~4 m/s flat): need a real left/right speed edge.
+# Absolute floor above CORRIDOR_SHEAR_SPEED_ADVANTAGE — mild coastal noise (Liaoning)
+# previously cost ~1% when fused with radius+advection bleed onto the ray.
+LATERAL_PROBE_MIN_SHEAR_MPS = 0.70
+# Also require shear as a fraction of on-track ambient (blocks mild coastal noise).
+LATERAL_PROBE_MIN_SHEAR_FRAC = 0.18
+# Only fuse cells that belief still treats as uncertain (on-track is usually confident).
+LATERAL_PROBE_MIN_UNCERTAINTY = 0.55
+# Truth 1-via distillation: dual-agree + early sparse refresh (balanced 135523/140034).
+PRIOR_VIA_MIN_TRUTH_SAVE = 0.005
+PRIOR_VIA_MIN_BELIEF_SAVE = 0.005
+PRIOR_VIA_OFFSETS_M = (100.0, 150.0, 200.0, 250.0, 350.0)
+PRIOR_VIA_REFRESH_STEPS = 8
+PRIOR_VIA_MAX_STEP = 24
 
 
 @dataclass(slots=True)
@@ -149,6 +176,7 @@ class NavigationContext:
     latest_planning: dict = field(default_factory=lambda: {"path": [], "path_cost": 0.0, "candidates": []})
     latest_prediction: dict | None = None
     latest_physics: dict | None = None
+    latest_truth_field: dict | None = None
     return_cost_map_cache: object | None = None
     return_cost_map_step: int = -10_000
 
@@ -252,6 +280,17 @@ class NavigationEngine:
                 "climb_rate": observation.climb_rate,
                 "acceleration": observation.acceleration,
             }
+        # Directed lateral probes: high-uncertainty L/R cells only, radius=0, no
+        # advection — keeps on-track wind (cruise-band scoring) unchanged.
+        self._apply_truth_probes(
+            context,
+            prediction,
+            truth_field,
+            timestamp=sample.timestamp,
+        )
+        # Dual-agree distill: prior_via only when truth *and* belief both save.
+        self._refresh_prior_via(context, truth_field)
+        context.latest_truth_field = truth_field
 
         self._replan(context)
         step_energy_j = self._move_if_possible(context, prediction, truth_field)
@@ -482,6 +521,7 @@ class NavigationEngine:
             corridor_energy_margin=getattr(context.mission, "corridor_energy_margin", None),
             elevation=context.terrain.elevation,
             guide_via=getattr(context.mission, "guide_via", None),
+            prior_via=getattr(context.mission, "prior_via", None),
             preferred_cruise_agl=getattr(context.mission, "preferred_cruise_agl", None),
             cruise_climb_earned=bool(getattr(context.mission, "cruise_climb_earned", False)),
         )
@@ -508,8 +548,10 @@ class NavigationEngine:
             discount_factor=self.config.planner.discount_factor,
             terminal_progress_weight=self.config.planner.terminal_progress_weight,
             return_cost_map_cache=cached,
+            truth_field=getattr(context, "latest_truth_field", None),
         )
         context.mission.guide_via = getattr(plan_mission, "guide_via", None)
+        # prior_via is owned by the live mission (refreshed in step); plan_mission is a copy.
         new_pref = getattr(plan_mission, "preferred_cruise_agl", None)
         new_earned = bool(getattr(plan_mission, "cruise_climb_earned", False))
         old_pref = getattr(context.mission, "preferred_cruise_agl", None)
@@ -1033,6 +1075,161 @@ class NavigationEngine:
             "truth_at_drone": truth_payload,
             "maps": maps,
         }
+
+    def _apply_truth_probes(
+        self,
+        context: NavigationContext,
+        prediction: dict,
+        truth_field: dict | None,
+        *,
+        timestamp: str,
+    ) -> list[dict] | None:
+        """Fuse truth at uncertain ±path-normal cells (cruise-band safe).
+
+        On-track observations stay the sole cruise-band signal: probes use
+        observation_radius=0 and skip advection so on-ray wind_* is unchanged.
+        Extra gates: ambient hard floor, lateral shear, high belief uncertainty.
+        """
+        if truth_field is None or "u" not in truth_field or "v" not in truth_field:
+            return None
+        replan_iv = max(1, int(getattr(self.config.planner, "replan_interval_steps", 2) or 2))
+        interval = max(LATERAL_PROBE_MIN_INTERVAL_STEPS, replan_iv)
+        if context.step > 1 and context.step % interval != 0:
+            return None
+        res_m = float(getattr(context.mission, "step_distance_m", 30.0) or 30.0)
+        offset_cells = LATERAL_PROBE_OFFSET_M / max(res_m, 1e-6)
+        if offset_cells < 0.5:
+            return None
+        sx = float(context.state.x)
+        sy = float(context.state.y)
+        sz = float(context.state.z)
+        cu = trilinear_sample(truth_field["u"], sx, sy, sz)
+        cv = trilinear_sample(truth_field["v"], sx, sy, sz)
+        if magnitude(float(cu), float(cv)) < CORRIDOR_HARD_FLOOR_MPS:
+            return None
+        goal = context.mission.goal
+        dx = float(goal[0]) - sx
+        dy = float(goal[1]) - sy
+        span = math.hypot(dx, dy)
+        if span > 1e-6:
+            hx, hy = dx / span, dy / span
+        else:
+            hx = math.cos(float(context.state.heading_rad))
+            hy = math.sin(float(context.state.heading_rad))
+            if abs(hx) + abs(hy) < 1e-9:
+                hx, hy = 1.0, 0.0
+        nx, ny = -hy, hx
+        width = context.belief_map.width
+        height = context.belief_map.height
+        z_level = int(round(clamp(sz, 0.0, float(max(context.belief_map.levels - 1, 0)))))
+        u_layers = prediction.get("u_layers")
+        v_layers = prediction.get("v_layers")
+        w_layers = prediction.get("w_layers")
+        if u_layers is None or v_layers is None or w_layers is None:
+            return None
+        truth_w = truth_field.get("w")
+        left = (sx + nx * offset_cells, sy + ny * offset_cells)
+        right = (sx - nx * offset_cells, sy - ny * offset_cells)
+        center_speed = magnitude(float(cu), float(cv))
+        arrays = context.belief_map.field_arrays
+        site_uv: list[tuple[str, int, int, float, float, float]] = []
+        speeds: list[float] = [center_speed]
+        for tag, px, py in (("left", *left), ("right", *right)):
+            ix = int(round(clamp(px, 0.0, float(max(width - 1, 0)))))
+            iy = int(round(clamp(py, 0.0, float(max(height - 1, 0)))))
+            if ix == int(round(sx)) and iy == int(round(sy)):
+                continue
+            unc = 1.0
+            if arrays is not None and "uncertainty" in arrays:
+                unc = float(arrays["uncertainty"][z_level, iy, ix])
+            if unc < LATERAL_PROBE_MIN_UNCERTAINTY:
+                continue
+            tu = float(trilinear_sample(truth_field["u"], float(ix), float(iy), sz))
+            tv = float(trilinear_sample(truth_field["v"], float(ix), float(iy), sz))
+            tw = (
+                float(trilinear_sample(truth_w, float(ix), float(iy), sz))
+                if truth_w is not None
+                else 0.0
+            )
+            site_uv.append((tag, ix, iy, tu, tv, tw))
+            speeds.append(magnitude(tu, tv))
+        if len(site_uv) < 1 or len(speeds) < 2:
+            return None
+        shear = max(speeds) - min(speeds)
+        if shear < LATERAL_PROBE_MIN_SHEAR_MPS:
+            return None
+        if shear < LATERAL_PROBE_MIN_SHEAR_FRAC * max(center_speed, 1e-6):
+            return None
+        noise = LATERAL_PROBE_NOISE_MPS
+        # Snapshot on-track wind so we can assert cruise-band isolation in tests.
+        ox, oy = int(round(sx)), int(round(sy))
+        payload: list[dict] = []
+        for i, (tag, ix, iy, tu, tv, tw) in enumerate(site_uv):
+            sign = 1.0 if (context.step + i) % 2 == 0 else -1.0
+            obs = Observation(
+                timestamp=timestamp,
+                x=ix,
+                y=iy,
+                z=z_level,
+                u_obs=float(tu) + sign * noise,
+                v_obs=float(tv) - sign * noise,
+                w_obs=float(tw),
+            )
+            pred_u = trilinear_sample(u_layers, float(ix), float(iy), sz)
+            pred_v = trilinear_sample(v_layers, float(ix), float(iy), sz)
+            pred_w = trilinear_sample(w_layers, float(ix), float(iy), sz)
+            self.updater.update_with_observation(
+                context.belief_map,
+                obs,
+                float(pred_u),
+                float(pred_v),
+                float(pred_w),
+                context.step,
+                observation_radius=0,
+                advect=False,
+            )
+            payload.append(
+                {
+                    "tag": tag,
+                    "position": [ix, iy, z_level],
+                    "u_obs": obs.u_obs,
+                    "v_obs": obs.v_obs,
+                    "w_obs": obs.w_obs,
+                    "shear_mps": shear,
+                    "on_track_cell": [ox, oy, z_level],
+                }
+            )
+        return payload or None
+
+    def _refresh_prior_via(self, context: NavigationContext, truth_field: dict | None) -> None:
+        """Distill a truth-optimal 1-via XY into mission.prior_via (altitude untouched)."""
+        if truth_field is None or "u" not in truth_field or "v" not in truth_field:
+            return
+        if context.step > PRIOR_VIA_MAX_STEP:
+            return
+        # Qinghai-class only: clear prior once cruise is well above clearance+1.2
+        # (strong high band). Mild +0.07 sticky (Sichuan) must keep priors.
+        clearance = float(getattr(context.mission, "clearance_agl_level", 1.0))
+        preferred = getattr(context.mission, "preferred_cruise_agl", None)
+        if preferred is not None and float(preferred) > clearance + 1.2 + 1e-9:
+            context.mission.prior_via = None
+            return
+        interval = max(PRIOR_VIA_REFRESH_STEPS, int(getattr(self.config.planner, "replan_interval_steps", 2) or 2))
+        if context.step > 1 and context.step % interval != 0:
+            return
+        cruise_z = self._resolved_guide_cruise_agl(context)
+        via = distill_truth_1via(
+            (context.state.x, context.state.y, context.state.z),
+            context.mission.goal,
+            context.belief_map,
+            context.mission,
+            truth_field,
+            cruise_z=float(cruise_z),
+            offsets_m=PRIOR_VIA_OFFSETS_M,
+            min_truth_save=PRIOR_VIA_MIN_TRUTH_SAVE,
+            min_belief_save=PRIOR_VIA_MIN_BELIEF_SAVE,
+        )
+        context.mission.prior_via = via
 
     @staticmethod
     def _clamp_observation(observation: Observation, width: int, height: int) -> Observation:

@@ -7,13 +7,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from windfarm.belief import belief_snapshot, create_belief_map
 from windfarm.config import TaskConfig, save_task_config
 from windfarm.api_server import _api_schema
 from windfarm.dashboard import build_dashboard_from_report, build_live_dashboard_html
-from windfarm.execution import NavigationEngine
+from windfarm.belief import BeliefUpdater
+from windfarm.execution import LATERAL_PROBE_OFFSET_M, NavigationContext, NavigationEngine
 from windfarm.io import coarse_samples_from_dict, observations_from_dict
 from windfarm.mission_runner import MissionRunner
 from windfarm.pipeline import WindFarmPipeline
@@ -27,7 +30,7 @@ from windfarm.planner import (
 from windfarm.controller import speed_to_fly_airspeed
 from windfarm.physics import downscale_wind
 from windfarm.simulator import EnvironmentSimulator
-from windfarm.types import Mission, TerrainField, TrainingSample
+from windfarm.types import DroneState, Mission, TerrainField, TrainingSample
 
 
 class PipelineTest(unittest.TestCase):
@@ -1146,6 +1149,208 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(first["forecast_mode"], "global_keyframe")
         self.assertEqual(second["forecast_mode"], "local_window")
+
+    def test_lateral_truth_probes_update_off_track_belief(self) -> None:
+        """Truth probes sample ±path-normal and fuse into belief off the ray."""
+        width, height, levels = 40, 24, 3
+        belief_map = create_belief_map(width, height, levels)
+        elev = [[12.0 for _ in range(width)] for _ in range(height)]
+        mission = Mission(
+            start=(5, height // 2, 1),
+            goal=(width - 5, height // 2, 1),
+            max_steps=40,
+            step_distance_m=30.0,
+            altitude_step_m=30.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            elevation=elev,
+        )
+        mid_y = height // 2
+        state = DroneState(
+            x=20.0,
+            y=float(mid_y),
+            z=1.0,
+            heading_rad=0.0,
+            battery_ratio=1.0,
+            airspeed=16.5,
+        )
+        context = NavigationContext(
+            mission=mission,
+            terrain=TerrainField(
+                elevation=elev,
+                slope=[[0.0] * width for _ in range(height)],
+                aspect=[[0.0] * width for _ in range(height)],
+                roughness=[[0.0] * width for _ in range(height)],
+            ),
+            state=state,
+            battery_j=1e6,
+            belief_map=belief_map,
+            predict_session=None,  # type: ignore[arg-type]
+            step=2,  # replan tick (default interval=2)
+        )
+        # Uniform forecast; sheared truth (north stronger). On-track ambient must
+        # clear the hard floor so probes are not skipped (Beijing-class gate).
+        flat = [[[2.0 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        zero = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        truth_u = []
+        for _z in range(levels):
+            layer = []
+            for y in range(height):
+                row = [6.0 if y > mid_y + 2 else 2.0 for _ in range(width)]
+                layer.append(row)
+            truth_u.append(layer)
+        prediction = {"u_layers": flat, "v_layers": zero, "w_layers": zero}
+        truth_field = {"u": truth_u, "v": zero, "w": zero}
+        engine = object.__new__(NavigationEngine)
+        engine.updater = BeliefUpdater(observation_radius=2)
+        engine.config = TaskConfig()
+        arrays = belief_map.field_arrays
+        assert arrays is not None
+        on_track_u_before = float(arrays["wind_u"][1, mid_y, 20])
+        payload = engine._apply_truth_probes(
+            context,
+            prediction,
+            truth_field,
+            timestamp="2026-01-01T00:00:00Z",
+        )
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        tags = {p["tag"] for p in payload}
+        self.assertIn("left", tags)
+        self.assertIn("right", tags)
+        offset_cells = LATERAL_PROBE_OFFSET_M / 30.0
+        left_y = int(round(mid_y + offset_cells))  # path east → left is +y
+        right_y = int(round(mid_y - offset_cells))
+        self.assertGreater(float(arrays["confidence"][1, left_y, 20]), 0.0)
+        self.assertGreater(float(arrays["confidence"][1, right_y, 20]), 0.0)
+        self.assertGreater(
+            float(arrays["wind_u"][1, left_y, 20]),
+            float(arrays["wind_u"][1, right_y, 20]),
+        )
+        # Cruise-band isolation: on-track cell must not move (radius=0, no advect).
+        self.assertAlmostEqual(float(arrays["wind_u"][1, mid_y, 20]), on_track_u_before, places=6)
+
+        # Hard-floor calm: no probe paint.
+        calm_u = [[[0.5 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        calm_payload = engine._apply_truth_probes(
+            context,
+            prediction,
+            {"u": calm_u, "v": zero, "w": zero},
+            timestamp="2026-01-01T00:00:00Z",
+        )
+        self.assertIsNone(calm_payload)
+
+        # Strong but uniform wind (Beijing plain): shear gate skips paint.
+        flat_strong = [[[4.0 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        uniform_payload = engine._apply_truth_probes(
+            context,
+            {"u_layers": flat_strong, "v_layers": zero, "w_layers": zero},
+            {"u": flat_strong, "v": zero, "w": zero},
+            timestamp="2026-01-01T00:00:00Z",
+        )
+        self.assertIsNone(uniform_payload)
+
+    def test_distill_truth_1via_picks_shear_lobe(self) -> None:
+        """Dual-agree distill: via only when truth *and* belief beat straight."""
+        from windfarm.planner import distill_truth_1via
+
+        width, height, levels = 40, 24, 3
+        belief_map = create_belief_map(width, height, levels)
+        elev = [[12.0 for _ in range(width)] for _ in range(height)]
+        mission = Mission(
+            start=(5, height // 2, 1),
+            goal=(width - 5, height // 2, 1),
+            max_steps=40,
+            step_distance_m=30.0,
+            altitude_step_m=30.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            elevation=elev,
+            corridor_energy_margin=1.02,
+        )
+        mid_y = height // 2
+        truth_u = []
+        for _z in range(levels):
+            layer = []
+            for y in range(height):
+                layer.append([8.0 if y > mid_y + 1 else 1.5 for _ in range(width)])
+            truth_u.append(layer)
+        zero = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        # Belief matches truth shear → dual-agree accepts.
+        belief_map.field_arrays["wind_u"][:] = np.asarray(truth_u, dtype=np.float64)
+        via = distill_truth_1via(
+            (5.0, float(mid_y), 1.0),
+            (width - 5, mid_y, 1),
+            belief_map,
+            mission,
+            {"u": truth_u, "v": zero, "w": zero},
+            cruise_z=1.0,
+            min_truth_save=0.002,
+            min_belief_save=0.002,
+        )
+        self.assertIsNotNone(via)
+        assert via is not None
+        self.assertGreater(via[1], float(mid_y))
+        # Belief still flat while truth has shear → reject (prevents Shanxi false win).
+        flat_belief = create_belief_map(width, height, levels)
+        none_via = distill_truth_1via(
+            (5.0, float(mid_y), 1.0),
+            (width - 5, mid_y, 1),
+            flat_belief,
+            mission,
+            {"u": truth_u, "v": zero, "w": zero},
+            cruise_z=1.0,
+            min_truth_save=0.002,
+            min_belief_save=0.002,
+        )
+        self.assertIsNone(none_via)
+
+    def test_corridor_truth_gate_rejects_belief_only_win(self) -> None:
+        """Truth gate blocks corridors that belief likes but truth does not."""
+        from windfarm.planner import (
+            CORRIDOR_TRUTH_WIN_NEED,
+            _belief_map_from_truth_field,
+            _corridor_truth_beats_straight,
+            _agl_guide_polyline,
+        )
+
+        width, height, levels = 40, 24, 3
+        belief_map = create_belief_map(width, height, levels)
+        elev = [[10.0 for _ in range(width)] for _ in range(height)]
+        mission = Mission(
+            start=(5, height // 2, 1),
+            goal=(width - 5, height // 2, 1),
+            max_steps=40,
+            step_distance_m=30.0,
+            altitude_step_m=30.0,
+            clearance_agl_level=1.0,
+            max_altitude_level=2,
+            elevation=elev,
+        )
+        mid_y = height // 2
+        # Belief invents a north lobe; truth is uniform.
+        for y in range(height):
+            for x in range(width):
+                belief_map.field_arrays["wind_u"][1, y, x] = 8.0 if y > mid_y else 1.0
+        truth_u = [[[2.0 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        zero = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(levels)]
+        start = (5.0, float(mid_y), 1.0)
+        goal = (width - 5, mid_y, 1)
+        straight = _agl_guide_polyline(start, goal, belief_map, mission, cruise_z=1.0)
+        via_path = _agl_guide_polyline(
+            start, goal, belief_map, mission, via_xy=(20.0, float(mid_y + 4)), cruise_z=1.0
+        )
+        truth_belief = _belief_map_from_truth_field(
+            belief_map, {"u": truth_u, "v": zero, "w": zero}
+        )
+        self.assertFalse(
+            _corridor_truth_beats_straight(
+                via_path, straight, truth_belief, mission, win_need=CORRIDOR_TRUTH_WIN_NEED
+            )
+        )
+        # No truth → gate open (online / no-oracle mode).
+        self.assertTrue(_corridor_truth_beats_straight(via_path, straight, None, mission))
+
 
 
 if __name__ == "__main__":

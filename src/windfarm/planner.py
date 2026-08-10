@@ -382,6 +382,7 @@ def plan_path_details(
     discount_factor: float = 0.93,
     terminal_progress_weight: float = 24.0,
     return_cost_map_cache: object | None = None,
+    truth_field: dict | None = None,
 ) -> dict:
     # Prefer ndarray elevation for vectorized terrain queries during this plan.
     # Mutate in place — do not replace(mission): sticky fields (preferred_cruise_agl,
@@ -434,7 +435,9 @@ def plan_path_details(
     if workers > 0:
         pool = ThreadPoolExecutor(max_workers=workers)
         if want_guides:
-            guide_future = pool.submit(_energy_guide_paths, start, goal, belief_map, mission)
+            guide_future = pool.submit(
+                _energy_guide_paths, start, goal, belief_map, mission, truth_field
+            )
         if need_return_compute:
             if workers == 1 and want_guides:
                 # Guides already submitted; compute return map on this thread after/with overlap via result order.
@@ -523,6 +526,8 @@ def plan_path_details(
     try:
         if guide_future is not None:
             guide_paths = guide_future.result()
+        elif want_guides:
+            guide_paths = _energy_guide_paths(start, goal, belief_map, mission, truth_field)
     finally:
         if pool is not None:
             pool.shutdown(wait=False)
@@ -722,6 +727,12 @@ def plan_path_details(
         if any(lbl.startswith("guide_corridor_") for lbl, _ in ranked_candidates)
         else None
     )
+    commit_truth = (
+        _belief_map_from_truth_field(belief_map, truth_field)
+        if truth_field is not None
+        and any(lbl.startswith("guide_corridor_") for lbl, _ in ranked_candidates)
+        else None
+    )
     commit_geom_by_band: dict[float, float] = {}
     for (label, path), energy in zip(ranked_candidates, ranked_energies):
         floor_e = preferred_straight_energy if preferred_straight_energy < math.inf else straight_guide_energy
@@ -877,6 +888,17 @@ def plan_path_details(
             ):
                 continue
             if mpc_completed_energy < math.inf and commit_e > mpc_completed_energy * min(float(corr_m), 1.0):
+                continue
+            # Offline truth gate: reject belief-only false wins (Shanxi-class).
+            # Distilled priors need a stricter truth bar than ordinary corridors.
+            truth_need = (
+                CORRIDOR_PRIOR_TRUTH_WIN_NEED
+                if label.startswith("guide_corridor_prior_")
+                else CORRIDOR_TRUTH_WIN_NEED
+            )
+            if not _corridor_truth_beats_straight(
+                path, pref_straight, commit_truth, mission, win_need=truth_need
+            ):
                 continue
         elif label.startswith("guide_straight_agl"):
             band = _cruise_z_from_guide_label(label, clearance, mission)
@@ -1160,6 +1182,12 @@ CORRIDOR_W_ADVANTAGE_FRAC = 0.15
 CORRIDOR_UPLIFT_ADVANTAGE_FRAC = 0.15
 # Final commit base: need ~1.0% model-energy edge vs preferred straight.
 CORRIDOR_WIN_NEED = 0.990
+# Offline truth available: corridor must also beat same-band straight under truth
+# wind (blocks belief false-positives that cost Shanxi when distill/probes unlock).
+CORRIDOR_TRUTH_WIN_NEED = 0.995
+# Distilled prior vias: demand a clearer truth edge (~1.5%) — mild 0.5% still let
+# Shanxi commit a locally-ok prior that lost on the full mission.
+CORRIDOR_PRIOR_TRUTH_WIN_NEED = 0.995
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
@@ -1220,6 +1248,117 @@ CORRIDOR_STRONG_DETOUR_MAX_M = 300.0
 def _windless_belief_map(belief_map: BeliefMap) -> BeliefMap:
     """Fresh belief with zero wind — scores DEM/geometry energy without wind flattery."""
     return create_belief_map(belief_map.width, belief_map.height, belief_map.levels)
+
+
+def _belief_map_from_truth_field(
+    belief_map: BeliefMap,
+    truth_field: dict,
+) -> BeliefMap | None:
+    """Fresh belief whose wind_* layers are a copy of truth (scoring only)."""
+    if truth_field is None or "u" not in truth_field or "v" not in truth_field:
+        return None
+    out = create_belief_map(belief_map.width, belief_map.height, belief_map.levels)
+    for attr, key in (("wind_u", "u"), ("wind_v", "v"), ("wind_w", "w")):
+        if key not in truth_field:
+            continue
+        arr = np.asarray(truth_field[key], dtype=np.float64)
+        levels = min(out.levels, int(arr.shape[0]))
+        out.field_arrays[attr][:levels] = arr[:levels]
+    return out
+
+
+def _corridor_truth_beats_straight(
+    path: list[tuple[float, float, float]],
+    straight_path: list[tuple[float, float, float]] | None,
+    truth_belief: BeliefMap | None,
+    mission: Mission,
+    *,
+    win_need: float = CORRIDOR_TRUTH_WIN_NEED,
+) -> bool:
+    """True when corridor Joules under truth ≤ straight * win_need (or no truth)."""
+    if truth_belief is None:
+        return True
+    if straight_path is None or len(straight_path) <= 1 or len(path) <= 1:
+        return True
+    straight_e = _polyline_model_energy_j(straight_path, truth_belief, mission)
+    path_e = _polyline_model_energy_j(path, truth_belief, mission)
+    if not math.isfinite(straight_e) or not math.isfinite(path_e) or straight_e <= 0.0:
+        return True
+    return path_e <= straight_e * float(win_need)
+
+
+def distill_truth_1via(
+    start: tuple[float, float, float],
+    goal: State3D | tuple[float, float, float],
+    belief_map: BeliefMap,
+    mission: Mission,
+    truth_field: dict,
+    *,
+    cruise_z: float,
+    offsets_m: tuple[float, ...] = (100.0, 150.0, 200.0, 250.0, 350.0),
+    min_truth_save: float = 0.005,
+    min_belief_save: float = 0.005,
+) -> tuple[float, float] | None:
+    """Best 1-via XY when *both* truth and live belief beat straight at cruise_z.
+
+    Dual-agree: truth-only distill previously helped Liaoning but hurt Shanxi when
+    belief falsely scored the oracle via. Altitude is never taken from the oracle.
+    """
+    if "u" not in truth_field or "v" not in truth_field:
+        return None
+    sx, sy = float(start[0]), float(start[1])
+    gx, gy = float(goal[0]), float(goal[1])
+    dx, dy = gx - sx, gy - sy
+    horiz = math.hypot(dx, dy)
+    if horiz <= 1e-6:
+        return None
+    px, py = -dy / horiz, dx / horiz
+    cell_m = max(float(mission.step_distance_m), 1e-6)
+    truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
+    if truth_belief is None:
+        return None
+    straight = _agl_guide_polyline(
+        start, goal, truth_belief, mission, via_xy=None, cruise_z=float(cruise_z)
+    )
+    if len(straight) <= 1:
+        return None
+    straight_truth_e = _polyline_model_energy_j(straight, truth_belief, mission)
+    straight_belief_e = _polyline_model_energy_j(straight, belief_map, mission)
+    if (
+        not math.isfinite(straight_truth_e)
+        or straight_truth_e <= 0.0
+        or not math.isfinite(straight_belief_e)
+        or straight_belief_e <= 0.0
+    ):
+        return None
+    best_via: tuple[float, float] | None = None
+    best_truth_e = straight_truth_e
+    for sign in (-1.0, 1.0):
+        for off_m in offsets_m:
+            offset = float(off_m) / cell_m
+            mx = clamp(sx + 0.5 * dx + sign * offset * px, 0.0, belief_map.width - 1)
+            my = clamp(sy + 0.5 * dy + sign * offset * py, 0.0, belief_map.height - 1)
+            path = _agl_guide_polyline(
+                start, goal, truth_belief, mission, via_xy=(mx, my), cruise_z=float(cruise_z)
+            )
+            if len(path) <= 1:
+                continue
+            e_t = _polyline_model_energy_j(path, truth_belief, mission)
+            if not math.isfinite(e_t) or e_t >= best_truth_e:
+                continue
+            # Dual-agree: live belief must also like this via vs the same straight.
+            e_b = _polyline_model_energy_j(path, belief_map, mission)
+            if not math.isfinite(e_b):
+                continue
+            if e_b > straight_belief_e * (1.0 - float(min_belief_save)):
+                continue
+            best_truth_e = e_t
+            best_via = (float(mx), float(my))
+    if best_via is None:
+        return None
+    if best_truth_e > straight_truth_e * (1.0 - float(min_truth_save)):
+        return None
+    return best_via
 
 
 def _corridor_via_xy(
@@ -2185,6 +2324,7 @@ def _energy_guide_paths(
     goal: State3D,
     belief_map: BeliefMap,
     mission: Mission,
+    truth_field: dict | None = None,
 ) -> list[tuple[str, list[tuple[float, float, float]]]]:
     """Multi-band straight AGL + lateral corridors, all scored later by path energy."""
     sx, sy = float(start[0]), float(start[1])
@@ -2472,6 +2612,91 @@ def _energy_guide_paths(
                     (label, path, has_edge, has_relief, False, band_speed)
                 )
 
+    # Distilled truth 1-via prior: inject as an extra candidate on each probe band.
+    # Same ambient / edge / Joules gates — no altitude override from the oracle.
+    prior = getattr(mission, "prior_via", None)
+    if prior is not None and math.isfinite(float(prior[0])) and math.isfinite(float(prior[1])):
+        pmx = clamp(float(prior[0]), 0.0, belief_map.width - 1)
+        pmy = clamp(float(prior[1]), 0.0, belief_map.height - 1)
+        for cruise_band in probe_bands:
+            cruise_band = float(cruise_band)
+            straight_probe = _agl_guide_polyline(
+                start, goal, belief_map, mission, via_xy=None, cruise_z=cruise_band
+            )
+            band_speed, _, _ = _path_wind_utilization_stats(straight_probe, belief_map)
+            band_below_hard = band_speed < CORRIDOR_HARD_FLOOR_MPS
+            require_edge = (not band_below_hard) and band_speed < CORRIDOR_MARGINAL_WIND_MPS
+            windless = _windless_belief_map(belief_map) if band_below_hard or require_edge else None
+            straight_geom_e = (
+                _polyline_model_energy_j(straight_probe, windless, mission)
+                if windless is not None and len(straight_probe) > 1
+                else None
+            )
+            via_rise = terrain_climb_along_line_m(mission.elevation, sx, sy, pmx, pmy, samples=4)
+            via_rise += terrain_climb_along_line_m(mission.elevation, pmx, pmy, gx, gy, samples=4)
+            if direct_rise > 1.0 and via_rise > direct_rise * 1.10 + 0.5 * max(
+                float(mission.altitude_step_m), 1.0
+            ):
+                continue
+            detour = (math.hypot(pmx - sx, pmy - sy) + math.hypot(gx - pmx, gy - pmy)) - horiz
+            if detour > detour_max_cells:
+                continue
+            path = _agl_guide_polyline(
+                start, goal, belief_map, mission, via_xy=(pmx, pmy), cruise_z=cruise_band
+            )
+            if len(path) <= 1:
+                continue
+            relief_m = float(direct_rise - via_rise)
+            has_relief = _corridor_has_terrain_relief(
+                path,
+                mission,
+                sx=sx,
+                sy=sy,
+                gx=gx,
+                gy=gy,
+                via_xy=(pmx, pmy),
+                relief_m=relief_m,
+                direct_rise_m=float(direct_rise),
+                straight_path=straight_probe,
+                windless_belief=windless,
+                straight_geom_e=straight_geom_e,
+            )
+            has_light_w = False
+            if band_below_hard and not has_relief and band_speed >= CORRIDOR_LIGHT_FLOOR_MPS:
+                has_light_w = _corridor_has_light_air_edge(
+                    path,
+                    belief_map,
+                    straight_probe,
+                    mission,
+                    windless_belief=windless,
+                    straight_geom_e=straight_geom_e,
+                )
+            if band_below_hard and not has_relief and not has_light_w:
+                continue
+            has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
+            if not _corridor_ambient_ok(
+                band_speed,
+                has_edge=has_edge,
+                has_terrain_relief=has_relief,
+                has_light_vertical=has_light_w,
+            ):
+                continue
+            if not _corridor_wind_usable(
+                path,
+                belief_map,
+                straight_path=straight_probe,
+                allow_shear_unlock=True,
+                allow_terrain_relief=has_relief,
+                allow_light_vertical=has_light_w,
+            ):
+                continue
+            if require_edge and not has_edge and not has_relief and not has_light_w:
+                continue
+            label = f"guide_corridor_prior_{pmx:.1f}_{pmy:.1f}_z{cruise_band:g}"
+            corridor_candidates.append(
+                (label, path, has_edge, has_relief, has_light_w, band_speed)
+            )
+
     scored: list[tuple[float, float, str, list[tuple[float, float, float]]]] = []
     for label, path, has_edge, has_relief, has_light_w, band_speed in corridor_candidates:
         raw = _polyline_model_energy_j(path, belief_map, mission)
@@ -2579,6 +2804,10 @@ def _energy_guide_paths(
             beats_fresh = (
                 best_fresh_e is None or locked_e <= float(best_fresh_e) * CORRIDOR_LOCKED_VS_FRESH_NEED
             )
+            truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
+            beats_truth = _corridor_truth_beats_straight(
+                locked_path, straight_probe, truth_belief, mission
+            )
             keep_locked = (
                 _corridor_ambient_ok(
                     s_spd,
@@ -2602,6 +2831,7 @@ def _energy_guide_paths(
                 )
                 and beats_straight
                 and beats_fresh
+                and beats_truth
             )
             if keep_locked:
                 guides.append(("guide_corridor_locked", locked_path))

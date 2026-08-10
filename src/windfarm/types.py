@@ -107,6 +107,9 @@ class Mission:
     elevation: list[list[float]] | None = None
     # Sticky lateral via (cells) selected by an energy guide; avoids corridor flip-flops.
     guide_via: tuple[float, float] | None = None
+    # Distilled 1-via prior (cells) from truth/open-loop — injected as a corridor
+    # candidate only; must still pass the same Joules / edge gates. Never sets altitude.
+    prior_via: tuple[float, float] | None = None
     # Sticky cruise AGL band from the winning energy guide (may be above clearance floor).
     preferred_cruise_agl: float | None = None
     # True once a climb above clearance was earned with clearance-relative evidence.
