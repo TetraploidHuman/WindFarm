@@ -34,6 +34,104 @@
     "goal": [
       66,
       17
+    ],
+    "routes": [
+      {
+        "id": "r0",
+        "label": "primary",
+        "start": [
+          10,
+          44
+        ],
+        "goal": [
+          66,
+          17
+        ]
+      },
+      {
+        "id": "r1",
+        "label": "primary_rev",
+        "start": [
+          66,
+          17
+        ],
+        "goal": [
+          10,
+          44
+        ]
+      },
+      {
+        "id": "r2",
+        "label": "cross",
+        "start": [
+          10,
+          17
+        ],
+        "goal": [
+          66,
+          44
+        ]
+      },
+      {
+        "id": "r3",
+        "label": "cross_rev",
+        "start": [
+          66,
+          44
+        ],
+        "goal": [
+          10,
+          17
+        ]
+      },
+      {
+        "id": "r4",
+        "label": "horizontal",
+        "start": [
+          10,
+          30
+        ],
+        "goal": [
+          66,
+          30
+        ]
+      },
+      {
+        "id": "r5",
+        "label": "horizontal_rev",
+        "start": [
+          66,
+          30
+        ],
+        "goal": [
+          10,
+          30
+        ]
+      },
+      {
+        "id": "r6",
+        "label": "vertical",
+        "start": [
+          38,
+          44
+        ],
+        "goal": [
+          38,
+          17
+        ]
+      },
+      {
+        "id": "r7",
+        "label": "vertical_rev",
+        "start": [
+          38,
+          17
+        ],
+        "goal": [
+          38,
+          44
+        ]
+      }
     ]
   },
   "built_at": "2026-08-08T13:27:58Z",

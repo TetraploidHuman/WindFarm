@@ -639,6 +639,53 @@ def mission_endpoints(
     return start, goal
 
 
+def mission_route_quartet(
+    start: tuple[int, int] | list[int],
+    goal: tuple[int, int] | list[int],
+) -> list[dict]:
+    """First four OD pairs (diagonals) of :func:`mission_route_octet`."""
+    return mission_route_octet(start, goal)[:4]
+
+
+def mission_route_octet(
+    start: tuple[int, int] | list[int],
+    goal: tuple[int, int] | list[int],
+) -> list[dict]:
+    """Eight OD pairs on the axis-aligned box spanned by the original start/goal.
+
+    r0–r3: both diagonals, both directions (same L1 length as the primary mission).
+    r4–r5: horizontal mid-edge crossing (west↔east at mid_y).
+    r6–r7: vertical mid-edge crossing (south↔north at mid_x).
+    """
+    sx, sy = int(start[0]), int(start[1])
+    gx, gy = int(goal[0]), int(goal[1])
+    c0 = (sx, sy)
+    c1 = (gx, gy)
+    c2 = (sx, gy)
+    c3 = (gx, sy)
+    mx = int(round(0.5 * (sx + gx)))
+    my = int(round(0.5 * (sy + gy)))
+    # Avoid degenerate midpoints collapsing onto a corner when start/goal share a coordinate.
+    if mx == sx or mx == gx:
+        mx = sx + (1 if gx > sx else -1)
+    if my == sy or my == gy:
+        my = sy + (1 if gy > sy else -1)
+    west = (sx, my)
+    east = (gx, my)
+    south = (mx, sy)
+    north = (mx, gy)
+    return [
+        {"id": "r0", "label": "primary", "start": list(c0), "goal": list(c1)},
+        {"id": "r1", "label": "primary_rev", "start": list(c1), "goal": list(c0)},
+        {"id": "r2", "label": "cross", "start": list(c2), "goal": list(c3)},
+        {"id": "r3", "label": "cross_rev", "start": list(c3), "goal": list(c2)},
+        {"id": "r4", "label": "horizontal", "start": list(west), "goal": list(east)},
+        {"id": "r5", "label": "horizontal_rev", "start": list(east), "goal": list(west)},
+        {"id": "r6", "label": "vertical", "start": list(south), "goal": list(north)},
+        {"id": "r7", "label": "vertical_rev", "start": list(north), "goal": list(south)},
+    ]
+
+
 def clamp_int(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 

@@ -74,6 +74,104 @@
     "climb_cost_per_level_j": 135.0,
     "clearance_agl_level": 1.0,
     "cruise_band_step": 0.03333333333333333,
-    "corridor_energy_margin": 1.02
+    "corridor_energy_margin": 1.02,
+    "routes": [
+      {
+        "id": "r0",
+        "label": "primary",
+        "start": [
+          12,
+          42
+        ],
+        "goal": [
+          66,
+          18
+        ]
+      },
+      {
+        "id": "r1",
+        "label": "primary_rev",
+        "start": [
+          66,
+          18
+        ],
+        "goal": [
+          12,
+          42
+        ]
+      },
+      {
+        "id": "r2",
+        "label": "cross",
+        "start": [
+          12,
+          18
+        ],
+        "goal": [
+          66,
+          42
+        ]
+      },
+      {
+        "id": "r3",
+        "label": "cross_rev",
+        "start": [
+          66,
+          42
+        ],
+        "goal": [
+          12,
+          18
+        ]
+      },
+      {
+        "id": "r4",
+        "label": "horizontal",
+        "start": [
+          12,
+          30
+        ],
+        "goal": [
+          66,
+          30
+        ]
+      },
+      {
+        "id": "r5",
+        "label": "horizontal_rev",
+        "start": [
+          66,
+          30
+        ],
+        "goal": [
+          12,
+          30
+        ]
+      },
+      {
+        "id": "r6",
+        "label": "vertical",
+        "start": [
+          39,
+          42
+        ],
+        "goal": [
+          39,
+          18
+        ]
+      },
+      {
+        "id": "r7",
+        "label": "vertical_rev",
+        "start": [
+          39,
+          18
+        ],
+        "goal": [
+          39,
+          42
+        ]
+      }
+    ]
   }
 }

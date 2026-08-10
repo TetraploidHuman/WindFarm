@@ -159,6 +159,9 @@ def analyze_run(run_dir: Path) -> dict:
     report = json.loads((run_dir / "mission_report.json").read_text())
     config = json.loads((run_dir / "config.json").read_text())
     mission = config["mission"]
+    active_route = mission.get("active_route") or {}
+    route_id = active_route.get("id") or "r0"
+    route_index = active_route.get("index", 0)
     truth_fields = load_truth_fields(run_dir / "truth.json")
     elevation = load_terrain_document(run_dir / "terrain.json")["terrain"]["elevation"]
     path = report["executed_path"]
@@ -230,10 +233,20 @@ def analyze_run(run_dir: Path) -> dict:
     meta_path = run_dir / "scenario_meta.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
+    map_name = meta.get("name") or run_dir.name.split("-r")[0].replace("eval-", "").rsplit("-", 2)[0]
+    # Prefer explicit map name from meta; fall back carefully.
+    if meta.get("name"):
+        map_name = meta["name"]
 
     return {
         "run": run_dir.name,
-        "scenario": meta.get("name") or run_dir.name,
+        "scenario": f"{map_name}/{route_id}",
+        "map": map_name,
+        "route_id": route_id,
+        "route_index": int(route_index) if route_index is not None else 0,
+        "route_label": active_route.get("label"),
+        "start": list(active_route.get("start") or mission.get("start") or start[:2]),
+        "goal": list(active_route.get("goal") or mission.get("goal") or goal[:2]),
         "description": meta.get("description"),
         "goal_reached": bool(report["goal_reached"]),
         "steps": int(report["steps_executed"]),
@@ -273,10 +286,27 @@ def analyze_run(run_dir: Path) -> dict:
     }
 
 
-def run_scenario(name: str, runs_dir: Path, *, n_jobs: int | None = None) -> Path:
+def _scenario_routes(name: str) -> list[dict]:
+    cfg = json.loads((ROOT / "scenarios" / name / "config.json").read_text())
+    mission = cfg.get("mission", {})
+    routes = mission.get("routes")
+    if routes:
+        return list(routes)
+    from windfarm.data_ingest import mission_route_octet
+
+    return mission_route_octet(mission["start"], mission["goal"])
+
+
+def run_scenario(
+    name: str,
+    runs_dir: Path,
+    *,
+    route_index: int = 0,
+    n_jobs: int | None = None,
+) -> Path:
     stamp = datetime.now().strftime("%H%M%S")
     # Unique across parallel workers (same-second collisions otherwise).
-    run_name = f"eval-{name}-{stamp}-{os.getpid()}"
+    run_name = f"eval-{name}-r{route_index}-{stamp}-{os.getpid()}"
     cmd = [
         str(ROOT / ".venv-linux" / "bin" / "python"),
         "-m",
@@ -290,6 +320,8 @@ def run_scenario(name: str, runs_dir: Path, *, n_jobs: int | None = None) -> Pat
         run_name,
         "--scenario",
         name,
+        "--route-index",
+        str(int(route_index)),
     ]
     env = dict(os.environ)
     env.setdefault(
@@ -306,7 +338,7 @@ def run_scenario(name: str, runs_dir: Path, *, n_jobs: int | None = None) -> Pat
         env["NUMEXPR_NUM_THREADS"] = jobs
     # Eval does not need 70MB+ HTML dashboards.
     env.setdefault("WINDFARM_SKIP_DASHBOARD", "1")
-    print(f"\n=== running {name} → {run_name} ===", flush=True)
+    print(f"\n=== running {name} route={route_index} → {run_name} ===", flush=True)
     subprocess.run(cmd, cwd=str(ROOT), env=env, check=True)
     return runs_dir / run_name
 
@@ -343,9 +375,11 @@ def main() -> None:
             raise SystemExit("no scenarios with terrain.json found under scenarios/")
         # Optional filter: python scripts/eval_multi_scenario_energy.py --only a b c
         # Optional parallelism: --workers N  (default caps at 4; 18-way OOMs ~32GB hosts)
+        # --primary-only: only route r0 (legacy single OD). Default: all mission.routes.
         argv = sys.argv[1:]
         max_workers_arg: int | None = None
         only_names: list[str] | None = None
+        primary_only = False
         i = 0
         while i < len(argv):
             if argv[i] == "--only":
@@ -364,36 +398,50 @@ def main() -> None:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 i += 2
                 continue
+            if argv[i] == "--primary-only":
+                primary_only = True
+                i += 1
+                continue
             i += 1
         if only_names is not None:
             wanted = set(only_names)
             names = [n for n in names if n in wanted]
             if not names:
                 raise SystemExit("no matching scenarios for --only")
+        jobs: list[tuple[str, int]] = []
+        for name in names:
+            route_count = 1 if primary_only else len(_scenario_routes(name))
+            for route_index in range(route_count):
+                jobs.append((name, route_index))
         # 8 curated maps fit in ~32GB at full parallelism; only cap when many more exist.
         default_cap = min(8, max(1, os.cpu_count() or 4))
-        max_workers = min(len(names), max_workers_arg or default_cap)
+        max_workers = min(len(jobs), max_workers_arg or default_cap)
         # Split cores across concurrent scenario processes to avoid XGB/OpenMP thrash.
         per_proc_jobs = max(1, (os.cpu_count() or 4) // max(max_workers, 1))
         print(
-            f"parallel scenarios: {len(names)} workers={max_workers} "
-            f"WINDFARM_N_JOBS={per_proc_jobs} names={names}",
+            f"parallel jobs: {len(jobs)} (maps={len(names)} routes_per_map="
+            f"{'1' if primary_only else 'all'}) workers={max_workers} "
+            f"WINDFARM_N_JOBS={per_proc_jobs}",
             flush=True,
         )
         run_dirs: dict[str, Path] = {}
         # Thread pool is enough: each scenario already launches its own process.
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
-                pool.submit(run_scenario, name, runs_dir, n_jobs=per_proc_jobs): name for name in names
+                pool.submit(
+                    run_scenario, name, runs_dir, route_index=route_index, n_jobs=per_proc_jobs
+                ): (name, route_index)
+                for name, route_index in jobs
             }
             for fut in as_completed(futures):
-                name = futures[fut]
+                name, route_index = futures[fut]
                 run_dir = fut.result()
-                run_dirs[name] = run_dir
+                key = f"{name}/r{route_index}"
+                run_dirs[key] = run_dir
                 row = analyze_run(run_dir)
                 results.append(row)
                 print(
-                    f"  [{name}] reached={row['goal_reached']} model={row['path_model_kJ']:.2f} kJ "
+                    f"  [{row['scenario']}] reached={row['goal_reached']} model={row['path_model_kJ']:.2f} kJ "
                     f"agl={row['baseline_nominal_kJ']:.2f}({row['baseline_nominal_band']}) "
                     f"best={row['baseline_best_kJ']:.2f}({row['baseline_best_band']}) "
                     f"save_vs_agl={row['savings_vs_nominal_pct']:+.1f}% "
@@ -403,9 +451,14 @@ def main() -> None:
                     f"terrain↑={row['path_terrain_climb_m']:.0f}m",
                     flush=True,
                 )
-        # Stable scenario order in summary.
-        order = {name: i for i, name in enumerate(list(SCENARIOS) + names)}
-        results.sort(key=lambda r: order.get(r["scenario"], 999))
+        # Stable order: map order × route index.
+        order = {f"{name}/r{ri}": i for i, (name, ri) in enumerate(jobs)}
+        results.sort(
+            key=lambda r: order.get(
+                f"{r.get('map')}/{r.get('route_id')}",
+                order.get(r["scenario"], 999),
+            )
+        )
 
     summary = {
         "built_at": datetime.now().isoformat(timespec="seconds"),
@@ -434,8 +487,8 @@ def main() -> None:
 
     if results:
         summary["aggregate"] = _aggregate(results)
-        core_rows = [r for r in results if r["scenario"] in CORE_SCENARIOS]
-        hold_rows = [r for r in results if r["scenario"] in HOLDOUT_SCENARIOS]
+        core_rows = [r for r in results if r.get("map", r["scenario"].split("/")[0]) in CORE_SCENARIOS]
+        hold_rows = [r for r in results if r.get("map", r["scenario"].split("/")[0]) in HOLDOUT_SCENARIOS]
         if core_rows:
             summary["aggregate_core"] = _aggregate(core_rows)
         if hold_rows:
@@ -445,12 +498,12 @@ def main() -> None:
     out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     lines = [
-        "scenario           reached  model_kJ  agl_kJ  best_kJ  save_agl%  save_best%  bat_diag%  zmax  terr↑m",
-        "-" * 110,
+        "scenario                reached  model_kJ  agl_kJ  best_kJ  save_agl%  save_best%  bat_diag%  zmax  terr↑m",
+        "-" * 118,
     ]
     for r in results:
         lines.append(
-            f"{r['scenario']:18s} {str(r['goal_reached']):7s} {r['path_model_kJ']:8.2f} "
+            f"{r['scenario']:24s} {str(r['goal_reached']):7s} {r['path_model_kJ']:8.2f} "
             f"{r['baseline_nominal_kJ']:7.2f} {r['baseline_best_kJ']:7.2f} "
             f"{r['savings_vs_nominal_pct']:+9.1f} {r['savings_vs_best_pct']:+10.1f} "
             f"{r['savings_battery_vs_nominal_pct']:+9.1f} "

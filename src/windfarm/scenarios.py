@@ -13,11 +13,13 @@ from .data_ingest import (
     ensure_srtm_tile,
     fetch_open_meteo_hourly,
     mission_endpoints,
+    mission_route_octet,
     resample_coarse_wind,
     terrain_from_srtm,
     write_coarse_wind_json,
     write_terrain_json,
 )
+from .io import read_json, write_json
 from .simulator import EnvironmentSimulator
 
 # Legacy 48×36 @ 50 m geographic span — keep extent, densify cells.
@@ -168,6 +170,7 @@ def build_scenario_dataset(
     belief_kwargs["observation_radius"] = obs_radius
     config.belief = BeliefConfig(**belief_kwargs)
 
+    routes = mission_route_octet(start, goal)
     config.mission = MissionConfig(
         start=start,
         goal=goal,
@@ -191,6 +194,10 @@ def build_scenario_dataset(
         corridor_energy_margin=getattr(config.mission, "corridor_energy_margin", 1.02),
     )
     save_task_config(output_dir / "config.json", config)
+    # MissionConfig does not carry routes; stitch them into the on-disk JSON.
+    cfg_payload = read_json(output_dir / "config.json")
+    cfg_payload["mission"]["routes"] = routes
+    write_json(output_dir / "config.json", cfg_payload)
 
     elev = terrain.elevation
     flat = [v for row in elev for v in row]
@@ -211,7 +218,7 @@ def build_scenario_dataset(
             "speed_mean": sum((s["u_km"] ** 2 + s["v_km"] ** 2) ** 0.5 for s in coarse) / len(coarse),
             "has_100m_profile": all("u100_km" in s for s in coarse),
         },
-        "mission": {"start": list(start), "goal": list(goal)},
+        "mission": {"start": list(start), "goal": list(goal), "routes": routes},
         "built_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "source": "SRTM1 native crop + Open-Meteo 10m/100m",
     }

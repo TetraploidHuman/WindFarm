@@ -135,6 +135,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--scenario",
         help="Use a prebuilt real scenario directory under scenarios/<name> (terrain+Open-Meteo wind)",
     )
+    repo_cmd.add_argument(
+        "--route-index",
+        type=int,
+        default=0,
+        help="Select mission.routes[i] start/goal when present (default 0 = primary)",
+    )
+    repo_cmd.add_argument("--start", nargs="+", type=int, help="Optional start override (2 or 3 ints)")
+    repo_cmd.add_argument("--goal", nargs="+", type=int, help="Optional goal override (2 or 3 ints)")
 
     scenarios_cmd = sub.add_parser("build-scenarios", help="Download SRTM DEM + Open-Meteo wind and build scenario datasets")
     scenarios_cmd.add_argument("--output-dir", default="scenarios")
@@ -268,6 +276,7 @@ def main() -> None:
         repository = ModelRepository(args.runs_dir)
         artifacts = repository.create_run(args.run_name)
         scenario_dir = None
+        config_src = Path(args.config)
         if getattr(args, "scenario", None):
             scenario_dir = Path(args.scenario)
             if not scenario_dir.is_dir():
@@ -279,7 +288,25 @@ def main() -> None:
             scenario_cfg = scenario_dir / "config.json"
             if scenario_cfg.exists():
                 config = load_task_config(scenario_cfg)
-        save_task_config(artifacts.run_dir / "config.json", config)
+                config_src = scenario_cfg
+        # Preserve mission.routes on the run copy (MissionConfig does not carry them).
+        shutil.copy2(config_src, artifacts.run_dir / "config.json")
+        mission_start, mission_goal, route_meta = _resolve_demo_route(
+            artifacts.run_dir / "config.json",
+            parser,
+            route_index=getattr(args, "route_index", 0),
+            start_args=getattr(args, "start", None),
+            goal_args=getattr(args, "goal", None),
+        )
+        # Keep TaskConfig mission endpoints aligned with the selected route.
+        config.mission.start = mission_start[:2]  # type: ignore[assignment]
+        config.mission.goal = mission_goal[:2]  # type: ignore[assignment]
+        if route_meta:
+            run_cfg = read_json(artifacts.run_dir / "config.json")
+            run_cfg["mission"]["start"] = list(mission_start[:2])
+            run_cfg["mission"]["goal"] = list(mission_goal[:2])
+            run_cfg["mission"]["active_route"] = route_meta
+            write_json(artifacts.run_dir / "config.json", run_cfg)
         if scenario_dir is not None:
             # training.json is only needed when (re)fitting the residual model.
             force_train = _env_flag("WINDFARM_FORCE_TRAIN")
@@ -367,6 +394,8 @@ def main() -> None:
             artifacts.run_dir / "observations.json",
             artifacts.mission_path,
             artifacts.run_dir / "truth.json",
+            start=mission_start,
+            goal=mission_goal,
         )
         skip_dash = _env_flag("WINDFARM_SKIP_DASHBOARD")
         if not skip_dash:
@@ -397,6 +426,46 @@ def _parse_xyz(values: list[int], parser: argparse.ArgumentParser, flag: str) ->
     if len(values) not in {2, 3}:
         parser.error(f"{flag} expects 2 or 3 integers")
     return tuple(values)  # type: ignore[return-value]
+
+
+def _resolve_demo_route(
+    config_path: Path,
+    parser: argparse.ArgumentParser,
+    *,
+    route_index: int,
+    start_args: list[int] | None,
+    goal_args: list[int] | None,
+) -> tuple[tuple[int, int] | tuple[int, int, int], tuple[int, int] | tuple[int, int, int], dict | None]:
+    payload = read_json(config_path)
+    mission = payload.get("mission", {})
+    route_meta: dict | None = None
+    if start_args is not None or goal_args is not None:
+        if start_args is None or goal_args is None:
+            parser.error("--start and --goal must be provided together")
+        start = _parse_xyz(start_args, parser, "--start")
+        goal = _parse_xyz(goal_args, parser, "--goal")
+        route_meta = {"id": "cli", "label": "cli_override", "start": list(start), "goal": list(goal)}
+        return start, goal, route_meta
+
+    routes = mission.get("routes") or []
+    if routes:
+        if route_index < 0 or route_index >= len(routes):
+            parser.error(f"--route-index {route_index} out of range for {len(routes)} routes in {config_path}")
+        route = routes[route_index]
+        start = tuple(int(v) for v in route["start"])
+        goal = tuple(int(v) for v in route["goal"])
+        route_meta = {
+            "index": route_index,
+            "id": route.get("id", f"r{route_index}"),
+            "label": route.get("label", f"route_{route_index}"),
+            "start": list(start),
+            "goal": list(goal),
+        }
+        return start, goal, route_meta
+
+    start = tuple(int(v) for v in mission["start"])
+    goal = tuple(int(v) for v in mission["goal"])
+    return start, goal, None
 
 
 if __name__ == "__main__":

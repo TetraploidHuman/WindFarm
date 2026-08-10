@@ -159,14 +159,26 @@ class PredictSession:
             self.cell_history = {}
             return
         height, width = u_arr.shape
-        next_history = {}
+        z_i = int(z)
+        next_history: dict = {}
+        windows = self.cell_history_window
+        wsize = self.window_size
+        # Inline observe_cell: same deque/history semantics, less call overhead on full grids.
         for y in range(height):
+            u_row = u_arr[y]
+            v_row = v_arr[y]
+            w_row = w_arr[y]
             for x in range(width):
-                uu = float(u_arr[y, x])
-                vv = float(v_arr[y, x])
-                ww = float(w_arr[y, x])
-                self.observe_cell(x, y, z, uu, vv, ww)
-                next_history[(x, y, z)] = {"u_local": uu, "v_local": vv, "w_local": ww}
+                uu = float(u_row[x])
+                vv = float(v_row[x])
+                ww = float(w_row[x])
+                key = (x, y, z_i)
+                window = windows.get(key)
+                if window is None:
+                    window = deque(maxlen=wsize)
+                    windows[key] = window
+                window.append((uu, vv, ww))
+                next_history[key] = {"u_local": uu, "v_local": vv, "w_local": ww}
         self.cell_history = next_history
 
     def observe_cell(self, x: int, y: int, z: int, u_local: float, v_local: float, w_local: float) -> None:
@@ -174,8 +186,8 @@ class PredictSession:
         window = self.cell_history_window.get(key)
         if window is None:
             window = deque(maxlen=self.window_size)
+            self.cell_history_window[key] = window
         window.append((u_local, v_local, w_local))
-        self.cell_history_window[key] = window
         self.cell_history[key] = {"u_local": u_local, "v_local": v_local, "w_local": w_local}
 
 
@@ -824,26 +836,42 @@ class NavigationEngine:
         observation: Observation | None,
         is_keyframe: bool,
     ) -> tuple[dict, dict]:
-        if is_keyframe or context.latest_prediction is None or context.latest_physics is None:
+        # Physics grids are only consumed by the full dashboard frame path.
+        skip_physics = os.environ.get("WINDFARM_SKIP_DASHBOARD", "").strip() in {
+            "1",
+            "true",
+            "True",
+            "yes",
+        }
+        need_full = (
+            is_keyframe
+            or context.latest_prediction is None
+            or (not skip_physics and context.latest_physics is None)
+        )
+        level = _state_level(context.state.z, context.belief_map.levels)
+        if need_full:
             prediction = self.pipeline.predict_grid(
                 sample.timestamp,
                 sample.u_km,
                 sample.v_km,
                 sample.w_km,
                 context.predict_session,
-                altitude_level=_state_level(context.state.z, context.belief_map.levels),
+                altitude_level=level,
                 u_100=sample.u100_km,
                 v_100=sample.v100_km,
             )
-            physics = self.pipeline.physics_grid(
-                sample.timestamp,
-                sample.u_km,
-                sample.v_km,
-                sample.w_km,
-                altitude_level=_state_level(context.state.z, context.belief_map.levels),
-                u_100=sample.u100_km,
-                v_100=sample.v100_km,
-            )
+            if skip_physics:
+                physics = context.latest_physics if context.latest_physics is not None else {}
+            else:
+                physics = self.pipeline.physics_grid(
+                    sample.timestamp,
+                    sample.u_km,
+                    sample.v_km,
+                    sample.w_km,
+                    altitude_level=level,
+                    u_100=sample.u100_km,
+                    v_100=sample.v100_km,
+                )
             context.latest_prediction = prediction
             context.latest_physics = physics
             return prediction, physics
@@ -859,25 +887,28 @@ class NavigationEngine:
             y1,
             sample.w_km,
             context.predict_session,
-            altitude_level=_state_level(context.state.z, context.belief_map.levels),
-            u_100=sample.u100_km,
-            v_100=sample.v100_km,
-        )
-        physics_window = self.pipeline.physics_window(
-            sample.timestamp,
-            sample.u_km,
-            sample.v_km,
-            x0,
-            y0,
-            x1,
-            y1,
-            sample.w_km,
-            altitude_level=_state_level(context.state.z, context.belief_map.levels),
+            altitude_level=level,
             u_100=sample.u100_km,
             v_100=sample.v100_km,
         )
         prediction = _merge_window_into_grid(context.latest_prediction, prediction_window)
-        physics = _merge_window_into_grid(context.latest_physics, physics_window)
+        if skip_physics:
+            physics = context.latest_physics if context.latest_physics is not None else {}
+        else:
+            physics_window = self.pipeline.physics_window(
+                sample.timestamp,
+                sample.u_km,
+                sample.v_km,
+                x0,
+                y0,
+                x1,
+                y1,
+                sample.w_km,
+                altitude_level=level,
+                u_100=sample.u100_km,
+                v_100=sample.v100_km,
+            )
+            physics = _merge_window_into_grid(context.latest_physics, physics_window)
         context.latest_prediction = prediction
         context.latest_physics = physics
         return prediction, physics
