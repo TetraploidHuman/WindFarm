@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import heapq
+import json
 import math
 import os
 
@@ -1107,7 +1108,13 @@ def plan_path_details(
             # the lock quickly and altitude strategies stay free.
             via = _parse_corridor_prior_via(best_label)
             if via is not None and not _along_allows_prior_sticky(
-                mission, goal, belief_map, truth_field, cruise_z=float(clearance)
+                mission,
+                goal,
+                belief_map,
+                truth_field,
+                cruise_z=float(clearance),
+                via=via,
+                remain_horiz=horizontal_to_goal,
             ):
                 via = None
             if via is None:
@@ -1134,7 +1141,13 @@ def plan_path_details(
                 and not _cruise_releases_lateral_via(mission, clearance, cruise_ref)
                 and _via_is_midroute_lock(mission, locked)
                 and _along_allows_prior_sticky(
-                    mission, goal, belief_map, truth_field, cruise_z=float(clearance)
+                    mission,
+                    goal,
+                    belief_map,
+                    truth_field,
+                    cruise_z=float(clearance),
+                    via=locked,
+                    remain_horiz=horizontal_to_goal,
                 )
             ):
                 keep_via = True
@@ -1166,7 +1179,13 @@ def plan_path_details(
                 and not _cruise_releases_lateral_via(mission, clearance, selected_band)
                 and _via_is_midroute_lock(mission, locked)
                 and _along_allows_prior_sticky(
-                    mission, goal, belief_map, truth_field, cruise_z=float(clearance)
+                    mission,
+                    goal,
+                    belief_map,
+                    truth_field,
+                    cruise_z=float(clearance),
+                    via=locked,
+                    remain_horiz=horizontal_to_goal,
                 )
             ):
                 keep_via = True
@@ -1400,6 +1419,10 @@ CORRIDOR_AXIS_HEADWIND_SKIP_MPS = -0.50
 # Strong along-track wind: open-loop prior can look great, but closed-loop midroute
 # locks fight evolving shear (shanxi r2). Sticky only in the mild band above headwind skip.
 PRIOR_STICKY_ALONG_MAX_MPS = 1.00
+# Optional logistic sticky score (WINDFARM_STICKY_SCORE_JSON). When unset/mode=legacy,
+# keep the hard along band above.
+_STICKY_SCORE_CACHE: dict | None = None
+_STICKY_SCORE_PATH_CACHE: str | None = None
 # Other axis OD: mild ~2% bar (still allows helpful shear corridors).
 CORRIDOR_AXIS_WIN_NEED = 0.980
 # Truth must show ≥3% vs clearance before belief may lock bands >clearance+1.0.
@@ -1580,6 +1603,98 @@ def _cruise_releases_lateral_via(
     return z is not None and float(z) > float(clearance) + 0.05 + 1e-9
 
 
+def _load_sticky_score_config() -> dict | None:
+    """Load optional logistic sticky weights from WINDFARM_STICKY_SCORE_JSON."""
+    global _STICKY_SCORE_CACHE, _STICKY_SCORE_PATH_CACHE
+    path = os.environ.get("WINDFARM_STICKY_SCORE_JSON", "").strip()
+    if not path:
+        _STICKY_SCORE_CACHE = None
+        _STICKY_SCORE_PATH_CACHE = None
+        return None
+    if _STICKY_SCORE_PATH_CACHE == path and _STICKY_SCORE_CACHE is not None:
+        return _STICKY_SCORE_CACHE
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _STICKY_SCORE_CACHE = None
+        _STICKY_SCORE_PATH_CACHE = path
+        return None
+    _STICKY_SCORE_CACHE = cfg if isinstance(cfg, dict) else None
+    _STICKY_SCORE_PATH_CACHE = path
+    return _STICKY_SCORE_CACHE
+
+
+def _od_cross_wind_mps(start, goal, belief_map, truth_field=None, cruise_z: float = 1.0) -> float:
+    """Mean cross-track wind on the full OD (positive = left of track)."""
+    sx, sy = float(start[0]), float(start[1])
+    gx, gy = float(goal[0]), float(goal[1])
+    dx, dy = gx - sx, gy - sy
+    span = math.hypot(dx, dy)
+    if span < 1e-9:
+        return 0.0
+    nx, ny = -dy / span, dx / span
+    if truth_field is not None and "u" in truth_field and "v" in truth_field:
+        n = max(8, min(24, int(span) + 1))
+        total = 0.0
+        for i in range(n):
+            t = i / max(n - 1, 1)
+            x, y = sx + dx * t, sy + dy * t
+            u = float(trilinear_sample(truth_field["u"], x, y, cruise_z))
+            v = float(trilinear_sample(truth_field["v"], x, y, cruise_z))
+            total += u * nx + v * ny
+        return total / n
+    a = (sx, sy, float(cruise_z))
+    b = (gx, gy, float(cruise_z))
+    # Reconstruct cross from belief samples on the OD segment.
+    path = [a, b]
+    arr = np.asarray(path, dtype=np.float64)
+    samples = _sample_belief_states_batch(belief_map, arr[:, 0], arr[:, 1], arr[:, 2])
+    total = 0.0
+    for i in range(len(path)):
+        total += float(samples["wind_u"][i]) * nx + float(samples["wind_v"][i]) * ny
+    return total / max(len(path), 1)
+
+
+def _full_od_via_truth_margin(
+    mission: Mission,
+    via: tuple[float, float] | tuple[float, float, float],
+    goal,
+    belief_map: BeliefMap,
+    truth_field: dict | None,
+    *,
+    cruise_z: float,
+) -> float | None:
+    """Return 1 - E_via/E_straight under truth, or None if unavailable."""
+    if truth_field is None or "u" not in truth_field:
+        return None
+    od = getattr(mission, "home", None) or getattr(mission, "start", None)
+    if od is None:
+        return None
+    origin = (float(od[0]), float(od[1]), float(cruise_z))
+    locked_path = _agl_guide_polyline(
+        origin,
+        goal,
+        belief_map,
+        mission,
+        via_xy=(float(via[0]), float(via[1])),
+        cruise_z=float(cruise_z),
+    )
+    straight_path = _agl_guide_polyline(
+        origin, goal, belief_map, mission, via_xy=None, cruise_z=float(cruise_z)
+    )
+    if len(locked_path) <= 1 or len(straight_path) <= 1:
+        return None
+    truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
+    if truth_belief is None:
+        return None
+    straight_e = _polyline_model_energy_j(straight_path, truth_belief, mission)
+    path_e = _polyline_model_energy_j(locked_path, truth_belief, mission)
+    if not math.isfinite(straight_e) or not math.isfinite(path_e) or straight_e <= 0.0:
+        return None
+    return 1.0 - float(path_e) / float(straight_e)
+
+
 def _along_allows_prior_sticky(
     mission: Mission,
     goal,
@@ -1587,12 +1702,13 @@ def _along_allows_prior_sticky(
     truth_field: dict | None,
     *,
     cruise_z: float,
+    via: tuple[float, float] | tuple[float, float, float] | None = None,
+    remain_horiz: float | None = None,
 ) -> bool:
-    """Sticky only in mild along-track wind.
+    """Whether midroute prior sticky is allowed.
 
-    Clear headwind ODs often win by dumping prior and climbing (taiwan r0).
-    Strong along-track wind often has a tempting open-loop prior that regresses
-    closed-loop once locked (shanxi r2).
+    Legacy mode (default): hard mild-along band.
+    Logistic mode (WINDFARM_STICKY_SCORE_JSON with mode=logistic): continuous score.
     """
     od = getattr(mission, "home", None) or getattr(mission, "start", None)
     if od is None:
@@ -1600,7 +1716,40 @@ def _along_allows_prior_sticky(
     along = _od_along_wind_mps(
         od, goal, belief_map, truth_field=truth_field, cruise_z=float(cruise_z)
     )
-    return float(CORRIDOR_AXIS_HEADWIND_SKIP_MPS) < float(along) < float(PRIOR_STICKY_ALONG_MAX_MPS)
+    cfg = _load_sticky_score_config()
+    mode = str((cfg or {}).get("mode", "legacy")).lower()
+    if cfg is None or mode == "legacy":
+        return float(CORRIDOR_AXIS_HEADWIND_SKIP_MPS) < float(along) < float(PRIOR_STICKY_ALONG_MAX_MPS)
+
+    cross = _od_cross_wind_mps(
+        od, goal, belief_map, truth_field=truth_field, cruise_z=float(cruise_z)
+    )
+    margin = 0.0
+    if via is not None:
+        m = _full_od_via_truth_margin(
+            mission, via, goal, belief_map, truth_field, cruise_z=float(cruise_z)
+        )
+        if m is not None:
+            margin = float(m)
+    full_od = math.hypot(float(goal[0]) - float(od[0]), float(goal[1]) - float(od[1]))
+    if remain_horiz is None:
+        remain_horiz = full_od
+    remain_frac = float(remain_horiz) / max(full_od, 1e-6)
+    remain_frac = max(0.0, min(remain_frac, 1.5))
+    aspect = _route_axis_aspect(od, goal)
+
+    bias = float(cfg.get("bias", 0.0))
+    logit = (
+        bias
+        + float(cfg.get("w_along", 0.0)) * float(along)
+        + float(cfg.get("w_along2", 0.0)) * float(along) * float(along)
+        + float(cfg.get("w_abs_cross", 0.0)) * abs(float(cross))
+        + float(cfg.get("w_truth_margin", 0.0)) * float(margin)
+        + float(cfg.get("w_remain", 0.0)) * float(remain_frac)
+        + float(cfg.get("w_aspect", 0.0)) * float(aspect)
+    )
+    threshold = float(cfg.get("threshold", 0.0))
+    return logit > threshold
 
 
 def _full_od_via_truth_strong(
@@ -3525,7 +3674,13 @@ def _energy_guide_paths(
                 )
                 and _via_is_midroute_lock(mission, locked)
                 and _along_allows_prior_sticky(
-                    mission, goal, belief_map, truth_field, cruise_z=float(clearance_lvl)
+                    mission,
+                    goal,
+                    belief_map,
+                    truth_field,
+                    cruise_z=float(clearance_lvl),
+                    via=locked,
+                    remain_horiz=math.hypot(float(gx) - float(sx), float(gy) - float(sy)),
                 )
             )
             truth_strong = False

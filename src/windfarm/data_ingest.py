@@ -686,6 +686,81 @@ def mission_route_octet(
     ]
 
 
+def mission_route_bundle(
+    start: tuple[int, int] | list[int],
+    goal: tuple[int, int] | list[int],
+    *,
+    width: int,
+    height: int,
+    n_routes: int = 56,
+    seed: int = 7,
+    margin: int = 4,
+) -> list[dict]:
+    """Octet plus stratified random ODs for large-scale tune catalogs.
+
+    Keeps r0–r7 identical to :func:`mission_route_octet` (sealed holdout safe).
+    Extra routes (r8+) sample headings and lengths near the primary L1 span,
+    with endpoints clamped inside the map margin.
+    """
+    import random as _random
+
+    base = mission_route_octet(start, goal)
+    n_routes = max(int(n_routes), len(base))
+    if n_routes == len(base):
+        return base
+
+    sx, sy = int(start[0]), int(start[1])
+    gx, gy = int(goal[0]), int(goal[1])
+    primary_l1 = max(abs(gx - sx) + abs(gy - sy), 8)
+    lo_x, hi_x = int(margin), int(width) - 1 - int(margin)
+    lo_y, hi_y = int(margin), int(height) - 1 - int(margin)
+    if hi_x <= lo_x or hi_y <= lo_y:
+        lo_x, hi_x = 1, max(int(width) - 2, 2)
+        lo_y, hi_y = 1, max(int(height) - 2, 2)
+
+    rng = _random.Random(int(seed) ^ (sx * 131 + sy * 17 + gx * 3 + gy))
+    seen: set[tuple[int, int, int, int]] = set()
+    for r in base:
+        s0, g0 = r["start"], r["goal"]
+        seen.add((int(s0[0]), int(s0[1]), int(g0[0]), int(g0[1])))
+
+    out = list(base)
+    # Length bands × direction strata for diversity (not pure i.i.d. noise).
+    length_scales = (0.70, 0.85, 1.00, 1.15)
+    attempts = 0
+    max_attempts = max(2000, 40 * (n_routes - len(base)))
+    while len(out) < n_routes and attempts < max_attempts:
+        attempts += 1
+        scale = length_scales[(len(out) - len(base)) % len(length_scales)]
+        target = max(8.0, float(primary_l1) * float(scale))
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        # Random start in the playable box, then step toward goal.
+        x0 = rng.randint(lo_x, hi_x)
+        y0 = rng.randint(lo_y, hi_y)
+        x1 = int(round(x0 + target * math.cos(ang)))
+        y1 = int(round(y0 + target * math.sin(ang)))
+        x1 = clamp_int(x1, lo_x, hi_x)
+        y1 = clamp_int(y1, lo_y, hi_y)
+        if abs(x1 - x0) + abs(y1 - y0) < 8:
+            continue
+        key = (x0, y0, x1, y1)
+        rev = (x1, y1, x0, y0)
+        if key in seen or rev in seen:
+            continue
+        seen.add(key)
+        idx = len(out)
+        out.append(
+            {
+                "id": f"r{idx}",
+                "label": f"expanded_{idx}",
+                "start": [x0, y0],
+                "goal": [x1, y1],
+                "expanded": True,
+            }
+        )
+    return out
+
+
 def clamp_int(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 
