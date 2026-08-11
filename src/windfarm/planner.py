@@ -828,6 +828,23 @@ def plan_path_details(
             corr_m = 1.02 if corr_m is None else float(corr_m)
             if corr_m <= 0.0:
                 continue
+            # Locked path already passed keep_locked (incl. climb-aware truth sticky).
+            # Do not re-apply mid-route ambient gates that would drop it immediately.
+            if label.startswith("guide_corridor_locked"):
+                floor_e = (
+                    preferred_straight_energy
+                    if preferred_straight_energy < math.inf
+                    else straight_guide_energy
+                )
+                if floor_e < math.inf and energy > floor_e * 1.05:
+                    continue
+                terminal = heuristic(_continuous_state_tuple(path[-1]), goal, mission)
+                score = float(energy) + 0.05 * terminal
+                if score < best_energy:
+                    best_energy = score
+                    chosen = path
+                    best_label = label
+                continue
             # Axis OD into clear headwind: skip *all* lateral vias including distilled
             # priors (fujian r4 prior_38 also lost closed-loop). Mild/positive along-track
             # wind keeps priors (taiwan r6/r7). Use full OD + truth when available —
@@ -1085,11 +1102,19 @@ def plan_path_details(
             band_energies=select_scores if select_scores else straight_energies,
         )
         if best_label.startswith("guide_corridor_"):
-            via = None
-            for p in best_path[1:4]:
-                if abs(p[2] - cruise_ref) <= 0.35 or abs(p[2] - float(getattr(mission, "preferred_cruise_agl", cruise_ref))) <= 0.35:
-                    via = (float(p[0]), float(p[1]))
-                    break
+            # Mild-along: store distilled prior XY from the label. Clear headwind
+            # (taiwan r0): keep legacy path[1:4] near-cells so the 125m clear drops
+            # the lock quickly and altitude strategies stay free.
+            via = _parse_corridor_prior_via(best_label)
+            if via is not None and not _along_allows_prior_sticky(
+                mission, goal, belief_map, truth_field, cruise_z=float(clearance)
+            ):
+                via = None
+            if via is None:
+                for p in best_path[1:4]:
+                    if abs(p[2] - cruise_ref) <= 0.35 or abs(p[2] - float(getattr(mission, "preferred_cruise_agl", cruise_ref))) <= 0.35:
+                        via = (float(p[0]), float(p[1]))
+                        break
             if via is None:
                 # Fall back to first lateral waypoint even if z differs (profile rewrite).
                 for p in best_path[1:4]:
@@ -1098,7 +1123,23 @@ def plan_path_details(
             if via is not None:
                 mission.guide_via = via
         elif best_label.startswith("guide_straight_agl"):
-            mission.guide_via = None
+            # Low-cruise mid-route prior: hold the via under mild along without
+            # re-checking full-OD truth every step — time-varying wind would drop
+            # an early prior before locked can help (hainan r1). Climb/shear and
+            # clear-headwind / strong-along gates still release.
+            locked = getattr(mission, "guide_via", None)
+            keep_via = False
+            if (
+                locked is not None
+                and not _cruise_releases_lateral_via(mission, clearance, cruise_ref)
+                and _via_is_midroute_lock(mission, locked)
+                and _along_allows_prior_sticky(
+                    mission, goal, belief_map, truth_field, cruise_z=float(clearance)
+                )
+            ):
+                keep_via = True
+            if not keep_via:
+                mission.guide_via = None
         else:
             if cruise_ref > clearance + 0.05:
                 mission.guide_via = None
@@ -1118,7 +1159,19 @@ def plan_path_details(
             band_energies=select_scores if select_scores else straight_energies,
         )
         if not str(best_label).startswith("guide_corridor_"):
-            mission.guide_via = None
+            locked = getattr(mission, "guide_via", None)
+            keep_via = False
+            if (
+                locked is not None
+                and not _cruise_releases_lateral_via(mission, clearance, selected_band)
+                and _via_is_midroute_lock(mission, locked)
+                and _along_allows_prior_sticky(
+                    mission, goal, belief_map, truth_field, cruise_z=float(clearance)
+                )
+            ):
+                keep_via = True
+            if not keep_via:
+                mission.guide_via = None
 
     best_path = best_path[: mission.max_steps + 1]
     if best_path and _continuous_goal_reached(best_path[-1], goal):
@@ -1344,6 +1397,9 @@ ROUTE_AXIS_ASPECT_MAX = 0.30
 CORRIDOR_AXIS_HEADWIND_WIN_NEED = 0.950
 # Clear axis headwind: skip lateral corridors entirely (belief shear ≠ closed-loop win).
 CORRIDOR_AXIS_HEADWIND_SKIP_MPS = -0.50
+# Strong along-track wind: open-loop prior can look great, but closed-loop midroute
+# locks fight evolving shear (shanxi r2). Sticky only in the mild band above headwind skip.
+PRIOR_STICKY_ALONG_MAX_MPS = 1.00
 # Other axis OD: mild ~2% bar (still allows helpful shear corridors).
 CORRIDOR_AXIS_WIN_NEED = 0.980
 # Truth must show ≥3% vs clearance before belief may lock bands >clearance+1.0.
@@ -1479,6 +1535,108 @@ def _corridor_truth_beats_straight(
     if not math.isfinite(straight_e) or not math.isfinite(path_e) or straight_e <= 0.0:
         return True
     return path_e <= straight_e * float(win_need)
+
+
+def _parse_corridor_prior_via(label: str) -> tuple[float, float] | None:
+    """Extract distilled prior via from ``guide_corridor_prior_{x}_{y}_z…`` labels."""
+    if not str(label).startswith("guide_corridor_prior_"):
+        return None
+    parts = str(label).split("_")
+    try:
+        i = parts.index("prior")
+        return (float(parts[i + 1]), float(parts[i + 2]))
+    except (ValueError, IndexError):
+        return None
+
+
+def _via_is_midroute_lock(
+    mission: Mission,
+    via: tuple[float, float] | tuple[float, float, float],
+    *,
+    min_span_cells: float = 8.0,
+) -> bool:
+    """True when via is far from launch — a real prior, not a near-term path cell."""
+    od = getattr(mission, "home", None) or getattr(mission, "start", None)
+    if od is None:
+        return False
+    return math.hypot(float(via[0]) - float(od[0]), float(via[1]) - float(od[1])) >= min_span_cells
+
+
+def _cruise_releases_lateral_via(
+    mission: Mission,
+    clearance: float,
+    cruise_z: float | None = None,
+) -> bool:
+    """Any climb above clearance drops XY locks.
+
+    taiwan r0: prior@z1 then straight@z≈2.7. sichuan micro-layers (~clearance+0.07)
+    also need the via gone so the micro hold is not fought by a lateral lock.
+    """
+    if bool(getattr(mission, "cruise_climb_earned", False)):
+        return True
+    z = cruise_z
+    if z is None:
+        z = getattr(mission, "preferred_cruise_agl", None)
+    return z is not None and float(z) > float(clearance) + 0.05 + 1e-9
+
+
+def _along_allows_prior_sticky(
+    mission: Mission,
+    goal,
+    belief_map: BeliefMap,
+    truth_field: dict | None,
+    *,
+    cruise_z: float,
+) -> bool:
+    """Sticky only in mild along-track wind.
+
+    Clear headwind ODs often win by dumping prior and climbing (taiwan r0).
+    Strong along-track wind often has a tempting open-loop prior that regresses
+    closed-loop once locked (shanxi r2).
+    """
+    od = getattr(mission, "home", None) or getattr(mission, "start", None)
+    if od is None:
+        return False
+    along = _od_along_wind_mps(
+        od, goal, belief_map, truth_field=truth_field, cruise_z=float(cruise_z)
+    )
+    return float(CORRIDOR_AXIS_HEADWIND_SKIP_MPS) < float(along) < float(PRIOR_STICKY_ALONG_MAX_MPS)
+
+
+def _full_od_via_truth_strong(
+    mission: Mission,
+    via: tuple[float, float] | tuple[float, float, float],
+    goal,
+    belief_map: BeliefMap,
+    truth_field: dict | None,
+    *,
+    cruise_z: float,
+    win_need: float = 0.970,
+) -> bool:
+    """Full-OD truth: locked via beats clearance straight by ``win_need`` (eval only)."""
+    if truth_field is None or "u" not in truth_field:
+        return False
+    od = getattr(mission, "home", None) or getattr(mission, "start", None)
+    if od is None:
+        return False
+    origin = (float(od[0]), float(od[1]), float(cruise_z))
+    locked_path = _agl_guide_polyline(
+        origin,
+        goal,
+        belief_map,
+        mission,
+        via_xy=(float(via[0]), float(via[1])),
+        cruise_z=float(cruise_z),
+    )
+    straight_path = _agl_guide_polyline(
+        origin, goal, belief_map, mission, via_xy=None, cruise_z=float(cruise_z)
+    )
+    if len(locked_path) <= 1 or len(straight_path) <= 1:
+        return False
+    truth_belief = _belief_map_from_truth_field(belief_map, truth_field)
+    return _corridor_truth_beats_straight(
+        locked_path, straight_path, truth_belief, mission, win_need=win_need
+    )
 
 
 def _mission_route_terrain_rise_m(mission: Mission) -> float:
@@ -2814,6 +2972,15 @@ def _energy_guide_paths(
     cell_m = max(float(mission.step_distance_m), 1e-6)
     corridor_margin = getattr(mission, "corridor_energy_margin", None)
     locked = getattr(mission, "guide_via", None)
+    clearance_lvl = float(getattr(mission, "clearance_agl_level", 1.0))
+    # Climb release uses sticky preferred when set (band select may still be floor).
+    pref_z = getattr(mission, "preferred_cruise_agl", None)
+    if locked is not None and (
+        _cruise_releases_lateral_via(mission, clearance_lvl, best_band)
+        or _cruise_releases_lateral_via(mission, clearance_lvl, pref_z)
+    ):
+        mission.guide_via = None
+        locked = None
     if locked is not None and math.hypot(float(locked[0]) - sx, float(locked[1]) - sy) < (125.0 / cell_m):
         mission.guide_via = None
         locked = None
@@ -3348,7 +3515,31 @@ def _energy_guide_paths(
             beats_truth = _corridor_truth_beats_straight(
                 locked_path, straight_probe, truth_belief, mission
             )
-            keep_locked = (
+            # Mild-along full-OD truth sticky can emit locked even when mid-route
+            # ambient gates flicker (hainan r2 / taiwan r6). Strong along is already
+            # excluded by _along_allows_prior_sticky (shanxi r2).
+            sticky_hold = (
+                not _cruise_releases_lateral_via(mission, clearance_lvl, best_band)
+                and not _cruise_releases_lateral_via(
+                    mission, clearance_lvl, getattr(mission, "preferred_cruise_agl", None)
+                )
+                and _via_is_midroute_lock(mission, locked)
+                and _along_allows_prior_sticky(
+                    mission, goal, belief_map, truth_field, cruise_z=float(clearance_lvl)
+                )
+            )
+            truth_strong = False
+            if sticky_hold and truth_field is not None:
+                truth_strong = _full_od_via_truth_strong(
+                    mission,
+                    locked,
+                    goal,
+                    belief_map,
+                    truth_field,
+                    cruise_z=float(clearance_lvl),
+                    win_need=0.970,
+                )
+            keep_locked = truth_strong or (
                 _corridor_ambient_ok(
                     s_spd,
                     has_edge=has_edge,
@@ -3375,7 +3566,7 @@ def _energy_guide_paths(
             )
             if keep_locked:
                 guides.append(("guide_corridor_locked", locked_path))
-            else:
+            elif not sticky_hold:
                 mission.guide_via = None
         else:
             mission.guide_via = None
