@@ -786,6 +786,20 @@ def plan_path_details(
             corr_m = 1.02 if corr_m is None else float(corr_m)
             if corr_m <= 0.0:
                 continue
+            # Axis OD into clear headwind: skip *all* lateral vias including distilled
+            # priors (fujian r4 prior_38 also lost closed-loop). Mild/positive along-track
+            # wind keeps priors (taiwan r6/r7). Use full OD + truth when available —
+            # early-belief along at z=0 is near-zero and used to miss the skip.
+            ms = getattr(mission, "start", start)
+            route_aspect = _route_axis_aspect(ms, goal)
+            along_od = _od_along_wind_mps(
+                ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+            )
+            if (
+                route_aspect <= ROUTE_AXIS_ASPECT_MAX
+                and along_od <= CORRIDOR_AXIS_HEADWIND_SKIP_MPS
+            ):
+                continue
             # Corridors are generated at best_band; judge amb/edge/Joules vs SAME-BAND straight.
             # selected_band is often still clearance while the corridor cruises aloft — using
             # clearance ambient (<HARD) hard-rejects taiwan-class shear even with a real edge.
@@ -899,8 +913,8 @@ def plan_path_details(
                 has_lateral_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
-                route_aspect=_route_axis_aspect(start, goal),
-                along_wind_mps=_along_track_wind_mps([start, goal], belief_map),
+                route_aspect=route_aspect,
+                along_wind_mps=along_od,
             )
             if not has_edge and not has_relief and not has_light_w and not prior_soft:
                 no_edge = (
@@ -968,7 +982,17 @@ def plan_path_details(
                 energy *= 1.005
         elif label.startswith("mpc"):
             # MPC must also show a clear edge vs the preferred straight band.
-            if floor_e < math.inf and energy > floor_e * 0.992:
+            # Late headwind approach only — full short-leg bars regress taiwan/fujian r6/r7
+            # where relaxed MPC or priors still help.
+            mpc_need = MPC_VS_STRAIGHT_NEED
+            if horizontal_to_goal <= 20.0:
+                ms = getattr(mission, "start", start)
+                along_od = _od_along_wind_mps(
+                    ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+                )
+                if along_od < 0.0:
+                    mpc_need = min(mpc_need, MPC_HEADWIND_NEED)
+            if floor_e < math.inf and energy > floor_e * mpc_need:
                 continue
         terminal = heuristic(_continuous_state_tuple(path[-1]), goal, mission)
         score = energy + 0.05 * terminal
@@ -1259,12 +1283,17 @@ CORRIDOR_PRIOR_SOFT_COMMIT_SLACK = 0.035
 CORRIDOR_PRIOR_SOFT_FLAT_MAX_AMB_MPS = 3.0
 # Axis-like OD (min(|dx|,|dy|)/max): mid-box horizontal/vertical routes (r4–r7).
 ROUTE_AXIS_ASPECT_MAX = 0.30
-# Axis + headwind: demand ~3% corridor Joules (blocks fujian_hills/r4-class weak commits).
-CORRIDOR_AXIS_HEADWIND_WIN_NEED = 0.970
+# Axis + headwind: demand ~5% corridor Joules (fujian r4 weak ±1 lateral still lost at 3%).
+CORRIDOR_AXIS_HEADWIND_WIN_NEED = 0.950
+# Clear axis headwind: skip lateral corridors entirely (belief shear ≠ closed-loop win).
+CORRIDOR_AXIS_HEADWIND_SKIP_MPS = -0.50
 # Other axis OD: mild ~2% bar (still allows helpful shear corridors).
 CORRIDOR_AXIS_WIN_NEED = 0.980
 # Truth must show ≥3% vs clearance before belief may lock bands >clearance+1.0.
 TRUTH_HIGH_BAND_WIN_NEED = 0.970
+# Default MPC-vs-straight need (~0.8%); late headwind approach demands a clearer edge.
+MPC_VS_STRAIGHT_NEED = 0.992
+MPC_HEADWIND_NEED = 0.985
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
@@ -1460,6 +1489,30 @@ def _along_track_wind_mps(path, belief_map) -> float:
         total += (float(samples["wind_u"][i]) * dx + float(samples["wind_v"][i]) * dy) / norm
         n += 1
     return total / max(n, 1)
+
+
+def _od_along_wind_mps(start, goal, belief_map, truth_field=None, cruise_z: float = 1.0) -> float:
+    """Along-track wind on the full OD at cruise AGL; prefer truth when available."""
+    a = (float(start[0]), float(start[1]), float(cruise_z))
+    b = (float(goal[0]), float(goal[1]), float(cruise_z))
+    if truth_field is not None and "u" in truth_field and "v" in truth_field:
+        # Dense sample under truth (eval closed-loop has the field).
+        sx, sy = a[0], a[1]
+        gx, gy = b[0], b[1]
+        dx, dy = gx - sx, gy - sy
+        span = math.hypot(dx, dy)
+        if span < 1e-9:
+            return 0.0
+        n = max(8, min(24, int(span) + 1))
+        total = 0.0
+        for i in range(n):
+            t = i / max(n - 1, 1)
+            x, y = sx + dx * t, sy + dy * t
+            u = float(trilinear_sample(truth_field["u"], x, y, cruise_z))
+            v = float(trilinear_sample(truth_field["v"], x, y, cruise_z))
+            total += (u * dx + v * dy) / span
+        return total / n
+    return _along_track_wind_mps([a, b], belief_map)
 
 
 def _prior_soft_allowed_for_mission(
@@ -1944,7 +1997,7 @@ def _corridor_energy_win_need(
             base = min(base, CORRIDOR_CALM_WIN_NEED)
     # Axis mid-box OD: weak lateral commits often lose closed-loop (fujian r4).
     if route_aspect is not None and float(route_aspect) <= ROUTE_AXIS_ASPECT_MAX:
-        if along_wind_mps is not None and float(along_wind_mps) < 0.15:
+        if along_wind_mps is not None and float(along_wind_mps) < 0.0:
             base = min(base, CORRIDOR_AXIS_HEADWIND_WIN_NEED)
         else:
             base = min(base, CORRIDOR_AXIS_WIN_NEED)
@@ -3209,8 +3262,14 @@ def _energy_guide_paths(
                 has_lateral_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
-                route_aspect=_route_axis_aspect(start, goal),
-                along_wind_mps=_along_track_wind_mps([start, goal], belief_map),
+                route_aspect=_route_axis_aspect(getattr(mission, "start", start), goal),
+                along_wind_mps=_od_along_wind_mps(
+                    getattr(mission, "start", start),
+                    goal,
+                    belief_map,
+                    truth_field=truth_field,
+                    cruise_z=float(getattr(mission, "clearance_agl_level", 1.0)),
+                ),
             )
             if not has_edge and not has_relief and not has_light_w:
                 no_edge = (
