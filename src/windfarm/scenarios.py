@@ -170,6 +170,7 @@ def build_scenario_dataset(
     belief_kwargs["observation_radius"] = obs_radius
     config.belief = BeliefConfig(**belief_kwargs)
 
+    # Default octet; large tune catalogs expand via scripts/build_tune_catalog.py.
     routes = mission_route_octet(start, goal)
     config.mission = MissionConfig(
         start=start,

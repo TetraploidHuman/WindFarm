@@ -171,6 +171,630 @@
           38,
           43
         ]
+      },
+      {
+        "id": "r8",
+        "label": "expanded_8",
+        "start": [
+          16,
+          14
+        ],
+        "goal": [
+          67,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r9",
+        "label": "expanded_9",
+        "start": [
+          23,
+          17
+        ],
+        "goal": [
+          34,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r10",
+        "label": "expanded_10",
+        "start": [
+          16,
+          14
+        ],
+        "goal": [
+          66,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r11",
+        "label": "expanded_11",
+        "start": [
+          68,
+          35
+        ],
+        "goal": [
+          4,
+          17
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r12",
+        "label": "expanded_12",
+        "start": [
+          68,
+          43
+        ],
+        "goal": [
+          14,
+          27
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r13",
+        "label": "expanded_13",
+        "start": [
+          45,
+          37
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r14",
+        "label": "expanded_14",
+        "start": [
+          41,
+          35
+        ],
+        "goal": [
+          4,
+          31
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r15",
+        "label": "expanded_15",
+        "start": [
+          24,
+          37
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r16",
+        "label": "expanded_16",
+        "start": [
+          71,
+          54
+        ],
+        "goal": [
+          45,
+          5
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r17",
+        "label": "expanded_17",
+        "start": [
+          20,
+          48
+        ],
+        "goal": [
+          72,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r18",
+        "label": "expanded_18",
+        "start": [
+          7,
+          20
+        ],
+        "goal": [
+          74,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r19",
+        "label": "expanded_19",
+        "start": [
+          49,
+          4
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r20",
+        "label": "expanded_20",
+        "start": [
+          59,
+          7
+        ],
+        "goal": [
+          20,
+          47
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r21",
+        "label": "expanded_21",
+        "start": [
+          52,
+          31
+        ],
+        "goal": [
+          61,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r22",
+        "label": "expanded_22",
+        "start": [
+          27,
+          47
+        ],
+        "goal": [
+          4,
+          18
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r23",
+        "label": "expanded_23",
+        "start": [
+          45,
+          50
+        ],
+        "goal": [
+          14,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r24",
+        "label": "expanded_24",
+        "start": [
+          5,
+          27
+        ],
+        "goal": [
+          59,
+          14
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r25",
+        "label": "expanded_25",
+        "start": [
+          44,
+          21
+        ],
+        "goal": [
+          26,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r26",
+        "label": "expanded_26",
+        "start": [
+          51,
+          31
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r27",
+        "label": "expanded_27",
+        "start": [
+          7,
+          44
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r28",
+        "label": "expanded_28",
+        "start": [
+          67,
+          36
+        ],
+        "goal": [
+          74,
+          34
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r29",
+        "label": "expanded_29",
+        "start": [
+          8,
+          22
+        ],
+        "goal": [
+          71,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r30",
+        "label": "expanded_30",
+        "start": [
+          45,
+          17
+        ],
+        "goal": [
+          51,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r31",
+        "label": "expanded_31",
+        "start": [
+          25,
+          41
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r32",
+        "label": "expanded_32",
+        "start": [
+          58,
+          47
+        ],
+        "goal": [
+          7,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r33",
+        "label": "expanded_33",
+        "start": [
+          18,
+          36
+        ],
+        "goal": [
+          74,
+          49
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r34",
+        "label": "expanded_34",
+        "start": [
+          69,
+          5
+        ],
+        "goal": [
+          71,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r35",
+        "label": "expanded_35",
+        "start": [
+          37,
+          27
+        ],
+        "goal": [
+          4,
+          24
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r36",
+        "label": "expanded_36",
+        "start": [
+          12,
+          16
+        ],
+        "goal": [
+          49,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r37",
+        "label": "expanded_37",
+        "start": [
+          59,
+          8
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r38",
+        "label": "expanded_38",
+        "start": [
+          43,
+          10
+        ],
+        "goal": [
+          56,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r39",
+        "label": "expanded_39",
+        "start": [
+          58,
+          35
+        ],
+        "goal": [
+          4,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r40",
+        "label": "expanded_40",
+        "start": [
+          61,
+          53
+        ],
+        "goal": [
+          74,
+          17
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r41",
+        "label": "expanded_41",
+        "start": [
+          58,
+          9
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r42",
+        "label": "expanded_42",
+        "start": [
+          47,
+          22
+        ],
+        "goal": [
+          37,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r43",
+        "label": "expanded_43",
+        "start": [
+          68,
+          15
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r44",
+        "label": "expanded_44",
+        "start": [
+          56,
+          51
+        ],
+        "goal": [
+          4,
+          37
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r45",
+        "label": "expanded_45",
+        "start": [
+          63,
+          12
+        ],
+        "goal": [
+          74,
+          50
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r46",
+        "label": "expanded_46",
+        "start": [
+          9,
+          12
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r47",
+        "label": "expanded_47",
+        "start": [
+          57,
+          50
+        ],
+        "goal": [
+          4,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r48",
+        "label": "expanded_48",
+        "start": [
+          17,
+          44
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r49",
+        "label": "expanded_49",
+        "start": [
+          8,
+          39
+        ],
+        "goal": [
+          73,
+          20
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r50",
+        "label": "expanded_50",
+        "start": [
+          38,
+          27
+        ],
+        "goal": [
+          74,
+          45
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r51",
+        "label": "expanded_51",
+        "start": [
+          47,
+          11
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r52",
+        "label": "expanded_52",
+        "start": [
+          7,
+          41
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r53",
+        "label": "expanded_53",
+        "start": [
+          40,
+          31
+        ],
+        "goal": [
+          74,
+          4
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r54",
+        "label": "expanded_54",
+        "start": [
+          24,
+          38
+        ],
+        "goal": [
+          4,
+          54
+        ],
+        "expanded": true
+      },
+      {
+        "id": "r55",
+        "label": "expanded_55",
+        "start": [
+          18,
+          52
+        ],
+        "goal": [
+          4,
+          4
+        ],
+        "expanded": true
       }
     ]
   }

@@ -1,0 +1,98 @@
+[
+  {
+    "id": "r0",
+    "label": "primary",
+    "start": [
+      12,
+      41
+    ],
+    "goal": [
+      66,
+      18
+    ]
+  },
+  {
+    "id": "r1",
+    "label": "primary_rev",
+    "start": [
+      66,
+      18
+    ],
+    "goal": [
+      12,
+      41
+    ]
+  },
+  {
+    "id": "r2",
+    "label": "cross",
+    "start": [
+      12,
+      18
+    ],
+    "goal": [
+      66,
+      41
+    ]
+  },
+  {
+    "id": "r3",
+    "label": "cross_rev",
+    "start": [
+      66,
+      41
+    ],
+    "goal": [
+      12,
+      18
+    ]
+  },
+  {
+    "id": "r4",
+    "label": "horizontal",
+    "start": [
+      12,
+      30
+    ],
+    "goal": [
+      66,
+      30
+    ]
+  },
+  {
+    "id": "r5",
+    "label": "horizontal_rev",
+    "start": [
+      66,
+      30
+    ],
+    "goal": [
+      12,
+      30
+    ]
+  },
+  {
+    "id": "r6",
+    "label": "vertical",
+    "start": [
+      39,
+      41
+    ],
+    "goal": [
+      39,
+      18
+    ]
+  },
+  {
+    "id": "r7",
+    "label": "vertical_rev",
+    "start": [
+      39,
+      18
+    ],
+    "goal": [
+      39,
+      41
+    ]
+  }
+]

@@ -376,10 +376,16 @@ def main() -> None:
         # Optional filter: python scripts/eval_multi_scenario_energy.py --only a b c
         # Optional parallelism: --workers N  (default caps at 4; 18-way OOMs ~32GB hosts)
         # --primary-only: only route r0 (legacy single OD). Default: all mission.routes.
+        # --catalog PATH --split train|val|sealed_holdout|tune: run jobs from a tune catalog.
         argv = sys.argv[1:]
         max_workers_arg: int | None = None
         only_names: list[str] | None = None
         primary_only = False
+        octet_only = False
+        catalog_path: Path | None = None
+        catalog_split: str | None = None
+        catalog_limit: int | None = None
+        catalog_seed = 7
         i = 0
         while i < len(argv):
             if argv[i] == "--only":
@@ -402,6 +408,26 @@ def main() -> None:
                 primary_only = True
                 i += 1
                 continue
+            if argv[i] == "--octet-only":
+                octet_only = True
+                i += 1
+                continue
+            if argv[i] == "--catalog" and i + 1 < len(argv):
+                catalog_path = Path(argv[i + 1])
+                i += 2
+                continue
+            if argv[i] == "--split" and i + 1 < len(argv):
+                catalog_split = str(argv[i + 1])
+                i += 2
+                continue
+            if argv[i] == "--limit" and i + 1 < len(argv):
+                catalog_limit = max(1, int(argv[i + 1]))
+                i += 2
+                continue
+            if argv[i] == "--seed" and i + 1 < len(argv):
+                catalog_seed = int(argv[i + 1])
+                i += 2
+                continue
             i += 1
         if only_names is not None:
             wanted = set(only_names)
@@ -409,10 +435,35 @@ def main() -> None:
             if not names:
                 raise SystemExit("no matching scenarios for --only")
         jobs: list[tuple[str, int]] = []
-        for name in names:
-            route_count = 1 if primary_only else len(_scenario_routes(name))
-            for route_index in range(route_count):
-                jobs.append((name, route_index))
+        if catalog_path is not None:
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            split = catalog_split or "train"
+            selected = []
+            for job in catalog.get("jobs", []):
+                sp = str(job.get("split", ""))
+                if split == "tune" and sp in ("train", "val"):
+                    selected.append(job)
+                elif sp == split:
+                    selected.append(job)
+            if not selected:
+                raise SystemExit(f"no jobs for split={split} in {catalog_path}")
+            if catalog_limit is not None and catalog_limit < len(selected):
+                import random as _random
+
+                rng = _random.Random(catalog_seed)
+                selected = rng.sample(selected, catalog_limit)
+            jobs = [(str(j["map"]), int(j["route_index"])) for j in selected]
+            names = sorted({m for m, _ in jobs})
+        else:
+            for name in names:
+                if primary_only:
+                    route_count = 1
+                elif octet_only:
+                    route_count = min(8, len(_scenario_routes(name)))
+                else:
+                    route_count = len(_scenario_routes(name))
+                for route_index in range(route_count):
+                    jobs.append((name, route_index))
         # 8 curated maps fit in ~32GB at full parallelism; only cap when many more exist.
         default_cap = min(8, max(1, os.cpu_count() or 4))
         max_workers = min(len(jobs), max_workers_arg or default_cap)

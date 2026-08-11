@@ -1,0 +1,12 @@
+{
+  "mode": "logistic",
+  "bias": 0.0,
+  "w_along": -0.35,
+  "w_along2": -0.12,
+  "w_abs_cross": 0.15,
+  "w_truth_margin": 6.0,
+  "w_remain": 0.4,
+  "w_aspect": 0.0,
+  "threshold": 0.0,
+  "note": "Seed logistic sticky score; tune with scripts/tune_sticky_score.py"
+}
