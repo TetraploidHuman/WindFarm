@@ -641,6 +641,25 @@ def plan_path_details(
                     select_scores = {
                         z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
                     }
+    # Axis + clear headwind: tax climb above clearance (~4%/level). Belief often invents
+    # free aloft bands (taiwan r4 z→3); shanxi/jilin micro-layers (~0.1) still clear a 4% tax
+    # when they truly save ~3%+. No sticky reset → no climb/dump thrash.
+    if select_scores:
+        ms_od = getattr(mission, "home", None) or getattr(mission, "start", start)
+        if (
+            _route_axis_aspect(ms_od, goal) <= ROUTE_AXIS_ASPECT_MAX
+            and _od_along_wind_mps(
+                ms_od, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+            )
+            <= CORRIDOR_AXIS_HEADWIND_SKIP_MPS
+        ):
+            floor_z = min(select_scores.keys(), key=lambda z: abs(float(z) - float(clearance)))
+            floor_e = max(float(select_scores[floor_z]), 1.0)
+            pen = 0.04 * floor_e
+            select_scores = {
+                z: float(e) + pen * max(0.0, float(z) - float(clearance))
+                for z, e in select_scores.items()
+            }
     selected_band = _select_preferred_cruise_band(
         select_scores,
         sticky=getattr(mission, "preferred_cruise_agl", None),
@@ -791,9 +810,10 @@ def plan_path_details(
             # wind keeps priors (taiwan r6/r7). Use full OD + truth when available —
             # early-belief along at z=0 is near-zero and used to miss the skip.
             ms = getattr(mission, "start", start)
-            route_aspect = _route_axis_aspect(ms, goal)
+            od_origin = getattr(mission, "home", None) or ms
+            route_aspect = _route_axis_aspect(od_origin, goal)
             along_od = _od_along_wind_mps(
-                ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+                od_origin, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
             )
             if (
                 route_aspect <= ROUTE_AXIS_ASPECT_MAX
@@ -983,20 +1003,29 @@ def plan_path_details(
         elif label.startswith("mpc"):
             # MPC must also show a clear edge vs the preferred straight band.
             # Late headwind approach: avoid end-game thrash on adverse ODs.
-            # Short full-OD + clear tailwind: stay on straight (qinghai r6 / hubei r7);
+            # Short full-OD + decisive |along|: stay on straight (qinghai/hubei/shanxi r6/r7);
             # mild-along short ODs (taiwan r7 ≈+0.12) keep the loose bar.
             mpc_need = MPC_VS_STRAIGHT_NEED
             ms = getattr(mission, "start", start)
+            # plan_mission.start is the *current* replan state; home/launch is full OD.
+            od_origin = getattr(mission, "home", None) or ms
             along_od = _od_along_wind_mps(
-                ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+                od_origin, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
             )
-            od_len = math.hypot(float(goal[0]) - float(ms[0]), float(goal[1]) - float(ms[1]))
-            if od_len <= SHORT_OD_CELLS and along_od >= MPC_SHORT_TAILWIND_ALONG_MPS:
-                # Short + clear tailwind: MPC never beats constant-AGL closed-loop here
-                # (qinghai r6 / hubei r7 / yunnan r6 cluster) — skip regardless of belief Joules.
+            od_len = math.hypot(
+                float(goal[0]) - float(od_origin[0]), float(goal[1]) - float(od_origin[1])
+            )
+            if od_len <= SHORT_OD_CELLS and abs(along_od) >= MPC_SHORT_ALONG_ABS_MPS:
+                # Short full-OD with decisive |along|: MPC lateral noise loses closed-loop
+                # (qinghai/hubei/shanxi r6/r7). Near-calm shorts keep MPC. Do NOT use
+                # remaining distance — late headwind on long ODs (fujian r6) still needs MPC.
                 continue
-            if horizontal_to_goal <= 20.0 and along_od < 0.0:
-                mpc_need = min(mpc_need, MPC_HEADWIND_NEED)
+            if horizontal_to_goal <= 20.0:
+                along_now = _od_along_wind_mps(
+                    ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+                )
+                if along_now < 0.0:
+                    mpc_need = min(mpc_need, MPC_HEADWIND_NEED)
             if floor_e < math.inf and energy > floor_e * mpc_need:
                 continue
         terminal = heuristic(_continuous_state_tuple(path[-1]), goal, mission)
@@ -1299,10 +1328,11 @@ TRUTH_HIGH_BAND_WIN_NEED = 0.970
 # Default MPC-vs-straight need (~0.8%); late headwind approach demands a clearer edge.
 MPC_VS_STRAIGHT_NEED = 0.992
 MPC_HEADWIND_NEED = 0.985
-# Short full-OD + clear tailwind: skip MPC entirely (qinghai r6 / hubei r7 cluster).
-# Along threshold 0.50 keeps taiwan r7 (≈+0.12) eligible for priors+MPC.
+# Short full-OD + decisive |along|: skip MPC (r6/r7 thrash both ways).
+# |along|≥0.50; near-calm shorts (taiwan r7 ≈+0.12) keep priors+MPC.
+# od_len must use launch/home — plan_mission.start is current state (fujian r6).
 SHORT_OD_CELLS = 28.0
-MPC_SHORT_TAILWIND_ALONG_MPS = 0.50
+MPC_SHORT_ALONG_ABS_MPS = 0.50
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
