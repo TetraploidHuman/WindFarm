@@ -707,6 +707,29 @@ def plan_path_details(
         # is held by the band selector so the baseline polyline can descend cleanly.
         selected_band = float(min(float(selected_band), float(sticky_now)))
         selected_band = float(max(float(selected_band), float(sticky_now) - 0.50))
+    # Non-axis clear headwind: snap mild-but-not-micro overshoots (clr+0.20 … clr+0.55)
+    # unless a deep band (>clr+1) shows ≥5% vs clearance. Protects shanxi/fujian micro
+    # layers (~+0.07…0.10) and taiwan r0 stairs; blocks taiwan r2 thrash (~1.2–1.37).
+    if select_scores and selected_band is not None:
+        ms_od = getattr(mission, "home", None) or getattr(mission, "start", start)
+        if (
+            _route_axis_aspect(ms_od, goal) > ROUTE_AXIS_ASPECT_MAX
+            and _od_along_wind_mps(
+                ms_od, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+            )
+            <= CORRIDOR_AXIS_HEADWIND_SKIP_MPS
+            and float(selected_band) <= float(clearance) + 0.55 + 1e-9
+            and float(selected_band) > float(clearance) + 0.20 + 1e-9
+        ):
+            clr_k = min(select_scores.keys(), key=lambda z: abs(float(z) - float(clearance)))
+            deep = [
+                z
+                for z in select_scores
+                if float(z) > float(clearance) + 1.0 + 1e-9
+                and float(select_scores[z]) <= float(select_scores[clr_k]) * 0.95
+            ]
+            if not deep:
+                selected_band = float(clearance)
     # Truth gate high bands: reject speculative climb when truth says clearance is cheaper
     # (qinghai/taiwan r4 over-climb; keep mild +1 m exploration for shear).
     if (
