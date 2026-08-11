@@ -1,0 +1,12 @@
+{
+  "mode": "logistic",
+  "bias": 0.0,
+  "w_along": -0.25,
+  "w_along2": -0.15,
+  "w_abs_cross": 0.20,
+  "w_truth_margin": 5.0,
+  "w_remain": 0.35,
+  "w_aspect": 0.0,
+  "threshold": 0.0,
+  "note": "Constrained seed: w_along<=0, threshold>=0; planner still hard-vetoes outside mild along band"
+}

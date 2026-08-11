@@ -1716,10 +1716,17 @@ def _along_allows_prior_sticky(
     along = _od_along_wind_mps(
         od, goal, belief_map, truth_field=truth_field, cruise_z=float(cruise_z)
     )
+    # Physical veto (always): clear headwind / strong along never sticky — protects
+    # taiwan r0 climb-dump and shanxi-class closed-loop regressions even if a
+    # logistic score was tuned too permissively.
+    if not (
+        float(CORRIDOR_AXIS_HEADWIND_SKIP_MPS) < float(along) < float(PRIOR_STICKY_ALONG_MAX_MPS)
+    ):
+        return False
     cfg = _load_sticky_score_config()
     mode = str((cfg or {}).get("mode", "legacy")).lower()
     if cfg is None or mode == "legacy":
-        return float(CORRIDOR_AXIS_HEADWIND_SKIP_MPS) < float(along) < float(PRIOR_STICKY_ALONG_MAX_MPS)
+        return True
 
     cross = _od_cross_wind_mps(
         od, goal, belief_map, truth_field=truth_field, cruise_z=float(cruise_z)
