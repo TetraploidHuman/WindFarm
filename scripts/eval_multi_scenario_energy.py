@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -386,6 +387,7 @@ def main() -> None:
         catalog_split: str | None = None
         catalog_limit: int | None = None
         catalog_seed = 7
+        cleanup_runs = False
         i = 0
         while i < len(argv):
             if argv[i] == "--only":
@@ -404,12 +406,23 @@ def main() -> None:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 i += 2
                 continue
+            if argv[i] == "--runs-dir" and i + 1 < len(argv):
+                runs_dir = Path(argv[i + 1])
+                runs_dir.mkdir(parents=True, exist_ok=True)
+                i += 2
+                continue
             if argv[i] == "--primary-only":
                 primary_only = True
                 i += 1
                 continue
             if argv[i] == "--octet-only":
                 octet_only = True
+                i += 1
+                continue
+            if argv[i] == "--cleanup-runs":
+                # Delete per-route demo artifacts after metrics are extracted.
+                # Each run copies terrain/truth/model (~0.3–1.2GB); tune must use this.
+                cleanup_runs = True
                 i += 1
                 continue
             if argv[i] == "--catalog" and i + 1 < len(argv):
@@ -472,7 +485,8 @@ def main() -> None:
         print(
             f"parallel jobs: {len(jobs)} (maps={len(names)} routes_per_map="
             f"{'1' if primary_only else 'all'}) workers={max_workers} "
-            f"WINDFARM_N_JOBS={per_proc_jobs}",
+            f"WINDFARM_N_JOBS={per_proc_jobs} cleanup_runs={cleanup_runs} "
+            f"runs_dir={runs_dir}",
             flush=True,
         )
         run_dirs: dict[str, Path] = {}
@@ -502,6 +516,10 @@ def main() -> None:
                     f"terrain↑={row['path_terrain_climb_m']:.0f}m",
                     flush=True,
                 )
+                if cleanup_runs:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    row["run"] = None
+                    row["run_cleaned"] = True
         # Stable order: map order × route index.
         order = {f"{name}/r{ri}": i for i, (name, ri) in enumerate(jobs)}
         results.sort(
