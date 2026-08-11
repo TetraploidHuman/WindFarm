@@ -982,16 +982,21 @@ def plan_path_details(
                 energy *= 1.005
         elif label.startswith("mpc"):
             # MPC must also show a clear edge vs the preferred straight band.
-            # Late headwind approach only — full short-leg bars regress taiwan/fujian r6/r7
-            # where relaxed MPC or priors still help.
+            # Late headwind approach: avoid end-game thrash on adverse ODs.
+            # Short full-OD + clear tailwind: stay on straight (qinghai r6 / hubei r7);
+            # mild-along short ODs (taiwan r7 ≈+0.12) keep the loose bar.
             mpc_need = MPC_VS_STRAIGHT_NEED
-            if horizontal_to_goal <= 20.0:
-                ms = getattr(mission, "start", start)
-                along_od = _od_along_wind_mps(
-                    ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
-                )
-                if along_od < 0.0:
-                    mpc_need = min(mpc_need, MPC_HEADWIND_NEED)
+            ms = getattr(mission, "start", start)
+            along_od = _od_along_wind_mps(
+                ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
+            )
+            od_len = math.hypot(float(goal[0]) - float(ms[0]), float(goal[1]) - float(ms[1]))
+            if od_len <= SHORT_OD_CELLS and along_od >= MPC_SHORT_TAILWIND_ALONG_MPS:
+                # Short + clear tailwind: MPC never beats constant-AGL closed-loop here
+                # (qinghai r6 / hubei r7 / yunnan r6 cluster) — skip regardless of belief Joules.
+                continue
+            if horizontal_to_goal <= 20.0 and along_od < 0.0:
+                mpc_need = min(mpc_need, MPC_HEADWIND_NEED)
             if floor_e < math.inf and energy > floor_e * mpc_need:
                 continue
         terminal = heuristic(_continuous_state_tuple(path[-1]), goal, mission)
@@ -1294,6 +1299,10 @@ TRUTH_HIGH_BAND_WIN_NEED = 0.970
 # Default MPC-vs-straight need (~0.8%); late headwind approach demands a clearer edge.
 MPC_VS_STRAIGHT_NEED = 0.992
 MPC_HEADWIND_NEED = 0.985
+# Short full-OD + clear tailwind: skip MPC entirely (qinghai r6 / hubei r7 cluster).
+# Along threshold 0.50 keeps taiwan r7 (≈+0.12) eligible for priors+MPC.
+SHORT_OD_CELLS = 28.0
+MPC_SHORT_TAILWIND_ALONG_MPS = 0.50
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
