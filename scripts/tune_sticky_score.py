@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -83,6 +84,9 @@ def _run_eval(
         str(workers),
         "--output-dir",
         str(output_dir),
+        "--runs-dir",
+        str(output_dir / "scratch_runs"),
+        "--cleanup-runs",
         "--seed",
         str(seed),
     ]
@@ -98,7 +102,12 @@ def _run_eval(
     log_path = output_dir / "eval.log"
     with log_path.open("w", encoding="utf-8") as log:
         subprocess.run(cmd, cwd=str(ROOT), env=env, check=True, stdout=log, stderr=subprocess.STDOUT)
-    return json.loads((output_dir / "energy_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((output_dir / "energy_summary.json").read_text(encoding="utf-8"))
+    # Scratch demo dirs are removed per-route; drop the empty parent too.
+    scratch = output_dir / "scratch_runs"
+    if scratch.exists():
+        shutil.rmtree(scratch, ignore_errors=True)
+    return summary
 
 
 def _objective_from_summary(summary: dict) -> tuple[float, dict]:
