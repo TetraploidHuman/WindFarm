@@ -416,7 +416,13 @@ class NavigationEngine:
             ny = sy + dy / dist * step
         else:
             nx, ny = tx, ty
-        z = context.state.z + clamp(target_z - context.state.z, -1.0, 1.2)
+        # Launch window: do not one-shot 0→clearance in a single corridor step.
+        # Cap climb to ~half a clearance band per step (matches multi-step baseline
+        # climb packing better than the old −1.0..+1.2 clamp).
+        progress = clamp(1.0 - horizontal / total_horiz, 0.0, 1.0)
+        clearance = float(getattr(context.mission, "clearance_agl_level", 1.0))
+        max_up = (0.5 * clearance + 0.05) if progress < 0.12 else 1.2
+        z = context.state.z + clamp(target_z - context.state.z, -1.0, max_up)
         z = clamp(z, float(context.mission.min_altitude_level), float(context.mission.max_altitude_level))
         return (nx, ny, z)
 
