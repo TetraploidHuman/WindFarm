@@ -1101,13 +1101,13 @@ def plan_path_details(
                 # Near-calm shorts (taiwan/hainan ≈±0.12) keep MPC. Do NOT use remaining
                 # distance — late headwind on long ODs (fujian r6) still needs MPC.
                 continue
-            # Near-calm short/medium OD: after a long straight stretch, late MPC is
-            # almost always end thrash (fresh sichuan r13). Fujian/taiwan usually
-            # break the streak earlier with corridor/prior commits, so they keep MPC.
+            # Late pure-straight thrash on short/medium ODs with mild |along|.
+            # Cap is above MPC_SHORT_ALONG (0.45) so od≈42.01 / along≈0.50 still
+            # skips, but strong-along routes (guizhou ≈+2.5) keep late MPC.
             streak = int(getattr(mission, "guide_straight_streak", 0) or 0)
             if (
-                od_len <= SHORT_OD_CELLS
-                and abs(along_gate) < MPC_SHORT_ALONG_ABS_MPS
+                od_len <= MPC_CALM_LATE_OD_CELLS
+                and abs(along_gate) < MPC_CALM_LATE_ALONG_ABS_MPS
                 and streak >= MPC_CALM_LATE_STREAK
                 and horizontal_to_goal <= MPC_CALM_LATE_HORIZ_CELLS
             ):
@@ -1491,14 +1491,18 @@ MPC_HEADWIND_NEED = 0.985
 # Short/medium full-OD + decisive |along|: skip MPC (r6/r7 thrash both ways).
 # |along|≥0.45 catches near-half-mps shorts (chongqing r6 ≈+0.49) that still
 # pay late mpc_relaxed_return; near-calm shorts (taiwan/hainan ≈±0.12) keep MPC.
-# 42 cells also covers mid-length decisive-along fresh ODs (neimeng/tibet/shanxi
-# thrash at ~32–41) without touching long coastal heroes.
+# 43 cells: mid-length decisive-along thrash (~32–42) plus the common OD≈42.0–42.1
+# boundary (yunnan fresh |along|≈1.0). Stay below ~44 — guizhou od≈43.9 with
+# strong along still needs late MPC.
 # od_len must use launch/home — plan_mission.start is current state (fujian r6).
-SHORT_OD_CELLS = 42.0
+SHORT_OD_CELLS = 43.0
 MPC_SHORT_ALONG_ABS_MPS = 0.45
-# Near-calm shorts keep MPC for early/mid shear (taiwan/fujian), but a long straight
-# streak into the last ~12 cells → late relaxed thrash (sichuan fresh r13).
-# Streak 15: fujian/taiwan usually break earlier; pure-straight thrash runs longer.
+# Long straight streak into the last ~12 cells → late relaxed thrash on short/
+# medium ODs. Mild |along| (≲0.70) still thrash (sichuan/yunnan ≈0.50 just above
+# SHORT_OD); strong along (guizhou ≈+2.5) can need late MPC — keep the along cap.
+# Fujian/taiwan usually break the streak earlier with corridor/prior commits.
+MPC_CALM_LATE_OD_CELLS = 45.0
+MPC_CALM_LATE_ALONG_ABS_MPS = 0.70
 MPC_CALM_LATE_STREAK = 15
 MPC_CALM_LATE_HORIZ_CELLS = 12.0
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
