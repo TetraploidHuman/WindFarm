@@ -1101,6 +1101,17 @@ def plan_path_details(
                 # Near-calm shorts (taiwan/hainan ≈±0.12) keep MPC. Do NOT use remaining
                 # distance — late headwind on long ODs (fujian r6) still needs MPC.
                 continue
+            # Near-calm short/medium OD: after a long straight stretch, late MPC is
+            # almost always end thrash (fresh sichuan r13). Fujian/taiwan usually
+            # break the streak earlier with corridor/prior commits, so they keep MPC.
+            streak = int(getattr(mission, "guide_straight_streak", 0) or 0)
+            if (
+                od_len <= SHORT_OD_CELLS
+                and abs(along_gate) < MPC_SHORT_ALONG_ABS_MPS
+                and streak >= MPC_CALM_LATE_STREAK
+                and horizontal_to_goal <= MPC_CALM_LATE_HORIZ_CELLS
+            ):
+                continue
             if horizontal_to_goal <= 20.0:
                 along_now = _od_along_wind_mps(
                     ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
@@ -1485,6 +1496,11 @@ MPC_HEADWIND_NEED = 0.985
 # od_len must use launch/home — plan_mission.start is current state (fujian r6).
 SHORT_OD_CELLS = 42.0
 MPC_SHORT_ALONG_ABS_MPS = 0.45
+# Near-calm shorts keep MPC for early/mid shear (taiwan/fujian), but a long straight
+# streak into the last ~12 cells → late relaxed thrash (sichuan fresh r13).
+# Streak 15: fujian/taiwan usually break earlier; pure-straight thrash runs longer.
+MPC_CALM_LATE_STREAK = 15
+MPC_CALM_LATE_HORIZ_CELLS = 12.0
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
