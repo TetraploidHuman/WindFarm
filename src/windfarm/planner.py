@@ -1477,11 +1477,13 @@ TRUTH_HIGH_BAND_WIN_NEED = 0.970
 # Default MPC-vs-straight need (~0.8%); late headwind approach demands a clearer edge.
 MPC_VS_STRAIGHT_NEED = 0.992
 MPC_HEADWIND_NEED = 0.985
-# Short full-OD + decisive |along|: skip MPC (r6/r7 thrash both ways).
+# Short/medium full-OD + decisive |along|: skip MPC (r6/r7 thrash both ways).
 # |along|≥0.45 catches near-half-mps shorts (chongqing r6 ≈+0.49) that still
 # pay late mpc_relaxed_return; near-calm shorts (taiwan/hainan ≈±0.12) keep MPC.
+# 42 cells also covers mid-length decisive-along fresh ODs (neimeng/tibet/shanxi
+# thrash at ~32–41) without touching long coastal heroes.
 # od_len must use launch/home — plan_mission.start is current state (fujian r6).
-SHORT_OD_CELLS = 28.0
+SHORT_OD_CELLS = 42.0
 MPC_SHORT_ALONG_ABS_MPS = 0.45
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
