@@ -642,9 +642,10 @@ def plan_path_details(
                     select_scores = {
                         z: e + pen * max(0.0, float(z) - clearance) for z, e in select_scores.items()
                     }
-    # Axis + clear headwind: tax climb above clearance (~4%/level). Belief often invents
-    # free aloft bands (taiwan r4 z→3); shanxi/jilin micro-layers (~0.1) still clear a 4% tax
-    # when they truly save ~3%+. No sticky reset → no climb/dump thrash.
+    # Axis + headwind: tax climb above clearance (~4%/level). Belief often invents
+    # free aloft bands (taiwan r4 / hainan r4 z→3). Clear headwind (≤−0.50) already
+    # skips corridors; mild axis headwind still needs the climb tax. Shanxi/jilin
+    # micro-layers (~0.1) still clear a 4% tax when they truly save ~3%+.
     if select_scores:
         ms_od = getattr(mission, "home", None) or getattr(mission, "start", start)
         if (
@@ -652,7 +653,7 @@ def plan_path_details(
             and _od_along_wind_mps(
                 ms_od, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
             )
-            <= CORRIDOR_AXIS_HEADWIND_SKIP_MPS
+            < 0.0
         ):
             floor_z = min(select_scores.keys(), key=lambda z: abs(float(z) - float(clearance)))
             floor_e = max(float(select_scores[floor_z]), 1.0)
