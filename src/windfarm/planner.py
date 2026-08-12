@@ -1112,6 +1112,19 @@ def plan_path_details(
                 and horizontal_to_goal <= MPC_CALM_LATE_HORIZ_CELLS
             ):
                 continue
+            # Near-pure-straight missions: late MPC thrash even with strong belief
+            # along (fresh16c yunnan r51 ≈+2.9). Require streak ≈ full OD so
+            # corridor-reset routes (guizhou) still keep useful end-game MPC.
+            pure_need = max(
+                float(MPC_CALM_LATE_STREAK),
+                float(od_len) - float(MPC_CALM_LATE_HORIZ_CELLS) - float(MPC_PURE_STRAIGHT_SLACK),
+            )
+            if (
+                od_len <= MPC_PURE_STRAIGHT_LATE_OD_CELLS
+                and streak >= pure_need
+                and horizontal_to_goal <= MPC_CALM_LATE_HORIZ_CELLS
+            ):
+                continue
             if horizontal_to_goal <= 20.0:
                 along_now = _od_along_wind_mps(
                     ms, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
@@ -1505,6 +1518,10 @@ MPC_CALM_LATE_OD_CELLS = 45.0
 MPC_CALM_LATE_ALONG_ABS_MPS = 0.70
 MPC_CALM_LATE_STREAK = 15
 MPC_CALM_LATE_HORIZ_CELLS = 12.0
+# Near-pure-straight short/medium OD: skip late MPC regardless of along.
+# streak must cover almost the whole OD (corridor resets protect guizhou-class).
+MPC_PURE_STRAIGHT_LATE_OD_CELLS = 50.0
+MPC_PURE_STRAIGHT_SLACK = 2.0
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
