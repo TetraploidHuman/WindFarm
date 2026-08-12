@@ -946,6 +946,10 @@ def plan_path_details(
                 has_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
+                calm_prior_ok=(
+                    is_prior
+                    and float(amb_speed) >= CORRIDOR_PRIOR_CALM_RELIEF_MPS
+                ),
             ) and not prior_soft:
                 continue
             if not _corridor_wind_usable(
@@ -1399,6 +1403,8 @@ def _path_wind_utilization_stats(
 # Uplift / w alone must NOT unlock corridors (belief noise aloft is common in calm maps).
 # Hard floor: never corridor below this (blocks sichuan-class ~0.6 m/s).
 CORRIDOR_HARD_FLOOR_MPS = 1.20
+# Distilled priors may use DEM relief down to this ambient; ordinary offsets may not.
+CORRIDOR_PRIOR_CALM_RELIEF_MPS = 0.45
 # Soft floor without a proven lateral edge.
 CORRIDOR_MIN_WIND_MPS = 1.80
 # Below this ambient horizontal wind, demand a real lateral *speed* edge + stricter Joules.
@@ -2288,12 +2294,22 @@ def _corridor_ambient_ok(
     has_edge: bool,
     has_terrain_relief: bool = False,
     has_light_vertical: bool = False,
+    calm_prior_ok: bool = False,
 ) -> bool:
     """Straight-ray ambient gate with shear / terrain / light-vertical unlocks."""
-    if has_terrain_relief:
-        return True
     if has_light_vertical:
         return amb_speed >= CORRIDOR_LIGHT_FLOOR_MPS
+    if has_terrain_relief:
+        # Below HARD: DEM/geometry relief is not a free pass for ordinary offsets.
+        # Distilled priors may keep relief in light-but-not-dead air (sichuan/taiwan);
+        # hainan r1 priors sit ~0.3 m/s and must not unlock.
+        if (
+            float(amb_speed) >= CORRIDOR_HARD_FLOOR_MPS
+            or has_edge
+            or calm_prior_ok
+        ):
+            return True
+        return False
     if amb_speed < CORRIDOR_HARD_FLOOR_MPS:
         return False
     if amb_speed >= CORRIDOR_MIN_WIND_MPS:
@@ -3466,6 +3482,7 @@ def _energy_guide_paths(
                 has_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
+                calm_prior_ok=float(band_speed) >= CORRIDOR_PRIOR_CALM_RELIEF_MPS,
             ) and not soft_prior:
                 continue
             if not _corridor_wind_usable(
@@ -3728,6 +3745,7 @@ def _energy_guide_paths(
                     has_edge=has_edge,
                     has_terrain_relief=has_relief,
                     has_light_vertical=has_light_w,
+                    calm_prior_ok=float(s_spd) >= CORRIDOR_PRIOR_CALM_RELIEF_MPS,
                 )
                 and _corridor_wind_usable(
                     locked_path,
