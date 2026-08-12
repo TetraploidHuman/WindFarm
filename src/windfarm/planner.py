@@ -941,6 +941,23 @@ def plan_path_details(
                     win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
                 )
             )
+            # Mid-mission + below HARD ambient: priors (and their locks) reopen calm
+            # thrash then greedy (hainan r3). Streak is unreliable — a one-step offset
+            # resets it. Use progress so early DEM priors (taiwan/fujian) stay eligible.
+            od_span = max(
+                math.hypot(
+                    float(goal[0]) - float((getattr(mission, "home", None) or start)[0]),
+                    float(goal[1]) - float((getattr(mission, "home", None) or start)[1]),
+                ),
+                1.0,
+            )
+            progress = clamp(1.0 - float(horizontal_to_goal) / od_span, 0.0, 1.0)
+            calm_mid = (
+                0.25 <= progress <= 0.80
+                and float(amb_speed) < CORRIDOR_HARD_FLOOR_MPS
+            )
+            if is_prior and calm_mid and not has_relief:
+                continue
             if not _corridor_ambient_ok(
                 amb_speed,
                 has_edge=has_edge,
@@ -992,6 +1009,8 @@ def plan_path_details(
             )
             if is_offset and int(getattr(mission, "guide_straight_streak", 0) or 0) >= 5:
                 win_need = min(float(win_need), 0.970)
+            if is_offset and calm_mid and not has_relief and not has_edge:
+                continue
             if not has_edge and not has_relief and not has_light_w and not prior_soft:
                 no_edge = (
                     CORRIDOR_NO_EDGE_WIN_NEED
