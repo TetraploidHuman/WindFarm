@@ -1,0 +1,106 @@
+{
+  "built_at": "2026-08-12",
+  "protocol": "fresh_holdout_probe_16c",
+  "note": "Third anti-overfit probe: val-split r>=8 per holdout map, disjoint from fresh16a/16b and sealed r0-7.",
+  "seed": 20260814,
+  "holdout_scenarios": [
+    "xinjiang_gobi",
+    "sichuan_foothills",
+    "shanxi_loess",
+    "taiwan_hills",
+    "gansu_hexi",
+    "guizhou_karst",
+    "hainan_coast",
+    "hubei_jianghan",
+    "tibet_lhasa",
+    "jilin_forest",
+    "neimeng_grass",
+    "yunnan_karst",
+    "zhejiang_hills",
+    "shandong_taishan",
+    "chongqing_hills",
+    "guangxi_guilin"
+  ],
+  "jobs": [
+    {
+      "map": "xinjiang_gobi",
+      "route_index": 52,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "sichuan_foothills",
+      "route_index": 32,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "shanxi_loess",
+      "route_index": 45,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "taiwan_hills",
+      "route_index": 40,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "gansu_hexi",
+      "route_index": 53,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "guizhou_karst",
+      "route_index": 11,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "hainan_coast",
+      "route_index": 24,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "hubei_jianghan",
+      "route_index": 29,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "tibet_lhasa",
+      "route_index": 52,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "jilin_forest",
+      "route_index": 38,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "neimeng_grass",
+      "route_index": 12,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "yunnan_karst",
+      "route_index": 51,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "zhejiang_hills",
+      "route_index": 33,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "shandong_taishan",
+      "route_index": 54,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "chongqing_hills",
+      "route_index": 35,
+      "split": "fresh_holdout"
+    },
+    {
+      "map": "guangxi_guilin",
+      "route_index": 10,
+      "split": "fresh_holdout"
+    }
+  ]
+}
