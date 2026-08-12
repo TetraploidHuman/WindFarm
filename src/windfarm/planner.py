@@ -1076,10 +1076,10 @@ def plan_path_details(
             )
             if od_len <= SHORT_OD_CELLS and abs(along_gate) >= MPC_SHORT_ALONG_ABS_MPS:
                 # Short full-OD with decisive |along| at launch: MPC lateral noise loses
-                # closed-loop (qinghai/hubei/shanxi/guangxi r6/r7). Freeze launch along so
-                # time-varying truth cannot re-open end-game thrash. Mild-along shorts
-                # (taiwan r7) keep MPC. Do NOT use remaining distance — late headwind on
-                # long ODs (fujian r6) still needs MPC.
+                # closed-loop (qinghai/hubei/shanxi/guangxi/chongqing r6/r7). Freeze
+                # launch along so time-varying truth cannot re-open end-game thrash.
+                # Near-calm shorts (taiwan/hainan ≈±0.12) keep MPC. Do NOT use remaining
+                # distance — late headwind on long ODs (fujian r6) still needs MPC.
                 continue
             if horizontal_to_goal <= 20.0:
                 along_now = _od_along_wind_mps(
@@ -1458,10 +1458,11 @@ TRUTH_HIGH_BAND_WIN_NEED = 0.970
 MPC_VS_STRAIGHT_NEED = 0.992
 MPC_HEADWIND_NEED = 0.985
 # Short full-OD + decisive |along|: skip MPC (r6/r7 thrash both ways).
-# |along|≥0.50; near-calm shorts (taiwan r7 ≈+0.12) keep priors+MPC.
+# |along|≥0.45 catches near-half-mps shorts (chongqing r6 ≈+0.49) that still
+# pay late mpc_relaxed_return; near-calm shorts (taiwan/hainan ≈±0.12) keep MPC.
 # od_len must use launch/home — plan_mission.start is current state (fujian r6).
 SHORT_OD_CELLS = 28.0
-MPC_SHORT_ALONG_ABS_MPS = 0.50
+MPC_SHORT_ALONG_ABS_MPS = 0.45
 # Locked via must also beat the best *fresh* corridor this replan (dynamic via swap).
 # 1% bar: avoid Shanxi-class thrash from 0.5% near-ties flipping via every step.
 CORRIDOR_LOCKED_VS_FRESH_NEED = 0.990
