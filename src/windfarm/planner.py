@@ -941,50 +941,15 @@ def plan_path_details(
                     win_need=CORRIDOR_PRIOR_SOFT_TRUTH_NEED,
                 )
             )
-            calm_relief_ok = (
-                is_prior and float(amb_speed) >= CORRIDOR_PRIOR_CALM_RELIEF_MPS
-            )
-            if (
-                not calm_relief_ok
-                and not is_prior
-                and not label.startswith("guide_corridor_locked")
-                and "_2via_" not in label
-                and float(amb_speed) < CORRIDOR_HARD_FLOOR_MPS
-                and not has_edge
-                and has_relief
-            ):
-                parts = str(label).split("_")
-                try:
-                    off_cells = float(parts[3])
-                except (ValueError, IndexError):
-                    off_cells = None
-                if (
-                    off_cells is not None
-                    and float(off_cells) >= CORRIDOR_OFFSET_CALM_MIN_CELLS
-                    and CORRIDOR_OFFSET_CALM_RELIEF_MPS
-                    <= float(amb_speed)
-                    < CORRIDOR_OFFSET_CALM_RELIEF_MAX_MPS
-                ):
-                    calm_relief_ok = _corridor_has_dem_relief(
-                        path,
-                        mission,
-                        sx=float(start[0]),
-                        sy=float(start[1]),
-                        gx=float(goal[0]),
-                        gy=float(goal[1]),
-                    ) and _corridor_has_geometry_win(
-                        path,
-                        pref_straight,
-                        mission,
-                        windless_belief=commit_windless,
-                        straight_geom_e=straight_geom_e,
-                    )
             if not _corridor_ambient_ok(
                 amb_speed,
                 has_edge=has_edge,
                 has_terrain_relief=has_relief,
                 has_light_vertical=has_light_w,
-                calm_prior_ok=calm_relief_ok,
+                calm_prior_ok=(
+                    is_prior
+                    and float(amb_speed) >= CORRIDOR_PRIOR_CALM_RELIEF_MPS
+                ),
             ) and not prior_soft:
                 continue
             if not _corridor_wind_usable(
@@ -1440,12 +1405,6 @@ def _path_wind_utilization_stats(
 CORRIDOR_HARD_FLOOR_MPS = 1.20
 # Distilled priors may use DEM relief down to this ambient; ordinary offsets may not.
 CORRIDOR_PRIOR_CALM_RELIEF_MPS = 0.45
-# Large offsets with BOTH dem climb relief and windless geometry win may unlock
-# in a narrow calm band (hainan r3 ~0.41). Floor stays above hainan r1 (~0.38);
-# ceiling stays below sichuan r3 thrash ambient (~0.57).
-CORRIDOR_OFFSET_CALM_RELIEF_MPS = 0.40
-CORRIDOR_OFFSET_CALM_RELIEF_MAX_MPS = 0.50
-CORRIDOR_OFFSET_CALM_MIN_CELLS = 6.0
 # Soft floor without a proven lateral edge.
 CORRIDOR_MIN_WIND_MPS = 1.80
 # Below this ambient horizontal wind, demand a real lateral *speed* edge + stricter Joules.
@@ -3347,39 +3306,11 @@ def _energy_guide_paths(
                 if band_below_hard and not has_relief and not has_light_w:
                     continue
                 has_edge = _corridor_has_lateral_edge(path, belief_map, straight_probe)
-                calm_offset_ok = False
-                if (
-                    band_below_hard
-                    and not has_edge
-                    and has_relief
-                    and float(offset) >= CORRIDOR_OFFSET_CALM_MIN_CELLS
-                    and CORRIDOR_OFFSET_CALM_RELIEF_MPS
-                    <= float(band_speed)
-                    < CORRIDOR_OFFSET_CALM_RELIEF_MAX_MPS
-                ):
-                    calm_offset_ok = _corridor_has_dem_relief(
-                        path,
-                        mission,
-                        sx=sx,
-                        sy=sy,
-                        gx=gx,
-                        gy=gy,
-                        via_xy=(mx, my),
-                        relief_m=relief_m,
-                        direct_rise_m=float(direct_rise),
-                    ) and _corridor_has_geometry_win(
-                        path,
-                        straight_probe,
-                        mission,
-                        windless_belief=windless,
-                        straight_geom_e=straight_geom_e,
-                    )
                 if not _corridor_ambient_ok(
                     band_speed,
                     has_edge=has_edge,
                     has_terrain_relief=has_relief,
                     has_light_vertical=has_light_w,
-                    calm_prior_ok=calm_offset_ok,
                 ):
                     continue
                 if not _corridor_wind_usable(
