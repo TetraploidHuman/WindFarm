@@ -114,6 +114,11 @@ class Mission:
     preferred_cruise_agl: float | None = None
     # True once a climb above clearance was earned with clearance-relative evidence.
     cruise_climb_earned: bool = False
+    # Cached full-OD along-track wind at first plan (short-OD MPC gate; time-varying
+    # truth must not re-open end-game thrash on guangxi-class shorts).
+    launch_along_mps: float | None = None
+    # Consecutive straight-guide wins; raises the bar to re-enter offset corridors.
+    guide_straight_streak: int = 0
 
 
 @dataclass(slots=True)
