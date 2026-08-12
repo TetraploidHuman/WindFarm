@@ -977,6 +977,17 @@ def plan_path_details(
                 route_aspect=route_aspect,
                 along_wind_mps=along_od,
             )
+            # After a long straight stretch, small offset corridors must beat straight
+            # more clearly — stops hainan/sichuan mid-route -1_3.3 flicker without
+            # banning Fujian late offsets that still clear a 3% bar.
+            is_offset = (
+                label.startswith("guide_corridor_")
+                and not label.startswith("guide_corridor_prior_")
+                and not label.startswith("guide_corridor_locked")
+                and "_2via_" not in label
+            )
+            if is_offset and int(getattr(mission, "guide_straight_streak", 0) or 0) >= 5:
+                win_need = min(float(win_need), 0.970)
             if not has_edge and not has_relief and not has_light_w and not prior_soft:
                 no_edge = (
                     CORRIDOR_NO_EDGE_WIN_NEED
@@ -1053,13 +1064,18 @@ def plan_path_details(
             along_od = _od_along_wind_mps(
                 od_origin, goal, belief_map, truth_field=truth_field, cruise_z=float(clearance)
             )
+            if getattr(mission, "launch_along_mps", None) is None:
+                mission.launch_along_mps = float(along_od)
+            along_gate = float(mission.launch_along_mps)
             od_len = math.hypot(
                 float(goal[0]) - float(od_origin[0]), float(goal[1]) - float(od_origin[1])
             )
-            if od_len <= SHORT_OD_CELLS and abs(along_od) >= MPC_SHORT_ALONG_ABS_MPS:
-                # Short full-OD with decisive |along|: MPC lateral noise loses closed-loop
-                # (qinghai/hubei/shanxi r6/r7). Near-calm shorts keep MPC. Do NOT use
-                # remaining distance — late headwind on long ODs (fujian r6) still needs MPC.
+            if od_len <= SHORT_OD_CELLS and abs(along_gate) >= MPC_SHORT_ALONG_ABS_MPS:
+                # Short full-OD with decisive |along| at launch: MPC lateral noise loses
+                # closed-loop (qinghai/hubei/shanxi/guangxi r6/r7). Freeze launch along so
+                # time-varying truth cannot re-open end-game thrash. Mild-along shorts
+                # (taiwan r7) keep MPC. Do NOT use remaining distance — late headwind on
+                # long ODs (fujian r6) still needs MPC.
                 continue
             if horizontal_to_goal <= 20.0:
                 along_now = _od_along_wind_mps(
@@ -1195,6 +1211,11 @@ def plan_path_details(
     best_path = best_path[: mission.max_steps + 1]
     if best_path and _continuous_goal_reached(best_path[-1], goal):
         best_path[-1] = (float(goal[0]), float(goal[1]), float(goal[2]))
+    mode_s = str(planning_mode)
+    if mode_s.startswith("guide_straight_agl"):
+        mission.guide_straight_streak = int(getattr(mission, "guide_straight_streak", 0) or 0) + 1
+    elif mode_s.startswith("guide_corridor_"):
+        mission.guide_straight_streak = 0
     return {
         "path": best_path,
         "path_cost": _path_cost(best_path, belief_map, mission, risk_weight, safety_weight),

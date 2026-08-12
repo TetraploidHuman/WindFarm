@@ -553,6 +553,8 @@ class NavigationEngine:
             prior_via=getattr(context.mission, "prior_via", None),
             preferred_cruise_agl=getattr(context.mission, "preferred_cruise_agl", None),
             cruise_climb_earned=bool(getattr(context.mission, "cruise_climb_earned", False)),
+            launch_along_mps=getattr(context.mission, "launch_along_mps", None),
+            guide_straight_streak=int(getattr(context.mission, "guide_straight_streak", 0) or 0),
         )
         # Reuse Dijkstra return map for a few steps (belief wind drifts slowly vs replan rate).
         cache_ttl = max(2, int(getattr(self.config.planner, "replan_interval_steps", 2)) * 2)
@@ -580,6 +582,10 @@ class NavigationEngine:
             truth_field=getattr(context, "latest_truth_field", None),
         )
         context.mission.guide_via = getattr(plan_mission, "guide_via", None)
+        context.mission.launch_along_mps = getattr(plan_mission, "launch_along_mps", None)
+        context.mission.guide_straight_streak = int(
+            getattr(plan_mission, "guide_straight_streak", 0) or 0
+        )
         # prior_via is owned by the live mission (refreshed in step); plan_mission is a copy.
         new_pref = getattr(plan_mission, "preferred_cruise_agl", None)
         new_earned = bool(getattr(plan_mission, "cruise_climb_earned", False))
