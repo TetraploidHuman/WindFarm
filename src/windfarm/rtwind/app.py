@@ -43,6 +43,7 @@ class IngestBody(BaseModel):
     vehicle_id: str = "live-1"
     t: str | None = None
     alt_agl: float | None = None
+    client_ts: float | None = None
 
 
 def create_app(config: RtwindConfig | None = None) -> FastAPI:

@@ -1,25 +1,33 @@
 package cn.tetraploid.rtwind.sensor.data
 
 import io.ktor.client.HttpClient
-import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.request.url
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.websocket.Frame
+import io.ktor.websocket.CloseReason
+import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,13 +43,17 @@ class RtwindApi @Inject constructor(
     private val json: Json,
 ) {
     private val outbound = MutableSharedFlow<TelemetryPayload>(
-        extraBufferCapacity = 64,
+        replay = 0,
+        extraBufferCapacity = 8,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    private var wsJob: Job? = null
-    @Volatile private var wsConnected: Boolean = false
+    /** Latest frame for HTTP coalesce (always overwrite). */
+    private val latestHttp = AtomicReference<TelemetryPayload?>(null)
+    private var transportJob: Job? = null
+    private val connected = MutableStateFlow(false)
+    private val sendMutex = Mutex()
 
-    fun isWsConnected(): Boolean = wsConnected
+    fun isWsConnected(): Boolean = connected.value
 
     suspend fun health(baseUrl: String): Result<String> = runCatching {
         val resp = client.get("$baseUrl/api/health")
@@ -50,58 +62,90 @@ class RtwindApi @Inject constructor(
         text
     }
 
-    suspend fun ingestHttp(baseUrl: String, payload: TelemetryPayload): Result<Unit> = runCatching {
-        val resp = client.post("$baseUrl/api/ingest") {
-            contentType(ContentType.Application.Json)
-            setBody(payload)
-        }
-        if (!resp.status.isSuccess()) {
-            error("HTTP ${resp.status.value}: ${resp.bodyAsText()}")
-        }
-    }
-
-    fun enqueueWs(payload: TelemetryPayload) {
+    /** Non-blocking publish: WS queue + HTTP latest coalesce. */
+    fun publish(payload: TelemetryPayload) {
         outbound.tryEmit(payload)
+        latestHttp.set(payload)
     }
 
-    fun startWebSocket(scope: CoroutineScope, baseUrl: String) {
-        if (wsJob?.isActive == true) return
+    fun startTransport(scope: CoroutineScope, baseUrl: String) {
+        if (transportJob?.isActive == true) return
         val wsUrl = toWsUrl(baseUrl)
-        wsJob = scope.launch {
-            while (isActive) {
-                try {
-                    client.webSocket(urlString = wsUrl) {
-                        wsConnected = true
+        transportJob = scope.launch {
+            // HTTP coalesce worker: never blocks producers; always sends newest pending frame
+            val httpWorker = launch {
+                while (isActive) {
+                    if (connected.value) {
+                        delay(50)
+                        continue
+                    }
+                    val payload = latestHttp.getAndSet(null)
+                    if (payload == null) {
+                        delay(40)
+                        continue
+                    }
+                    runCatching {
+                        val resp = client.post("$baseUrl/api/ingest") {
+                            contentType(ContentType.Application.Json)
+                            setBody(payload)
+                        }
+                        if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
+                    }
+                    // immediately loop — if newer frame arrived during request, send it next
+                }
+            }
+
+            // WS worker with fast reconnect
+            val wsWorker = launch {
+                while (isActive) {
+                    try {
+                        val session = client.webSocketSession { url(wsUrl) }
+                        connected.value = true
                         val sender = launch {
                             outbound.collect { payload ->
-                                send(Frame.Text(json.encodeToString(WsIngestEnvelope(frame = payload))))
-                            }
-                        }
-                        try {
-                            for (frame in incoming) {
-                                if (frame is Frame.Text) {
-                                    frame.readText() // drain server events
+                                sendMutex.withLock {
+                                    session.send(
+                                        Frame.Text(json.encodeToString(WsIngestEnvelope(frame = payload))),
+                                    )
                                 }
                             }
-                        } finally {
-                            sender.cancel()
                         }
+                        val reader = launch {
+                            try {
+                                for (frame in session.incoming) {
+                                    if (frame is Frame.Text) frame.readText()
+                                }
+                            } catch (_: Exception) {
+                            }
+                        }
+                        reader.join()
+                        sender.cancel()
+                        runCatching { session.close(CloseReason(CloseReason.Codes.NORMAL, "bye")) }
+                    } catch (_: Exception) {
+                        // fall through to reconnect
+                    } finally {
+                        connected.value = false
                     }
-                } catch (_: Exception) {
-                    // reconnect below
-                } finally {
-                    wsConnected = false
+                    delay(300)
                 }
-                kotlinx.coroutines.delay(800)
             }
+
+            httpWorker.join()
+            wsWorker.cancel()
         }
     }
 
-    fun stopWebSocket() {
-        wsJob?.cancel()
-        wsJob = null
-        wsConnected = false
+    fun stopTransport() {
+        transportJob?.cancel()
+        transportJob = null
+        connected.value = false
+        latestHttp.set(null)
     }
+
+    // Back-compat names used by aggregator
+    fun enqueueWs(payload: TelemetryPayload) = publish(payload)
+    fun startWebSocket(scope: CoroutineScope, baseUrl: String) = startTransport(scope, baseUrl)
+    fun stopWebSocket() = stopTransport()
 
     companion object {
         fun toWsUrl(baseUrl: String): String {
@@ -114,9 +158,11 @@ class RtwindApi @Inject constructor(
                 b.startsWith("wss://", ignoreCase = true) || b.startsWith("ws://", ignoreCase = true) -> b
                 else -> "ws://$b"
             }
-            return if (withScheme.endsWith("/api/ws/ingest")) withScheme
-            else if (withScheme.endsWith("/api/ws")) withScheme.replace("/api/ws", "/api/ws/ingest")
-            else "$withScheme/api/ws/ingest"
+            return when {
+                withScheme.endsWith("/api/ws/ingest") -> withScheme
+                withScheme.endsWith("/api/ws") -> withScheme.replace("/api/ws", "/api/ws/ingest")
+                else -> "$withScheme/api/ws/ingest"
+            }
         }
     }
 }

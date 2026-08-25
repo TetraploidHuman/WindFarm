@@ -26,6 +26,7 @@ class TelemetryFrame:
     link: LinkState = "ok"
     seq: int = 0
     alt_agl: float | None = None
+    client_ts: float | None = None  # phone unix epoch seconds for e2e latency
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -29,6 +29,7 @@ def _parse_ingest(payload: dict[str, Any], *, source: SourceKind = "live") -> Te
         battery=float(payload["battery"]) if payload.get("battery") is not None else None,
         link="ok",
         alt_agl=float(payload["alt_agl"]) if payload.get("alt_agl") is not None else None,
+        client_ts=float(payload["client_ts"]) if payload.get("client_ts") is not None else None,
     )
 
 

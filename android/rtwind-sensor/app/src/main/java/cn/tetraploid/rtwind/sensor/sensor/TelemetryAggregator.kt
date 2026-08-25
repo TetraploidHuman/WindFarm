@@ -43,13 +43,10 @@ class TelemetryAggregator @Inject constructor(
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
     private var linkJob: Job? = null
-    private var serviceScope: CoroutineScope? = null
-    @Volatile private var httpInFlight: Boolean = false
     private var cachedSettings: AppSettings = AppSettings()
 
     fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
-        serviceScope = scope
         _snapshot.update {
             it.copy(
                 serviceRunning = true,
@@ -61,7 +58,7 @@ class TelemetryAggregator @Inject constructor(
 
         linkJob = scope.launch {
             cachedSettings = settingsRepository.settings.first()
-            api.startWebSocket(scope, cachedSettings.serverBaseUrl)
+            api.startTransport(scope, cachedSettings.serverBaseUrl)
             settingsRepository.settings.collect { cachedSettings = it }
         }
 
@@ -76,8 +73,7 @@ class TelemetryAggregator @Inject constructor(
                             )
                         }
                         publishLocal()
-                        // 定位一更新就立刻推，不等定时器（WS 非阻塞）
-                        pushNow(force = false)
+                        pushFrame()
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -92,6 +88,8 @@ class TelemetryAggregator @Inject constructor(
                     imuTracker.readings().collect { reading ->
                         imu = reading
                         publishLocal()
+                        // 姿态变化也立刻推（之前只改本地 UI，网页要等 GPS/定时器 → 像卡了几秒）
+                        pushFrame()
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -100,11 +98,13 @@ class TelemetryAggregator @Inject constructor(
             },
         )
 
-        // 定时兜底：无新 GPS 时仍按频率刷新姿态等字段
         uploadJob = scope.launch {
             while (isActive) {
-                pushNow(force = true)
+                pushFrame()
                 delay((1000L / cachedSettings.uploadHz.coerceAtLeast(1)))
+                _snapshot.update {
+                    it.copy(uploadChannel = if (api.isWsConnected()) "WebSocket" else "HTTP")
+                }
             }
         }
     }
@@ -116,7 +116,7 @@ class TelemetryAggregator @Inject constructor(
         uploadJob = null
         linkJob?.cancel()
         linkJob = null
-        api.stopWebSocket()
+        api.stopTransport()
         _snapshot.update {
             it.copy(
                 serviceRunning = false,
@@ -150,21 +150,17 @@ class TelemetryAggregator @Inject constructor(
         }
     }
 
-    private suspend fun pushNow(force: Boolean) {
+    private fun pushFrame() {
         val g = gps ?: run {
             _snapshot.update {
-                it.copy(
-                    lastUploadOk = false,
-                    lastUploadError = "等待定位…",
-                    locationDiag = locationTracker.diagnose(),
-                )
+                it.copy(lastUploadOk = false, lastUploadError = "等待定位…")
             }
             return
         }
 
-        val minIntervalMs = (1000L / cachedSettings.uploadHz.coerceAtLeast(1))
+        val minIntervalMs = (1000L / cachedSettings.uploadHz.coerceIn(1, 20)).coerceAtLeast(50L)
         val now = System.currentTimeMillis()
-        if (!force && now - lastPushMs < minIntervalMs) return
+        if (now - lastPushMs < minIntervalMs) return
         lastPushMs = now
 
         val payload = TelemetryPayload(
@@ -181,53 +177,18 @@ class TelemetryAggregator @Inject constructor(
             battery = readBatteryPct(),
             vehicleId = cachedSettings.vehicleId,
             t = TelemetryPayload.nowIso(),
+            clientTs = now / 1000.0,
         )
 
-        if (api.isWsConnected()) {
-            // 非阻塞入队；队列满时丢最旧帧，不会卡住采集
-            api.enqueueWs(payload)
-            _snapshot.update {
-                it.copy(
-                    lastUploadOk = true,
-                    lastUploadError = null,
-                    uploadChannel = "WebSocket",
-                    uploadsTotal = it.uploadsTotal + 1,
-                )
-            }
-            return
-        }
-
-        // HTTP 回退：最多在途 1 个请求，不 await，避免 RTT 阻塞采集/定时器
-        if (httpInFlight) return
-        val scope = serviceScope ?: return
-        httpInFlight = true
-        val base = cachedSettings.serverBaseUrl
-        scope.launch {
-            try {
-                api.ingestHttp(base, payload)
-                    .onSuccess {
-                        _snapshot.update {
-                            it.copy(
-                                lastUploadOk = true,
-                                lastUploadError = null,
-                                uploadChannel = "HTTP",
-                                uploadsTotal = it.uploadsTotal + 1,
-                            )
-                        }
-                    }
-                    .onFailure { err ->
-                        _snapshot.update {
-                            it.copy(
-                                lastUploadOk = false,
-                                lastUploadError = err.message ?: "上传失败",
-                                uploadChannel = "HTTP",
-                                uploadsFailed = it.uploadsFailed + 1,
-                            )
-                        }
-                    }
-            } finally {
-                httpInFlight = false
-            }
+        // 完全非阻塞：内部 WS 队列 + HTTP 合并发送
+        api.publish(payload)
+        _snapshot.update {
+            it.copy(
+                lastUploadOk = true,
+                lastUploadError = null,
+                uploadChannel = if (api.isWsConnected()) "WebSocket" else "HTTP",
+                uploadsTotal = it.uploadsTotal + 1,
+            )
         }
     }
 

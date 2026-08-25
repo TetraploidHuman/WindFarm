@@ -20,6 +20,7 @@ data class TelemetryPayload(
     @SerialName("vehicle_id") val vehicleId: String = "live-1",
     val t: String? = null,
     @SerialName("alt_agl") val altAgl: Double? = null,
+    @SerialName("client_ts") val clientTs: Double? = null,
 ) {
     companion object {
         fun nowIso(): String = Instant.now().toString()
