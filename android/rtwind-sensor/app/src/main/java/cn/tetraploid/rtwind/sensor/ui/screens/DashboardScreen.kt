@@ -52,9 +52,13 @@ fun DashboardScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
-        permissionsReady = grants.values.all { it }
-        if (!permissionsReady) {
-            Toast.makeText(context, "需要定位与通知权限才能上传遥测", Toast.LENGTH_LONG).show()
+        val hasLocation = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        permissionsReady = hasLocation
+        if (!hasLocation) {
+            Toast.makeText(context, "需要定位权限才能上传遥测（请选「精确位置」）", Toast.LENGTH_LONG).show()
+        } else if (grants[Manifest.permission.ACCESS_FINE_LOCATION] != true) {
+            Toast.makeText(context, "建议授予「精确位置」，否则定位可能很慢或不准", Toast.LENGTH_LONG).show()
         }
     }
 

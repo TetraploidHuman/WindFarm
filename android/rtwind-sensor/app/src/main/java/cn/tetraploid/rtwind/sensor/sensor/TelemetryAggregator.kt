@@ -3,7 +3,9 @@ package cn.tetraploid.rtwind.sensor.sensor
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.location.LocationManager
 import android.os.BatteryManager
+import android.provider.Settings
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
@@ -45,12 +47,19 @@ class TelemetryAggregator @Inject constructor(
     fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
         _snapshot.update { it.copy(serviceRunning = true) }
+        publishLocal()
 
         sensorJobs = listOf(
             scope.launch {
-                locationTracker.readings().collect { reading ->
-                    gps = reading
-                    publishLocal()
+                runCatching {
+                    locationTracker.readings().collect { reading ->
+                        gps = reading
+                        publishLocal()
+                    }
+                }.onFailure { err ->
+                    _snapshot.update {
+                        it.copy(lastUploadError = "定位异常: ${err.message}")
+                    }
                 }
             },
             scope.launch {
@@ -58,6 +67,10 @@ class TelemetryAggregator @Inject constructor(
                     imuTracker.readings().collect { reading ->
                         imu = reading
                         publishLocal()
+                    }
+                }.onFailure { err ->
+                    _snapshot.update {
+                        it.copy(lastUploadError = "IMU 异常: ${err.message}")
                     }
                 }
             },
@@ -81,21 +94,24 @@ class TelemetryAggregator @Inject constructor(
     }
 
     private fun publishLocal() {
-        val g = gps ?: return
-        val climb = computeClimbRate(g.altMsl)
+        val g = gps
+        val climb = g?.let { computeClimbRate(it.altMsl) } ?: 0.0
         _snapshot.update {
             it.copy(
-                lat = g.lat,
-                lon = g.lon,
-                altMsl = g.altMsl,
-                heading = if (g.speedMps > 0.5) g.bearing else imu.yawDeg,
+                lat = g?.lat,
+                lon = g?.lon,
+                altMsl = g?.altMsl,
+                heading = when {
+                    g != null && g.speedMps > 0.5 -> g.bearing
+                    else -> imu.yawDeg
+                },
                 roll = imu.rollDeg,
                 pitch = imu.pitchDeg,
                 yaw = imu.yawDeg,
-                groundspeed = g.speedMps,
+                groundspeed = g?.speedMps ?: 0.0,
                 climbRate = climb,
                 battery = readBatteryPct(),
-                gpsAccuracyM = g.accuracyM,
+                gpsAccuracyM = g?.accuracyM,
             )
         }
     }
@@ -103,7 +119,12 @@ class TelemetryAggregator @Inject constructor(
     private suspend fun uploadOnce(settings: AppSettings) {
         val g = gps
         if (g == null) {
-            _snapshot.update { it.copy(lastUploadOk = false, lastUploadError = "等待 GPS 定位…") }
+            _snapshot.update {
+                it.copy(
+                    lastUploadOk = false,
+                    lastUploadError = gpsWaitHint(),
+                )
+            }
             return
         }
 
@@ -142,6 +163,22 @@ class TelemetryAggregator @Inject constructor(
                     )
                 }
             }
+    }
+
+    private fun gpsWaitHint(): String {
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val gpsOn = runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+        val netOn = runCatching { lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+        val locationModeOk = runCatching {
+            Settings.Secure.getInt(context.contentResolver, Settings.Secure.LOCATION_MODE) !=
+                Settings.Secure.LOCATION_MODE_OFF
+        }.getOrDefault(true)
+
+        return when {
+            !locationModeOk -> "请打开系统定位开关"
+            !gpsOn && !netOn -> "定位服务未开启，请打开 GPS / 位置信息"
+            else -> "等待 GPS 定位…请到室外或窗边，并确认已授予「精确位置」"
+        }
     }
 
     private fun computeClimbRate(altMsl: Double): Double {
