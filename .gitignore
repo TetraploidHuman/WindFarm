@@ -52,3 +52,5 @@ scenarios/*/truth.json
 scenarios/*/*.npz
 scenarios/*/model.json
 scenarios/*/metrics.json
+dashboard.html
+/dashboard.html
