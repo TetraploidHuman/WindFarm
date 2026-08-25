@@ -1,7 +1,6 @@
 package cn.tetraploid.rtwind.sensor.data
 
 import io.ktor.client.HttpClient
-import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -18,8 +17,9 @@ class RtwindApi @Inject constructor(
 ) {
     suspend fun health(baseUrl: String): Result<String> = runCatching {
         val resp = client.get("$baseUrl/api/health")
-        if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
-        resp.body<Map<String, Any>>().toString()
+        val text = resp.bodyAsText()
+        if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}: $text")
+        text
     }
 
     suspend fun ingest(baseUrl: String, payload: TelemetryPayload): Result<Unit> = runCatching {
