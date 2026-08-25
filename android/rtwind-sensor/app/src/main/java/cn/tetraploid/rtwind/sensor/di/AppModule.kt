@@ -7,7 +7,7 @@ import dagger.hilt.components.SingletonComponent
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.client.plugins.defaultRequest
+import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import java.util.concurrent.TimeUnit
@@ -31,13 +31,12 @@ object AppModule {
         engine {
             config {
                 connectTimeout(10, TimeUnit.SECONDS)
-                readTimeout(10, TimeUnit.SECONDS)
+                readTimeout(0, TimeUnit.SECONDS)
                 writeTimeout(10, TimeUnit.SECONDS)
+                pingInterval(15, TimeUnit.SECONDS)
             }
         }
         install(ContentNegotiation) { json(json) }
-        defaultRequest {
-            // no-op; base URL varies per settings
-        }
+        install(WebSockets)
     }
 }

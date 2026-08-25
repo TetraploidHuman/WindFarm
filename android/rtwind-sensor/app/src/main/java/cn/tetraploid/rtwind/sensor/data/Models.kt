@@ -29,7 +29,7 @@ data class TelemetryPayload(
 data class AppSettings(
     val serverBaseUrl: String = DEFAULT_SERVER,
     val vehicleId: String = "android-drone-1",
-    val uploadHz: Int = 5,
+    val uploadHz: Int = 10,
     val enableCamera: Boolean = true,
     val enableImu: Boolean = true,
 ) {
@@ -54,6 +54,7 @@ data class TelemetrySnapshot(
     val locationDiag: String = "未开始定位",
     val lastUploadOk: Boolean? = null,
     val lastUploadError: String? = null,
+    val uploadChannel: String = "—",
     val uploadsTotal: Long = 0,
     val uploadsFailed: Long = 0,
     val serviceRunning: Boolean = false,

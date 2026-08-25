@@ -17,8 +17,8 @@ android {
         applicationId = "cn.tetraploid.rtwind.sensor"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -95,6 +95,7 @@ dependencies {
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.content.negotiation)
+    implementation(libs.ktor.client.websockets)
     implementation(libs.ktor.serialization.json)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)

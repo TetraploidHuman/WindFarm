@@ -1,7 +1,6 @@
 package cn.tetraploid.rtwind.sensor.sensor
 
 import android.content.Context
-import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import cn.tetraploid.rtwind.sensor.data.AppSettings
@@ -42,6 +41,7 @@ class TelemetryAggregator @Inject constructor(
 
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
+    private var linkJob: Job? = null
 
     fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
@@ -53,6 +53,11 @@ class TelemetryAggregator @Inject constructor(
             )
         }
         publishLocal()
+
+        linkJob = scope.launch {
+            val settings = settingsRepository.settings.first()
+            api.startWebSocket(scope, settings.serverBaseUrl)
+        }
 
         sensorJobs = listOf(
             scope.launch {
@@ -83,7 +88,6 @@ class TelemetryAggregator @Inject constructor(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
-                    // IMU 失败不阻断 GPS 上传
                 }
             },
         )
@@ -102,6 +106,9 @@ class TelemetryAggregator @Inject constructor(
         sensorJobs = emptyList()
         uploadJob?.cancel()
         uploadJob = null
+        linkJob?.cancel()
+        linkJob = null
+        api.stopWebSocket()
         _snapshot.update {
             it.copy(
                 serviceRunning = false,
@@ -164,12 +171,27 @@ class TelemetryAggregator @Inject constructor(
             t = TelemetryPayload.nowIso(),
         )
 
-        api.ingest(settings.serverBaseUrl, payload)
+        if (api.isWsConnected()) {
+            api.enqueueWs(payload)
+            _snapshot.update {
+                it.copy(
+                    lastUploadOk = true,
+                    lastUploadError = null,
+                    uploadChannel = "WebSocket",
+                    uploadsTotal = it.uploadsTotal + 1,
+                )
+            }
+            return
+        }
+
+        // WS 未连上时退回 HTTP，避免完全断流
+        api.ingestHttp(settings.serverBaseUrl, payload)
             .onSuccess {
                 _snapshot.update {
                     it.copy(
                         lastUploadOk = true,
                         lastUploadError = null,
+                        uploadChannel = "HTTP",
                         uploadsTotal = it.uploadsTotal + 1,
                     )
                 }
@@ -179,6 +201,7 @@ class TelemetryAggregator @Inject constructor(
                     it.copy(
                         lastUploadOk = false,
                         lastUploadError = err.message ?: "上传失败",
+                        uploadChannel = "HTTP",
                         uploadsFailed = it.uploadsFailed + 1,
                     )
                 }
@@ -196,7 +219,7 @@ class TelemetryAggregator @Inject constructor(
     }
 
     private fun readBatteryPct(): Double? {
-        val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val intent = context.registerReceiver(null, IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
             ?: return null
         val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)

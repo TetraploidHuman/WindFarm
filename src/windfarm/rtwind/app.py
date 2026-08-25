@@ -182,6 +182,28 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         q = hub.subscribe()
+
+        async def _ingest_reader() -> None:
+            """Phone / UAV clients may push telemetry over the same WS as dashboard."""
+            while True:
+                msg = await websocket.receive_json()
+                if not isinstance(msg, dict):
+                    continue
+                payload: dict[str, Any]
+                if msg.get("type") == "ingest":
+                    frame_body = msg.get("frame", msg)
+                    if not isinstance(frame_body, dict):
+                        continue
+                    payload = dict(frame_body)
+                elif "lat" in msg and "lon" in msg:
+                    payload = dict(msg)
+                else:
+                    continue
+                if "alt_msl" not in payload and "alt" in payload:
+                    payload["alt_msl"] = payload["alt"]
+                await live.ingest(payload)
+
+        reader_task = asyncio.create_task(_ingest_reader(), name="rtwind-ws-ingest")
         try:
             await websocket.send_json({"type": "hello", **hub.source_snapshot(), "health": hub.health()})
             latest = hub.latest()
@@ -199,6 +221,11 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
         finally:
+            reader_task.cancel()
+            try:
+                await reader_task
+            except asyncio.CancelledError:
+                pass
             hub.unsubscribe(q)
 
     @app.get("/")
