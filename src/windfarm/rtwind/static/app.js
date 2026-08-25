@@ -503,13 +503,7 @@
     els.mLink.textContent = linkLabel(frame.link);
     els.attBall.style.transform = `translateY(${(-frame.pitch) * 1.2}px) rotate(${frame.roll}deg)`;
     els.hudPos.textContent = `${frame.lat.toFixed(5)}, ${frame.lon.toFixed(5)}`;
-    let lagTxt = `序号 ${frame.seq}`;
-    if (frame.client_ts != null && Number.isFinite(frame.client_ts)) {
-      const lagMs = Math.max(0, Date.now() - frame.client_ts * 1000);
-      lagTxt += ` · 端到端 ${Math.round(lagMs)} ms`;
-      els.mLink.textContent = `${linkLabel(frame.link)} · ${Math.round(lagMs)}ms`;
-    }
-    els.hudSeq.textContent = lagTxt;
+    els.hudSeq.textContent = `序号 ${frame.seq}`;
     els.clock.textContent = frame.t;
 
     marker.setLatLng([frame.lat, frame.lon]);
