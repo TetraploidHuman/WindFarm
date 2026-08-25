@@ -30,10 +30,11 @@ object AppModule {
     fun provideHttpClient(json: Json): HttpClient = HttpClient(OkHttp) {
         engine {
             config {
-                connectTimeout(10, TimeUnit.SECONDS)
+                connectTimeout(5, TimeUnit.SECONDS)
                 readTimeout(0, TimeUnit.SECONDS)
-                writeTimeout(10, TimeUnit.SECONDS)
-                pingInterval(15, TimeUnit.SECONDS)
+                writeTimeout(5, TimeUnit.SECONDS)
+                // 关闭 OkHttp 层 ping：部分代理/服务端不回 pong，会导致约数秒后断线重连
+                // pingInterval(15, TimeUnit.SECONDS)
             }
         }
         install(ContentNegotiation) { json(json) }
