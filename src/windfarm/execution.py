@@ -987,13 +987,15 @@ class NavigationEngine:
         physics_u = trilinear_sample(physics["u_layers"], state_x, state_y, state.z)
         physics_v = trilinear_sample(physics["v_layers"], state_x, state_y, state.z)
         physics_w = trilinear_sample(physics["w_layers"], state_x, state_y, state.z)
-        belief_energy = _sample_belief_scalar(context.belief_map, "expected_energy_gain", state_x, state_y, state.z)
-        belief_uncertainty = _sample_belief_scalar(context.belief_map, "uncertainty", state_x, state_y, state.z)
-        belief_confidence = _sample_belief_scalar(context.belief_map, "confidence", state_x, state_y, state.z)
-        belief_entropy_value = _sample_belief_scalar(context.belief_map, "belief_entropy", state_x, state_y, state.z)
-        belief_safety = _sample_belief_scalar(context.belief_map, "safety_penalty", state_x, state_y, state.z)
-        belief_uplift_prob = _sample_belief_scalar(context.belief_map, "mode_prob_uplift", state_x, state_y, state.z)
-        belief_sink_prob = _sample_belief_scalar(context.belief_map, "mode_prob_sink", state_x, state_y, state.z)
+        # Log from field_arrays (prediction writes arrays; cells often stay at defaults).
+        # Keep _sample_belief_scalar for closed-loop safety reads (path parity).
+        belief_energy = _sample_belief_field_scalar(context.belief_map, "expected_energy_gain", state_x, state_y, state.z)
+        belief_uncertainty = _sample_belief_field_scalar(context.belief_map, "uncertainty", state_x, state_y, state.z)
+        belief_confidence = _sample_belief_field_scalar(context.belief_map, "confidence", state_x, state_y, state.z)
+        belief_entropy_value = _sample_belief_field_scalar(context.belief_map, "belief_entropy", state_x, state_y, state.z)
+        belief_safety = _sample_belief_field_scalar(context.belief_map, "safety_penalty", state_x, state_y, state.z)
+        belief_uplift_prob = _sample_belief_field_scalar(context.belief_map, "mode_prob_uplift", state_x, state_y, state.z)
+        belief_sink_prob = _sample_belief_field_scalar(context.belief_map, "mode_prob_sink", state_x, state_y, state.z)
         truth_payload = None
         if truth_field:
             truth_u = trilinear_sample(truth_field["u"], state_x, state_y, state.z)
@@ -1151,7 +1153,7 @@ class NavigationEngine:
                 "safety": belief_safety,
                 "uplift_prob": belief_uplift_prob,
                 "sink_prob": belief_sink_prob,
-                "w": _sample_belief_scalar(context.belief_map, "wind_w", state_x, state_y, state.z),
+                "w": _sample_belief_field_scalar(context.belief_map, "wind_w", state_x, state_y, state.z),
                 "altitude_level": state_level,
             },
             "observation": observation_payload,
@@ -1572,6 +1574,14 @@ def _goal_reached(state: DroneState, goal: tuple[int, int] | tuple[int, int, int
 
 def _state_near_waypoint(state: DroneState, waypoint: tuple[int, int, int]) -> bool:
     return math.hypot(state.x - waypoint[0], state.y - waypoint[1]) <= 0.35 and abs(state.z - waypoint[2]) <= 0.45
+
+
+def _sample_belief_field_scalar(belief_map, attr: str, x: float, y: float, z: float) -> float:
+    """Sample prediction-updated belief fields for telemetry / report logging."""
+    arrays = getattr(belief_map, "field_arrays", None)
+    if arrays is not None and attr in arrays:
+        return float(trilinear_sample(arrays[attr], x, y, z))
+    return _sample_belief_scalar(belief_map, attr, x, y, z)
 
 
 def _sample_belief_scalar(belief_map, attr: str, x: float, y: float, z: float) -> float:

@@ -3,7 +3,13 @@ name = "windfarm"
 version = "0.1.0"
 description = "Wind-field downscaling and route planning for UAV missions."
 requires-python = ">=3.11"
-dependencies = ["xgboost>=3.2.0", "lightgbm>=4.6.0"]
+dependencies = [
+  "xgboost>=3.2.0",
+  "lightgbm>=4.6.0",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pymavlink>=2.4.40",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

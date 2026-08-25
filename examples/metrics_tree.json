@@ -1,9 +1,0 @@
-{
-  "rmse_physics": 0.6687437036624649,
-  "rmse_final": 0.5801075461619255,
-  "direction_mae_rad": 0.04823630116046778,
-  "train_size": 38707,
-  "train_size_used": 12000,
-  "test_size": 16589,
-  "model_type": "gbrt"
-}

@@ -512,6 +512,7 @@ class WindFarmPipeline:
                 "rmse_final": 0.0,
                 "vertical_mae_physics": 0.0,
                 "vertical_mae_final": 0.0,
+                "direction_mae_physics": 0.0,
                 "direction_mae_rad": 0.0,
             }
 
@@ -574,13 +575,16 @@ class WindFarmPipeline:
         err_phy = np.sqrt((u_obs_a - u_phy_a) ** 2 + (v_obs_a - v_phy_a) ** 2 + (w_obs_a - w_phy_a) ** 2)
         err_final = np.sqrt((u_obs_a - u_final) ** 2 + (v_obs_a - v_final) ** 2 + (w_obs_a - w_final) ** 2)
         obs_dir = np.arctan2(u_obs_a, v_obs_a)
+        pred_dir_phy = np.arctan2(u_phy_a, v_phy_a)
         pred_dir = np.arctan2(u_final, v_final)
+        direction_err_phy = np.abs(obs_dir - pred_dir_phy)
         direction_err = np.abs(obs_dir - pred_dir)
         return {
             "rmse_physics": float(np.sqrt(np.mean(err_phy * err_phy))) if err_phy.size else 0.0,
             "rmse_final": float(np.sqrt(np.mean(err_final * err_final))) if err_final.size else 0.0,
             "vertical_mae_physics": float(np.mean(np.abs(w_obs_a - w_phy_a))) if w_obs_a.size else 0.0,
             "vertical_mae_final": float(np.mean(np.abs(w_obs_a - w_final))) if w_obs_a.size else 0.0,
+            "direction_mae_physics": float(np.mean(direction_err_phy)) if direction_err_phy.size else 0.0,
             "direction_mae_rad": float(np.mean(direction_err)) if direction_err.size else 0.0,
         }
 

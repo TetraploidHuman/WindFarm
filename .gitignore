@@ -3,15 +3,34 @@
 .idea/
 *.iml
 .qwen/
+.kotlin/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
-.venv-linux/
+.venv-*/
 dist/
 build/
 .pytest_cache/
 .mypy_cache/
+result
+/result
+
+# Android / signing secrets (never push)
+**/local.properties
+**/keystore.properties
+**/*.jks
+**/*.keystore
+android/**/build/
+android/**/.gradle/
+android/**/dist/
+
+# Large local caches / downloads
+.tmp_proxy_srtm.gz
+*.zip
+data/*.hgt
+data/*.hgt.gz
+charts/.fonts/
 
 # Large local experiment outputs (regenerable)
 runs/
@@ -21,6 +40,11 @@ runs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Proprietary system fonts vendored locally for chart rendering (SimHei 黑体)
+fonts/SimHei.ttf
+fonts/*.ttf
+fonts/*.ttc
 
 # Heavy regenerable scenario products (rebuild via simulate/resample scripts)
 scenarios/*/training.json

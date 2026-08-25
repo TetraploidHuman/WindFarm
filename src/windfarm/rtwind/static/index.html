@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rtwind · 实时监视</title>
+  <script>
+    (function () {
+      var path = window.location.pathname.replace(/\/index\.html$/i, "");
+      if (!path || path === "/") return;
+      if (!path.endsWith("/")) path += "/";
+      var base = document.createElement("base");
+      base.href = path;
+      document.head.appendChild(base);
+    })();
+  </script>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("rtwind-theme");
+        if (t !== "light" && t !== "dark") {
+          t = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="static/style.css?v=11" />
+</head>
+<body>
+  <div id="app">
+    <aside class="rail">
+      <div class="brand">
+        <span class="brand-mark">RT</span>
+        <div>
+          <div class="brand-title">rtwind</div>
+          <div class="brand-sub">风场实时监视</div>
+        </div>
+        <button type="button" id="btnTheme" class="theme-btn" title="切换主题" aria-label="切换暗黑/明亮主题">
+          <span class="theme-icon-dark" aria-hidden="true">☾</span>
+          <span class="theme-icon-light" aria-hidden="true">☀</span>
+        </button>
+      </div>
+
+      <div class="source-switch" role="group" aria-label="遥测数据源">
+        <button type="button" id="btnSim" class="src-btn active" data-source="sim">模拟</button>
+        <button type="button" id="btnLive" class="src-btn" data-source="live">真机</button>
+      </div>
+      <div id="sourceBadge" class="badge sim">模拟 · 连接中</div>
+
+      <section class="panel">
+        <h2>飞行状态</h2>
+        <div class="metrics">
+          <div><span>空速</span><strong id="mAir">—</strong><em>m/s</em></div>
+          <div><span>地速</span><strong id="mGs">—</strong><em>m/s</em></div>
+          <div><span>海拔</span><strong id="mMsl">—</strong><em>m</em></div>
+          <div><span>相对高</span><strong id="mAgl">—</strong><em>m</em></div>
+          <div><span>航向</span><strong id="mHdg">—</strong><em>°</em></div>
+          <div><span>爬升率</span><strong id="mClimb">—</strong><em>m/s</em></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>姿态</h2>
+        <div class="attitude-row">
+          <div class="att-box" id="horizon" title="姿态仪">
+            <div class="att-ball" id="attBall"></div>
+            <div class="att-wing"></div>
+          </div>
+          <div class="metrics compact">
+            <div><span>滚转</span><strong id="mRoll">—</strong><em>°</em></div>
+            <div><span>俯仰</span><strong id="mPitch">—</strong><em>°</em></div>
+            <div><span>偏航</span><strong id="mYaw">—</strong><em>°</em></div>
+            <div><span>链路</span><strong id="mLink">—</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>环境</h2>
+        <div class="metrics">
+          <div><span>地形高</span><strong id="eDem">—</strong><em>m</em></div>
+          <div><span>风速</span><strong id="eWind">—</strong><em>m/s</em></div>
+          <div><span>风向</span><strong id="eDir">—</strong><em>°</em></div>
+          <div><span>气温</span><strong id="eTemp">—</strong><em>°C</em></div>
+        </div>
+        <p class="meta" id="eMeta">环境待机</p>
+      </section>
+
+      <section class="panel sim-panel" id="simPanel">
+        <h2>模拟设置</h2>
+        <div class="sim-origin-form">
+          <label class="field">
+            <span>纬度</span>
+            <input type="number" id="simLat" step="0.00001" placeholder="27.908" />
+          </label>
+          <label class="field">
+            <span>经度</span>
+            <input type="number" id="simLon" step="0.00001" placeholder="112.922" />
+          </label>
+        </div>
+        <div class="sim-actions">
+          <button type="button" id="btnApplySimOrigin" class="ghost primary">应用原点</button>
+          <button type="button" id="btnGeoSim" class="ghost" title="使用浏览器定位">定位</button>
+        </div>
+        <label class="chk pick-mode"><input type="checkbox" id="pickOrigin" /> 点击地图设置原点</label>
+        <p class="meta" id="simMeta">盘旋中心 —</p>
+      </section>
+
+      <section class="panel spark">
+        <h2>高度曲线</h2>
+        <canvas id="altChart" width="280" height="72"></canvas>
+        <h2>空速曲线</h2>
+        <canvas id="spdChart" width="280" height="72"></canvas>
+      </section>
+
+      <section class="panel">
+        <h2>地图图层</h2>
+        <div class="layer-toggles">
+          <label class="chk"><input type="checkbox" id="layerDem" checked /> 地形热力</label>
+          <label class="chk"><input type="checkbox" id="layerWind" checked /> 风场矢量</label>
+        </div>
+        <p class="meta" id="layerMeta">图层待机</p>
+      </section>
+
+      <div class="rail-actions">
+        <label class="chk"><input type="checkbox" id="follow" checked /> 跟随飞机</label>
+        <button type="button" id="btnResetSim" class="ghost">重置模拟</button>
+      </div>
+      <p class="meta" id="clock">—</p>
+    </aside>
+
+    <main class="stage">
+      <div id="map"></div>
+      <div class="hud-top">
+        <span id="hudPos">—</span>
+        <span id="hudSeq">序号 —</span>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="static/app.js?v=14"></script>
+</body>
+</html>

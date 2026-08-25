@@ -10,6 +10,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+_MOUNT_PREFIXES = ("/wind",)
+
+
+def _public_path(path: str) -> str:
+    for prefix in _MOUNT_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            stripped = path[len(prefix):]
+            return stripped if stripped else "/"
+    return path
+
 from .config import TaskConfig
 from .dashboard import build_live_dashboard_html
 from .execution import NavigationEngine, _round_state_value, _state_level
@@ -278,19 +288,38 @@ def serve_live_dashboard(report_path: str | Path, host: str = "127.0.0.1", port:
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
-            if parsed.path in ("/", "/index.html"):
+            path = _public_path(parsed.path)
+            if path in ("/", "/index.html"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(html)
                 return
-            if parsed.path == "/api/bootstrap":
+            if path == "/api/bootstrap":
                 self._send_json(replay.snapshot())
                 return
-            if parsed.path == "/api/state":
+            if path == "/api/state":
                 since = int(params.get("since", ["-1"])[0])
                 self._send_json(replay.snapshot_since(since))
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_HEAD(self) -> None:
+            parsed = urlparse(self.path)
+            path = _public_path(parsed.path)
+            if path in ("/", "/index.html"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            if path in ("/api/bootstrap", "/api/state"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
                 return
             self.send_response(404)
             self.end_headers()
@@ -338,17 +367,18 @@ def serve_interactive_dashboard(
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
-            if parsed.path in ("/", "/index.html"):
+            path = _public_path(parsed.path)
+            if path in ("/", "/index.html"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(html)
                 return
-            if parsed.path == "/api/bootstrap":
+            if path == "/api/bootstrap":
                 self._send_json(simulation.snapshot())
                 return
-            if parsed.path == "/api/state":
+            if path == "/api/state":
                 since = int(params.get("since", ["-1"])[0])
                 self._send_json(simulation.snapshot_since(since))
                 return
@@ -357,7 +387,7 @@ def serve_interactive_dashboard(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path != "/api/command":
+            if _public_path(parsed.path) != "/api/command":
                 self.send_response(404)
                 self.end_headers()
                 return

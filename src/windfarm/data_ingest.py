@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import math
 import os
+import ssl
 import struct
 import urllib.error
 import urllib.parse
@@ -22,14 +23,62 @@ SRTM_SKADI_BASE = "https://elevation-tiles-prod.s3.amazonaws.com/skadi"
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Build an SSL context that finds system CA bundles on NixOS/Linux.
+
+    CPython's default often looks for /etc/ssl/cert.pem; many distros only ship
+    /etc/ssl/certs/ca-certificates.crt, which causes CERTIFICATE_VERIFY_FAILED.
+    """
+    candidates: list[str] = []
+    for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            candidates.append(value)
+    try:
+        import certifi
+
+        candidates.append(certifi.where())
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/cert.pem",
+        ]
+    )
+    for path in candidates:
+        if path and Path(path).is_file():
+            return ssl.create_default_context(cafile=path)
+    return ssl.create_default_context()
+
+
+def _detect_local_clash_proxy() -> str:
+    """Pick a reachable Clash mixed-port if env vars are unset.
+
+    Prefer LAN gateway Clash (172.20.128.142:7897), then localhost / FlClash variants.
+    """
+    import socket
+
+    hosts = ("172.20.128.142", "127.0.0.1", "172.20.128.1")
+    ports = (7897, 7890, 6088)
+    for host in hosts:
+        for port in ports:
+            try:
+                with socket.create_connection((host, port), timeout=0.6):
+                    return f"http://{host}:{port}"
+            except OSError:
+                continue
+    return ""
+
+
 def _proxy_opener() -> urllib.request.OpenerDirector:
-    """Build a URL opener that honors Clash/system proxy env vars.
+    """Build a URL opener that honors Clash/system proxy env vars + system CAs.
 
     Supported (first non-empty wins for https):
       WINDFARM_HTTP_PROXY, HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy, ALL_PROXY, all_proxy
 
-    Example with Clash Verge on the LAN gateway (Allow LAN enabled):
-      export HTTPS_PROXY=http://172.20.128.1:7897
+    If none are set, probe 127.0.0.1:7897 / 7890 and 172.20.128.1:7897 / 7890.
     """
     keys = (
         "WINDFARM_HTTP_PROXY",
@@ -42,9 +91,13 @@ def _proxy_opener() -> urllib.request.OpenerDirector:
     )
     proxy = next((os.environ[k].strip() for k in keys if os.environ.get(k, "").strip()), "")
     if not proxy:
-        return urllib.request.build_opener()
-    handlers = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-    return urllib.request.build_opener(handlers)
+        proxy = _detect_local_clash_proxy()
+    handlers: list[urllib.request.BaseHandler] = [
+        urllib.request.HTTPSHandler(context=_ssl_context()),
+    ]
+    if proxy:
+        handlers.insert(0, urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    return urllib.request.build_opener(*handlers)
 
 
 def _urlopen(request: urllib.request.Request, timeout: float):
