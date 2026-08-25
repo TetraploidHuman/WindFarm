@@ -178,13 +178,38 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
             await sim.stop()
         return {"ok": True, "sim_running": sim.running, **sim.snapshot(), **hub.source_snapshot()}
 
+    @app.websocket("/api/ws/ingest")
+    async def ws_ingest_endpoint(websocket: WebSocket) -> None:
+        """UAV/phone upload-only socket: no dashboard fan-out on this connection."""
+        await websocket.accept()
+        try:
+            await websocket.send_json({"type": "hello", "role": "ingest", "active": hub.active})
+            while True:
+                msg = await websocket.receive_json()
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "ingest":
+                    frame_body = msg.get("frame", msg)
+                    if not isinstance(frame_body, dict):
+                        continue
+                    payload = dict(frame_body)
+                elif "lat" in msg and "lon" in msg:
+                    payload = dict(msg)
+                else:
+                    continue
+                if "alt_msl" not in payload and "alt" in payload:
+                    payload["alt_msl"] = payload["alt"]
+                await live.ingest(payload)
+        except WebSocketDisconnect:
+            pass
+
     @app.websocket("/api/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         q = hub.subscribe()
 
         async def _ingest_reader() -> None:
-            """Phone / UAV clients may push telemetry over the same WS as dashboard."""
+            """Backward-compatible: dashboard WS can also accept ingest frames."""
             while True:
                 msg = await websocket.receive_json()
                 if not isinstance(msg, dict):

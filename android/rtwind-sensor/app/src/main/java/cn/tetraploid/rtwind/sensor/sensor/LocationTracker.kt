@@ -124,7 +124,7 @@ class LocationTracker @Inject constructor(
             runCatching {
                 locationManager.requestLocationUpdates(
                     provider,
-                    500L,
+                    100L,
                     0f,
                     listener,
                     Looper.getMainLooper(),

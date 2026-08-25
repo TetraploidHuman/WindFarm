@@ -114,7 +114,9 @@ class RtwindApi @Inject constructor(
                 b.startsWith("wss://", ignoreCase = true) || b.startsWith("ws://", ignoreCase = true) -> b
                 else -> "ws://$b"
             }
-            return if (withScheme.endsWith("/api/ws")) withScheme else "$withScheme/api/ws"
+            return if (withScheme.endsWith("/api/ws/ingest")) withScheme
+            else if (withScheme.endsWith("/api/ws")) withScheme.replace("/api/ws", "/api/ws/ingest")
+            else "$withScheme/api/ws/ingest"
         }
     }
 }
