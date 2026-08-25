@@ -3,15 +3,14 @@ package cn.tetraploid.rtwind.sensor.sensor
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.location.LocationManager
 import android.os.BatteryManager
-import android.provider.Settings
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
 import cn.tetraploid.rtwind.sensor.data.TelemetryPayload
 import cn.tetraploid.rtwind.sensor.data.TelemetrySnapshot
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -46,32 +45,45 @@ class TelemetryAggregator @Inject constructor(
 
     fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
-        _snapshot.update { it.copy(serviceRunning = true) }
+        _snapshot.update {
+            it.copy(
+                serviceRunning = true,
+                lastUploadError = null,
+                locationDiag = locationTracker.diagnose(),
+            )
+        }
         publishLocal()
 
         sensorJobs = listOf(
             scope.launch {
-                runCatching {
+                try {
                     locationTracker.readings().collect { reading ->
                         gps = reading
+                        _snapshot.update {
+                            it.copy(
+                                locationDiag = "已定位(${reading.provider}) " + locationTracker.diagnose(),
+                            )
+                        }
                         publishLocal()
                     }
-                }.onFailure { err ->
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
                     _snapshot.update {
-                        it.copy(lastUploadError = "定位异常: ${err.message}")
+                        it.copy(locationDiag = "定位失败: ${e.message} | ${locationTracker.diagnose()}")
                     }
                 }
             },
             scope.launch {
-                runCatching {
+                try {
                     imuTracker.readings().collect { reading ->
                         imu = reading
                         publishLocal()
                     }
-                }.onFailure { err ->
-                    _snapshot.update {
-                        it.copy(lastUploadError = "IMU 异常: ${err.message}")
-                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // IMU 失败不阻断 GPS 上传
                 }
             },
         )
@@ -90,7 +102,13 @@ class TelemetryAggregator @Inject constructor(
         sensorJobs = emptyList()
         uploadJob?.cancel()
         uploadJob = null
-        _snapshot.update { it.copy(serviceRunning = false) }
+        _snapshot.update {
+            it.copy(
+                serviceRunning = false,
+                lastUploadError = null,
+                locationDiag = "已停止 | ${locationTracker.diagnose()}",
+            )
+        }
     }
 
     private fun publishLocal() {
@@ -112,6 +130,7 @@ class TelemetryAggregator @Inject constructor(
                 climbRate = climb,
                 battery = readBatteryPct(),
                 gpsAccuracyM = g?.accuracyM,
+                gpsProvider = g?.provider,
             )
         }
     }
@@ -122,7 +141,8 @@ class TelemetryAggregator @Inject constructor(
             _snapshot.update {
                 it.copy(
                     lastUploadOk = false,
-                    lastUploadError = gpsWaitHint(),
+                    lastUploadError = "等待定位…",
+                    locationDiag = locationTracker.diagnose(),
                 )
             }
             return
@@ -163,22 +183,6 @@ class TelemetryAggregator @Inject constructor(
                     )
                 }
             }
-    }
-
-    private fun gpsWaitHint(): String {
-        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        val gpsOn = runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
-        val netOn = runCatching { lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
-        val locationModeOk = runCatching {
-            Settings.Secure.getInt(context.contentResolver, Settings.Secure.LOCATION_MODE) !=
-                Settings.Secure.LOCATION_MODE_OFF
-        }.getOrDefault(true)
-
-        return when {
-            !locationModeOk -> "请打开系统定位开关"
-            !gpsOn && !netOn -> "定位服务未开启，请打开 GPS / 位置信息"
-            else -> "等待 GPS 定位…请到室外或窗边，并确认已授予「精确位置」"
-        }
     }
 
     private fun computeClimbRate(altMsl: Double): Double {

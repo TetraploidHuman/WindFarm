@@ -50,6 +50,8 @@ data class TelemetrySnapshot(
     val climbRate: Double = 0.0,
     val battery: Double? = null,
     val gpsAccuracyM: Float? = null,
+    val gpsProvider: String? = null,
+    val locationDiag: String = "未开始定位",
     val lastUploadOk: Boolean? = null,
     val lastUploadError: String? = null,
     val uploadsTotal: Long = 0,

@@ -162,6 +162,8 @@ private fun TelemetryCard(snapshot: TelemetrySnapshot) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("实时遥测", style = MaterialTheme.typography.titleMedium)
             MetricRow("状态", if (snapshot.serviceRunning) "上传中" else "已停止")
+            MetricRow("定位诊断", snapshot.locationDiag)
+            MetricRow("定位来源", snapshot.gpsProvider ?: "—")
             MetricRow("纬度", snapshot.lat?.let { fmt(it, 6) } ?: "—")
             MetricRow("经度", snapshot.lon?.let { fmt(it, 6) } ?: "—")
             MetricRow("海拔 (MSL)", snapshot.altMsl?.let { fmt(it, 1) + " m" } ?: "—")
@@ -183,8 +185,16 @@ private fun TelemetryCard(snapshot: TelemetrySnapshot) {
 @Composable
 private fun MetricRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
-        Text(value, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            modifier = Modifier.padding(end = 8.dp),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f, fill = false),
+        )
     }
 }
 
