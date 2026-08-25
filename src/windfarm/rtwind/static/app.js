@@ -63,6 +63,7 @@
     layerBoundsKey: "",
     lastWind: null,
     ignoreMoveEnd: 0,
+    lastFollowPanAt: 0,
     altHist: [],
     spdHist: [],
     simOrigin: { lat: 27.908, lon: 112.922, radius_m: 450 },
@@ -515,9 +516,13 @@
     drawSpark(els.spdChart, state.spdHist, colors.sim);
 
     if (els.follow.checked) {
-      // Follow pans: ignore moveend noise, but refresh layers when viewport drifts.
-      state.ignoreMoveEnd = performance.now() + 900;
-      map.panTo([frame.lat, frame.lon], { animate: true, duration: 0.25 });
+      // 无动画跟随：动画 panTo(0.25s) 在高频率遥测下会堆积，看起来像巨大延迟
+      state.ignoreMoveEnd = performance.now() + 400;
+      const nowPan = performance.now();
+      if (!state.lastFollowPanAt || nowPan - state.lastFollowPanAt >= 80) {
+        state.lastFollowPanAt = nowPan;
+        map.setView([frame.lat, frame.lon], map.getZoom(), { animate: false });
+      }
       const viewKey = boundsKey(mapBoundsQuery({ pad: 0.22 }));
       if (viewKey !== state.layerBoundsKey && (els.layerDem.checked || els.layerWind.checked)) {
         scheduleLayerRefresh(2500);

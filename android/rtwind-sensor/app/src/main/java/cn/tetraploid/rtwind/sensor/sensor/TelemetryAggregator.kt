@@ -38,13 +38,18 @@ class TelemetryAggregator @Inject constructor(
     private var imu: ImuReading = ImuReading(0.0, 0.0, 0.0)
     private var prevAlt: Double? = null
     private var prevAltTimeMs: Long = 0L
+    private var lastPushMs: Long = 0L
 
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
     private var linkJob: Job? = null
+    private var serviceScope: CoroutineScope? = null
+    @Volatile private var httpInFlight: Boolean = false
+    private var cachedSettings: AppSettings = AppSettings()
 
     fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
+        serviceScope = scope
         _snapshot.update {
             it.copy(
                 serviceRunning = true,
@@ -55,8 +60,9 @@ class TelemetryAggregator @Inject constructor(
         publishLocal()
 
         linkJob = scope.launch {
-            val settings = settingsRepository.settings.first()
-            api.startWebSocket(scope, settings.serverBaseUrl)
+            cachedSettings = settingsRepository.settings.first()
+            api.startWebSocket(scope, cachedSettings.serverBaseUrl)
+            settingsRepository.settings.collect { cachedSettings = it }
         }
 
         sensorJobs = listOf(
@@ -70,6 +76,8 @@ class TelemetryAggregator @Inject constructor(
                             )
                         }
                         publishLocal()
+                        // 定位一更新就立刻推，不等定时器（WS 非阻塞）
+                        pushNow(force = false)
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -92,11 +100,11 @@ class TelemetryAggregator @Inject constructor(
             },
         )
 
+        // 定时兜底：无新 GPS 时仍按频率刷新姿态等字段
         uploadJob = scope.launch {
             while (isActive) {
-                val settings = settingsRepository.settings.first()
-                uploadOnce(settings)
-                delay((1000L / settings.uploadHz.coerceAtLeast(1)))
+                pushNow(force = true)
+                delay((1000L / cachedSettings.uploadHz.coerceAtLeast(1)))
             }
         }
     }
@@ -142,9 +150,8 @@ class TelemetryAggregator @Inject constructor(
         }
     }
 
-    private suspend fun uploadOnce(settings: AppSettings) {
-        val g = gps
-        if (g == null) {
+    private suspend fun pushNow(force: Boolean) {
+        val g = gps ?: run {
             _snapshot.update {
                 it.copy(
                     lastUploadOk = false,
@@ -155,23 +162,29 @@ class TelemetryAggregator @Inject constructor(
             return
         }
 
+        val minIntervalMs = (1000L / cachedSettings.uploadHz.coerceAtLeast(1))
+        val now = System.currentTimeMillis()
+        if (!force && now - lastPushMs < minIntervalMs) return
+        lastPushMs = now
+
         val payload = TelemetryPayload(
             lat = g.lat,
             lon = g.lon,
             altMsl = g.altMsl,
             heading = if (g.speedMps > 0.5) g.bearing else imu.yawDeg,
-            roll = if (settings.enableImu) imu.rollDeg else 0.0,
-            pitch = if (settings.enableImu) imu.pitchDeg else 0.0,
-            yaw = if (settings.enableImu) imu.yawDeg else null,
+            roll = if (cachedSettings.enableImu) imu.rollDeg else 0.0,
+            pitch = if (cachedSettings.enableImu) imu.pitchDeg else 0.0,
+            yaw = if (cachedSettings.enableImu) imu.yawDeg else null,
             airspeed = g.speedMps,
             groundspeed = g.speedMps,
             climbRate = computeClimbRate(g.altMsl),
             battery = readBatteryPct(),
-            vehicleId = settings.vehicleId,
+            vehicleId = cachedSettings.vehicleId,
             t = TelemetryPayload.nowIso(),
         )
 
         if (api.isWsConnected()) {
+            // 非阻塞入队；队列满时丢最旧帧，不会卡住采集
             api.enqueueWs(payload)
             _snapshot.update {
                 it.copy(
@@ -184,28 +197,38 @@ class TelemetryAggregator @Inject constructor(
             return
         }
 
-        // WS 未连上时退回 HTTP，避免完全断流
-        api.ingestHttp(settings.serverBaseUrl, payload)
-            .onSuccess {
-                _snapshot.update {
-                    it.copy(
-                        lastUploadOk = true,
-                        lastUploadError = null,
-                        uploadChannel = "HTTP",
-                        uploadsTotal = it.uploadsTotal + 1,
-                    )
-                }
+        // HTTP 回退：最多在途 1 个请求，不 await，避免 RTT 阻塞采集/定时器
+        if (httpInFlight) return
+        val scope = serviceScope ?: return
+        httpInFlight = true
+        val base = cachedSettings.serverBaseUrl
+        scope.launch {
+            try {
+                api.ingestHttp(base, payload)
+                    .onSuccess {
+                        _snapshot.update {
+                            it.copy(
+                                lastUploadOk = true,
+                                lastUploadError = null,
+                                uploadChannel = "HTTP",
+                                uploadsTotal = it.uploadsTotal + 1,
+                            )
+                        }
+                    }
+                    .onFailure { err ->
+                        _snapshot.update {
+                            it.copy(
+                                lastUploadOk = false,
+                                lastUploadError = err.message ?: "上传失败",
+                                uploadChannel = "HTTP",
+                                uploadsFailed = it.uploadsFailed + 1,
+                            )
+                        }
+                    }
+            } finally {
+                httpInFlight = false
             }
-            .onFailure { err ->
-                _snapshot.update {
-                    it.copy(
-                        lastUploadOk = false,
-                        lastUploadError = err.message ?: "上传失败",
-                        uploadChannel = "HTTP",
-                        uploadsFailed = it.uploadsFailed + 1,
-                    )
-                }
-            }
+        }
     }
 
     private fun computeClimbRate(altMsl: Double): Double {
