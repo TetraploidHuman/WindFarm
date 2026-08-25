@@ -173,6 +173,7 @@ private fun TelemetryCard(snapshot: TelemetrySnapshot) {
             MetricRow("爬升率", fmt(snapshot.climbRate, 2) + " m/s")
             MetricRow("电量", snapshot.battery?.let { fmt(it, 0) + "%" } ?: "—")
             MetricRow("GPS 精度", snapshot.gpsAccuracyM?.let { fmt(it.toDouble(), 1) + " m" } ?: "—")
+            MetricRow("上传通道", snapshot.uploadChannel)
             MetricRow(
                 "上传",
                 "${snapshot.uploadsTotal} 成功 / ${snapshot.uploadsFailed} 失败" +

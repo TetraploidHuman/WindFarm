@@ -33,7 +33,7 @@ class SettingsRepository @Inject constructor(
         AppSettings(
             serverBaseUrl = prefs[Keys.SERVER] ?: AppSettings.DEFAULT_SERVER,
             vehicleId = prefs[Keys.VEHICLE] ?: "android-drone-1",
-            uploadHz = (prefs[Keys.HZ] ?: 5).coerceIn(1, 20),
+            uploadHz = (prefs[Keys.HZ] ?: 10).coerceIn(1, 20),
             enableCamera = prefs[Keys.CAMERA] ?: true,
             enableImu = prefs[Keys.IMU] ?: true,
         )
