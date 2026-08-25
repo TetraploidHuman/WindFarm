@@ -24,6 +24,8 @@
     follow: document.getElementById("follow"),
     layerDem: document.getElementById("layerDem"),
     layerWind: document.getElementById("layerWind"),
+    layerBelief: document.getElementById("layerBelief"),
+    beliefLayer: document.getElementById("beliefLayer"),
     layerMeta: document.getElementById("layerMeta"),
     mAir: document.getElementById("mAir"),
     mGs: document.getElementById("mGs"),
@@ -146,6 +148,7 @@
   }
 
   let demOverlay = null;
+  let beliefOverlay = null;
   const windLayer = L.layerGroup().addTo(map);
   const originIcon = L.divIcon({
     className: "",
@@ -237,6 +240,28 @@
     return `rgb(${c[0]},${c[1]},${c[2]})`;
   }
 
+  function beliefColor(t) {
+    // Cool → hot: low belief energy / prob to high.
+    const stops = [
+      [0.0, [15, 40, 90]],
+      [0.25, [30, 110, 180]],
+      [0.5, [40, 180, 140]],
+      [0.75, [230, 180, 40]],
+      [1.0, [220, 60, 40]],
+    ];
+    let c = stops[0][1];
+    for (let i = 1; i < stops.length; i += 1) {
+      if (t <= stops[i][0]) {
+        const [t0, c0] = stops[i - 1];
+        const [t1, c1] = stops[i];
+        const k = (t - t0) / Math.max(t1 - t0, 1e-6);
+        c = c0.map((v, j) => Math.round(v + (c1[j] - v) * k));
+        break;
+      }
+    }
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+
   function mapBoundsQuery({ pad = 0.2 } = {}) {
     const b = map.getBounds();
     let south = b.getSouth();
@@ -263,6 +288,14 @@
     return { windNx: 5, windNy: 5, demNx: 14, demNy: 14 };
   }
 
+  function anyMapLayerOn() {
+    return (
+      els.layerDem.checked
+      || els.layerWind.checked
+      || (els.layerBelief && els.layerBelief.checked)
+    );
+  }
+
   function scheduleLayerRefresh(delayMs = 600, { force = false } = {}) {
     if (state.layerFetch) clearTimeout(state.layerFetch);
     state.layerFetch = setTimeout(() => refreshMapLayers({ force }), delayMs);
@@ -281,18 +314,23 @@
   async function refreshMapLayers({ force = false } = {}) {
     const wantDem = els.layerDem.checked;
     const wantWind = els.layerWind.checked;
-    if (!wantDem && !wantWind) {
+    const wantBelief = els.layerBelief && els.layerBelief.checked;
+    if (!wantDem && !wantWind && !wantBelief) {
       if (demOverlay) {
         map.removeLayer(demOverlay);
         demOverlay = null;
+      }
+      if (beliefOverlay) {
+        map.removeLayer(beliefOverlay);
+        beliefOverlay = null;
       }
       windLayer.clearLayers();
       els.layerMeta.textContent = "图层已关闭";
       return;
     }
     const bounds = mapBoundsQuery({ pad: 0.22 });
-    const key = boundsKey(bounds);
-    if (!force && key === state.layerBoundsKey && (demOverlay || windLayer.getLayers().length)) {
+    const key = boundsKey(bounds) + (wantBelief ? `:b:${els.beliefLayer?.value || "energy"}` : "");
+    if (!force && key === state.layerBoundsKey && (demOverlay || beliefOverlay || windLayer.getLayers().length)) {
       return;
     }
     if (state.layerBusy && !force) {
@@ -331,6 +369,25 @@
       } else if (demOverlay) {
         map.removeLayer(demOverlay);
         demOverlay = null;
+      }
+      if (wantBelief) {
+        const layer = encodeURIComponent(els.beliefLayer?.value || "energy");
+        const res = await fetch(api(`/api/belief/field?layer=${layer}`), { cache: "no-store", signal });
+        if (!res.ok) throw new Error(`信念 HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.ok) {
+          applyBeliefLayer(data);
+          bits.push(`信念(${data.layer}${data.obs_count != null ? `·${data.obs_count}` : ""})`);
+        } else {
+          if (beliefOverlay) {
+            map.removeLayer(beliefOverlay);
+            beliefOverlay = null;
+          }
+          bits.push("信念(待锚定)");
+        }
+      } else if (beliefOverlay) {
+        map.removeLayer(beliefOverlay);
+        beliefOverlay = null;
       }
       state.layerBoundsKey = key;
       const dirHint = wantWind && state.lastWind?.vectors?.[0]?.dir_deg != null
@@ -376,6 +433,47 @@
     demOverlay = L.imageOverlay(canvas.toDataURL(), bounds, { opacity: 0.55, interactive: false, pane: "overlayPane", zIndex: 200 });
     demOverlay.addTo(map);
     if (typeof demOverlay.bringToFront === "function") demOverlay.bringToFront();
+  }
+
+  function applyBeliefLayer(field) {
+    const b = field.bounds;
+    const values = field.values || [];
+    const ny = values.length;
+    const nx = values[0]?.length || 0;
+    if (!b || !ny || !nx) return;
+    const vmin = field.min ?? 0;
+    const vmax = field.max ?? (vmin + 1);
+    const span = Math.max(vmax - vmin, 1e-9);
+    const canvas = document.createElement("canvas");
+    canvas.width = nx;
+    canvas.height = ny;
+    const ctx = canvas.getContext("2d");
+    const img = ctx.createImageData(nx, ny);
+    for (let y = 0; y < ny; y += 1) {
+      for (let x = 0; x < nx; x += 1) {
+        const v = values[y][x];
+        const t = v == null ? 0 : (v - vmin) / span;
+        const rgb = beliefColor(t).match(/\d+/g).map(Number);
+        const i = (y * nx + x) * 4;
+        img.data[i] = rgb[0];
+        img.data[i + 1] = rgb[1];
+        img.data[i + 2] = rgb[2];
+        // Fade near-zero cells so DEM can show through.
+        const alpha = v == null ? 0 : Math.round(40 + 150 * Math.min(1, Math.abs(t - 0.5) * 2 + 0.25));
+        img.data[i + 3] = alpha;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const bounds = [[b.south, b.west], [b.north, b.east]];
+    if (beliefOverlay) map.removeLayer(beliefOverlay);
+    beliefOverlay = L.imageOverlay(canvas.toDataURL(), bounds, {
+      opacity: 0.72,
+      interactive: false,
+      pane: "overlayPane",
+      zIndex: 350,
+    });
+    beliefOverlay.addTo(map);
+    if (typeof beliefOverlay.bringToFront === "function") beliefOverlay.bringToFront();
   }
 
   function windToBearingDeg(u, v) {
@@ -524,7 +622,7 @@
         map.setView([frame.lat, frame.lon], map.getZoom(), { animate: false });
       }
       const viewKey = boundsKey(mapBoundsQuery({ pad: 0.22 }));
-      if (viewKey !== state.layerBoundsKey && (els.layerDem.checked || els.layerWind.checked)) {
+      if (viewKey !== state.layerBoundsKey && (anyMapLayerOn())) {
         scheduleLayerRefresh(2500);
       }
     }
@@ -534,7 +632,7 @@
       state.envTimer = now;
       refreshEnv(frame.lat, frame.lon, frame.alt_msl);
     }
-    if (now - state.layerTimer > 20000 && (els.layerDem.checked || els.layerWind.checked)) {
+    if (now - state.layerTimer > (els.layerBelief && els.layerBelief.checked ? 5000 : 20000) && (anyMapLayerOn())) {
       state.layerTimer = now;
       scheduleLayerRefresh(200, { force: true });
     }
@@ -642,16 +740,22 @@
   });
   els.layerDem.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
   els.layerWind.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
+  if (els.layerBelief) {
+    els.layerBelief.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
+  }
+  if (els.beliefLayer) {
+    els.beliefLayer.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
+  }
   map.on("moveend", () => {
     if (performance.now() < state.ignoreMoveEnd) {
       redrawWindForZoom();
       return;
     }
-    if (els.layerDem.checked || els.layerWind.checked) scheduleLayerRefresh(800);
+    if (anyMapLayerOn()) scheduleLayerRefresh(800);
   });
   map.on("zoomend", () => {
     redrawWindForZoom();
-    if (els.layerDem.checked || els.layerWind.checked) scheduleLayerRefresh(500, { force: true });
+    if (anyMapLayerOn()) scheduleLayerRefresh(500, { force: true });
   });
   map.on("zoom", () => {
     // Live rescale arrows while pinching/scrolling.
@@ -659,7 +763,7 @@
   });
   els.btnTheme.addEventListener("click", () => {
     applyTheme(currentTheme() === "dark" ? "light" : "dark");
-    if (els.layerWind.checked || els.layerDem.checked) scheduleLayerRefresh(50, { force: true });
+    if (anyMapLayerOn()) scheduleLayerRefresh(50, { force: true });
     if (state.altHist.length || state.spdHist.length) {
       const colors = themeColors(currentTheme());
       drawSpark(els.altChart, state.altHist, colors.alt);
@@ -689,6 +793,9 @@
         }
       }
       if (msg.type === "track_snapshot") applyTrack(msg.track);
+      if (msg.type === "belief_tick" && els.layerBelief && els.layerBelief.checked) {
+        scheduleLayerRefresh(400, { force: true });
+      }
     };
     ws.onclose = () => {
       els.badge.textContent = `${sourceLabel(state.active)} · 重连中`;
@@ -711,6 +818,6 @@
     .finally(() => {
       connectWs();
       refreshEnv(state.simOrigin.lat, state.simOrigin.lon, null);
-      if (els.layerDem.checked || els.layerWind.checked) scheduleLayerRefresh(300, { force: true });
+      if (anyMapLayerOn()) scheduleLayerRefresh(300, { force: true });
     });
 })();

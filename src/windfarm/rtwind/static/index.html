@@ -122,7 +122,18 @@
         <div class="layer-toggles">
           <label class="chk"><input type="checkbox" id="layerDem" checked /> 地形热力</label>
           <label class="chk"><input type="checkbox" id="layerWind" checked /> 风场矢量</label>
+          <label class="chk"><input type="checkbox" id="layerBelief" checked /> 信念场</label>
         </div>
+        <label class="meta" for="beliefLayer">信念图层
+          <select id="beliefLayer">
+            <option value="energy" selected>能量增益</option>
+            <option value="uplift_prob">上升气流概率</option>
+            <option value="sink_prob">下沉气流概率</option>
+            <option value="uncertainty">不确定性</option>
+            <option value="confidence">置信度</option>
+            <option value="wind_speed">信念风速</option>
+          </select>
+        </label>
         <p class="meta" id="layerMeta">图层待机</p>
       </section>
 
@@ -143,6 +154,6 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="static/app.js?v=17"></script>
+  <script src="static/app.js?v=18"></script>
 </body>
 </html>
