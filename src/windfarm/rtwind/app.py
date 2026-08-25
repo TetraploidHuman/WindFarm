@@ -10,11 +10,12 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .belief_runtime import BeliefRuntime
 from .geo import GeoContext
 from .hub import TelemetryHub
 from .live_source import LiveIngestSource
 from .sim_source import SimDroneSource
-from .types import RtwindConfig, SourceKind
+from .types import RtwindConfig, SourceKind, TelemetryFrame
 
 
 class SourceBody(BaseModel):
@@ -23,6 +24,11 @@ class SourceBody(BaseModel):
 
 class SimControlBody(BaseModel):
     action: Literal["reset", "start", "stop"] = "reset"
+    lat: float | None = None
+    lon: float | None = None
+
+
+class BeliefResetBody(BaseModel):
     lat: float | None = None
     lon: float | None = None
 
@@ -52,9 +58,11 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     geo = GeoContext(config.data_dir)
     sim = SimDroneSource(hub, config)
     live = LiveIngestSource(hub, config)
+    belief = BeliefRuntime()
     static_dir = Path(__file__).resolve().parent / "static"
 
     async def _on_source_change(previous: SourceKind, current: SourceKind) -> None:
+        belief.reset()
         if previous == "sim":
             await sim.stop()
         if previous == "live":
@@ -64,7 +72,14 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         if current == "live":
             await live.start()
 
+    async def _on_frame(frame: TelemetryFrame) -> None:
+        await asyncio.to_thread(belief.observe_frame, frame)
+        st = belief.status()
+        if st.get("obs_count", 0) > 0 and st["obs_count"] % 8 == 0:
+            await hub._broadcast({"type": "belief_tick", "status": st})
+
     hub.add_source_listener(_on_source_change)
+    hub.add_frame_listener(_on_frame)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -85,12 +100,14 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     app.state.geo = geo
     app.state.sim = sim
     app.state.live = live
+    app.state.belief = belief
     app.state.config = config
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         payload = hub.health()
         payload["live"] = live.status()
+        payload["belief"] = belief.status()
         return payload
 
     @app.get("/api/source")
@@ -145,6 +162,20 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         ny: int = 6,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(geo.wind_field, south, west, north, east, nx=nx, ny=ny)
+
+    @app.get("/api/belief/status")
+    async def belief_status() -> dict[str, Any]:
+        return belief.status()
+
+    @app.get("/api/belief/field")
+    async def belief_field(layer: str = "energy", level: int = 0) -> dict[str, Any]:
+        return await asyncio.to_thread(belief.field_geo, layer, level=level)
+
+    @app.post("/api/belief/reset")
+    async def belief_reset(body: BeliefResetBody | None = None) -> dict[str, Any]:
+        body = body or BeliefResetBody()
+        belief.reset(lat=body.lat, lon=body.lon)
+        return {"ok": True, **belief.status()}
 
     @app.post("/api/ingest")
     async def ingest(body: IngestBody) -> dict[str, Any]:

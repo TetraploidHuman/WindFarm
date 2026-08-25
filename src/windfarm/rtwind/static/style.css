@@ -196,6 +196,18 @@ body {
 
 .meta { color: var(--muted); font-size: 11px; margin: 8px 0 0; line-height: 1.4; }
 .layer-toggles { display: flex; flex-direction: column; gap: 8px; }
+.meta select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
 .sim-panel .sim-origin-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .sim-panel .field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
 .sim-panel .field input {

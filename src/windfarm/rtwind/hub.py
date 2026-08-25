@@ -21,9 +21,13 @@ class TelemetryHub:
         self._lock = asyncio.Lock()
         self._live_last_rx = 0.0
         self._on_source_change: list[Callable[[SourceKind, SourceKind], Awaitable[None] | None]] = []
+        self._on_frame: list[Callable[[TelemetryFrame], Awaitable[None] | None]] = []
 
     def add_source_listener(self, cb: Callable[[SourceKind, SourceKind], Awaitable[None] | None]) -> None:
         self._on_source_change.append(cb)
+
+    def add_frame_listener(self, cb: Callable[[TelemetryFrame], Awaitable[None] | None]) -> None:
+        self._on_frame.append(cb)
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
@@ -71,6 +75,10 @@ class TelemetryHub:
                 )
             )
         await self._broadcast({"type": "telemetry", "frame": frame.to_dict()})
+        for cb in self._on_frame:
+            result = cb(frame)
+            if asyncio.iscoroutine(result):
+                await result
         return True
 
     async def set_active(self, source: SourceKind, *, clear_track: bool = True) -> dict[str, Any]:
