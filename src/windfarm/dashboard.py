@@ -235,6 +235,11 @@ def _dashboard_template(payload_json: str, live_mode: bool) -> str:
       importanceBox: document.getElementById("importanceBox")
     }};
 
+    function apiUrl(path) {{
+      const prefix = window.location.pathname.replace(/\/index\\.html$/, "").replace(/\/$/, "");
+      return `${{prefix}}${{path}}`;
+    }}
+
     {dashboard_js_prelude()}
     {dashboard_js_data_adapter()}
     {dashboard_js_map_renderer()}
@@ -299,7 +304,7 @@ def _dashboard_template(payload_json: str, live_mode: bool) -> str:
       state.refreshInFlight = true;
       try {{
         const previousSeq = state.latestSeq;
-        const response = await fetch(`/api/state?since=${{state.latestSeq}}`, {{ cache: "no-store" }});
+        const response = await fetch(apiUrl(`/api/state?since=${{state.latestSeq}}`), {{ cache: "no-store" }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const data = await response.json();
         let changed = false;
@@ -355,7 +360,7 @@ def _dashboard_template(payload_json: str, live_mode: bool) -> str:
 
     async function sendGoal(point) {{
       if (!LIVE_MODE || !state.interactiveGoal) return;
-      const response = await fetch("/api/command", {{
+      const response = await fetch(apiUrl("/api/command"), {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify({{ goal: point }})
@@ -370,7 +375,7 @@ def _dashboard_template(payload_json: str, live_mode: bool) -> str:
 
     async function init() {{
       if (LIVE_MODE) {{
-        const response = await fetch("/api/bootstrap", {{ cache: "no-store" }});
+        const response = await fetch(apiUrl("/api/bootstrap"), {{ cache: "no-store" }});
         const data = await response.json();
         state.report = data.report;
         state.summary = data.summary;

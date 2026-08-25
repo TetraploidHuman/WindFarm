@@ -14,6 +14,7 @@ from .io import (
     write_json,
 )
 from .live_server import serve_interactive_dashboard, serve_live_dashboard
+from .rtwind import serve_rtwind
 from .mission_runner import MissionRunner
 from .pipeline import WindFarmPipeline, train_from_files
 from .repository import ModelRepository
@@ -126,6 +127,17 @@ def build_parser() -> argparse.ArgumentParser:
     api_cmd = sub.add_parser("serve-api")
     api_cmd.add_argument("--host", default="127.0.0.1")
     api_cmd.add_argument("--port", type=int, default=8780)
+
+    rtwind_cmd = sub.add_parser("serve-rtwind", help="Realtime UAV monitor (Live + Sim) for /rtwind")
+    rtwind_cmd.add_argument("--host", default="127.0.0.1")
+    rtwind_cmd.add_argument("--port", type=int, default=8877)
+    rtwind_cmd.add_argument("--active-source", choices=("live", "sim"), default="sim")
+    rtwind_cmd.add_argument("--sim-origin", nargs=2, type=float, metavar=("LAT", "LON"))
+    rtwind_cmd.add_argument("--data-dir", default="data")
+    rtwind_cmd.add_argument("--root-path", default="", help="Reverse-proxy mount prefix e.g. /rtwind")
+    rtwind_cmd.add_argument("--no-mavlink", action="store_true", help="Disable MAVLink UDP listener")
+    rtwind_cmd.add_argument("--mavlink-bind", default="0.0.0.0")
+    rtwind_cmd.add_argument("--mavlink-port", type=int, default=14550)
 
     repo_cmd = sub.add_parser("run-demo")
     repo_cmd.add_argument("--config", required=True)
@@ -249,6 +261,22 @@ def main() -> None:
 
     if args.command == "serve-api":
         serve_api(args.host, args.port)
+        return
+
+    if args.command == "serve-rtwind":
+        lat, lon = (27.908, 112.922) if not args.sim_origin else (args.sim_origin[0], args.sim_origin[1])
+        serve_rtwind(
+            args.host,
+            args.port,
+            active_source=args.active_source,
+            sim_origin_lat=lat,
+            sim_origin_lon=lon,
+            data_dir=args.data_dir,
+            root_path=args.root_path,
+            mavlink_enabled=not args.no_mavlink,
+            mavlink_bind=args.mavlink_bind,
+            mavlink_udp_port=args.mavlink_port,
+        )
         return
 
     if args.command == "build-scenarios":

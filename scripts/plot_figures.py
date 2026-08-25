@@ -471,10 +471,17 @@ def plot_altitude_profile():
 
     # All frames battery
     all_battery = [f["battery_ratio"] for f in REPORT["trace"]]
-    ax2.fill_between(exec_dist, all_battery, alpha=0.25, color="#2c7bb6")
-    ax2.plot(exec_dist, all_battery, color="#2c7bb6", linewidth=1.0, alpha=0.7, label="实时电量")
+    # Some reports can have an off-by-one mismatch between path distance and trace length.
+    n_batt = min(len(exec_dist), len(all_battery))
+    exec_dist_batt = exec_dist[:n_batt]
+    all_battery = all_battery[:n_batt]
+    ax2.fill_between(exec_dist_batt, all_battery, alpha=0.25, color="#2c7bb6")
+    ax2.plot(exec_dist_batt, all_battery, color="#2c7bb6", linewidth=1.0, alpha=0.7, label="实时电量")
 
     # Keyframe points
+    n_kf = min(len(kf_dist), len(kf_battery))
+    kf_dist = kf_dist[:n_kf]
+    kf_battery = kf_battery[:n_kf]
     ax2.scatter(kf_dist, kf_battery, marker="s", s=25, color="#fdae61",
                 edgecolors="#333333", linewidths=0.4, zorder=5, label="关键帧")
     ax2.plot(kf_dist, kf_battery, color="#fdae61", linewidth=1.8, alpha=0.85, marker=".", markersize=2)
