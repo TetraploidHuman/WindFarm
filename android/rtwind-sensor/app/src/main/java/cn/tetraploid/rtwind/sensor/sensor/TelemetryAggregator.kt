@@ -3,6 +3,8 @@ package cn.tetraploid.rtwind.sensor.sensor
 import android.content.Context
 import android.content.IntentFilter
 import android.os.BatteryManager
+import cn.tetraploid.rtwind.sensor.camera.CameraController
+import cn.tetraploid.rtwind.sensor.camera.CameraStreamConfig
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
@@ -16,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -30,6 +33,7 @@ class TelemetryAggregator @Inject constructor(
     private val imuTracker: ImuTracker,
     private val settingsRepository: SettingsRepository,
     private val api: RtwindApi,
+    private val cameraController: CameraController,
 ) {
     private val _snapshot = MutableStateFlow(TelemetrySnapshot())
     val snapshot: StateFlow<TelemetrySnapshot> = _snapshot.asStateFlow()
@@ -43,9 +47,10 @@ class TelemetryAggregator @Inject constructor(
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
     private var linkJob: Job? = null
+    private var cameraSettingsJob: Job? = null
     private var cachedSettings: AppSettings = AppSettings()
 
-    fun start(scope: CoroutineScope) {
+    fun start(scope: CoroutineScope, lifecycleOwner: LifecycleOwner) {
         if (sensorJobs.isNotEmpty()) return
         _snapshot.update {
             it.copy(
@@ -58,8 +63,46 @@ class TelemetryAggregator @Inject constructor(
 
         linkJob = scope.launch {
             cachedSettings = settingsRepository.settings.first()
+            api.setCameraUploadListener { success, frameKb, error ->
+                _snapshot.update {
+                    if (success) {
+                        it.copy(
+                            cameraUploadsTotal = it.cameraUploadsTotal + 1,
+                            cameraLastFrameKb = frameKb,
+                            cameraLastError = null,
+                        )
+                    } else {
+                        it.copy(
+                            cameraUploadsFailed = it.cameraUploadsFailed + 1,
+                            cameraLastError = error,
+                        )
+                    }
+                }
+            }
             api.startTransport(scope, cachedSettings.serverBaseUrl)
-            settingsRepository.settings.collect { cachedSettings = it }
+            settingsRepository.settings.collect { s ->
+                cachedSettings = s
+            }
+        }
+
+        cameraSettingsJob = scope.launch {
+            val initial = settingsRepository.settings.first()
+            cachedSettings = initial
+            if (initial.enableCamera) {
+                startCameraStream(lifecycleOwner, initial)
+            }
+            settingsRepository.settings.collect { s ->
+                cachedSettings = s
+                if (!s.enableCamera) {
+                    cameraController.stopStream()
+                } else if (!cameraController.isStreaming) {
+                    startCameraStream(lifecycleOwner, s)
+                } else {
+                    launch {
+                        cameraController.updateConfig(CameraStreamConfig.fromSettings(s))
+                    }
+                }
+            }
         }
 
         sensorJobs = listOf(
@@ -116,6 +159,9 @@ class TelemetryAggregator @Inject constructor(
         uploadJob = null
         linkJob?.cancel()
         linkJob = null
+        cameraSettingsJob?.cancel()
+        cameraSettingsJob = null
+        cameraController.stopStream()
         api.stopTransport()
         _snapshot.update {
             it.copy(
@@ -209,5 +255,12 @@ class TelemetryAggregator @Inject constructor(
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
         if (level < 0 || scale <= 0) return null
         return level * 100.0 / scale
+    }
+
+    private suspend fun startCameraStream(lifecycleOwner: LifecycleOwner, settings: AppSettings) {
+        val config = CameraStreamConfig.fromSettings(settings)
+        cameraController.startStream(lifecycleOwner, config) { jpeg ->
+            api.publishCamera(jpeg, settings.vehicleId)
+        }
     }
 }

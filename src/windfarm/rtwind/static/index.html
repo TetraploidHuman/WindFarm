@@ -28,7 +28,7 @@
     })();
   </script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="static/style.css?v=11" />
+  <link rel="stylesheet" href="static/style.css?v=15" />
 </head>
 <body>
   <div id="app">
@@ -118,6 +118,29 @@
       </section>
 
       <section class="panel">
+        <h2>显示模式</h2>
+        <div class="source-switch view-switch" role="group" aria-label="主视图模式">
+          <button type="button" id="btnViewMap" class="src-btn active" data-view="map">大地图</button>
+          <button type="button" id="btnViewQuad" class="src-btn" data-view="quad">四分屏</button>
+        </div>
+        <div id="quadSettings" class="quad-settings" hidden>
+          <p class="meta">选择四个面板内容（可含 3D 姿态）</p>
+          <label class="field">左上
+            <select id="quadSlot0" class="quad-slot"></select>
+          </label>
+          <label class="field">右上
+            <select id="quadSlot1" class="quad-slot"></select>
+          </label>
+          <label class="field">左下
+            <select id="quadSlot2" class="quad-slot"></select>
+          </label>
+          <label class="field">右下
+            <select id="quadSlot3" class="quad-slot"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>地图图层</h2>
         <div class="layer-toggles">
           <label class="chk"><input type="checkbox" id="layerDem" checked /> 地形热力</label>
@@ -134,6 +157,22 @@
             <option value="wind_speed">信念风速</option>
           </select>
         </label>
+        <div class="sim-actions" style="margin-top:8px">
+          <button type="button" id="btnPrefetchRegion" class="ghost primary">预下载任务区 (10×10 km)</button>
+        </div>
+        <div id="prefetchNotice" class="prefetch-notice" hidden>
+          <p class="prefetch-notice-title">收到真机定位</p>
+          <p class="meta" id="prefetchNoticeText">是否预下载以飞机为中心的 10×10 km 地形与气象？</p>
+          <div class="sim-actions">
+            <button type="button" id="btnPrefetchAccept" class="ghost primary">下载</button>
+            <button type="button" id="btnPrefetchDismiss" class="ghost">暂不</button>
+          </div>
+        </div>
+        <div id="prefetchProgress" class="prefetch-progress" hidden>
+          <div class="prefetch-bar"><div id="prefetchBarFill" class="prefetch-bar-fill"></div></div>
+          <p class="meta" id="prefetchProgressText">准备中…</p>
+        </div>
+        <p class="meta" id="prefetchMeta">以盘旋中心/飞机位置为中心，预下载 10×10 km 地形与气象网格</p>
         <p class="meta" id="layerMeta">图层待机</p>
       </section>
 
@@ -144,8 +183,28 @@
       <p class="meta" id="clock">—</p>
     </aside>
 
-    <main class="stage">
-      <div id="map"></div>
+    <main class="stage" id="stage" data-view="map">
+      <div id="stageMap" class="stage-map">
+        <div id="map"></div>
+      </div>
+      <div id="quadGrid" class="quad-grid" aria-hidden="true">
+        <section class="quad-panel" data-slot="0">
+          <header class="quad-head"><span class="quad-title">—</span></header>
+          <div class="quad-body"></div>
+        </section>
+        <section class="quad-panel" data-slot="1">
+          <header class="quad-head"><span class="quad-title">—</span></header>
+          <div class="quad-body"></div>
+        </section>
+        <section class="quad-panel" data-slot="2">
+          <header class="quad-head"><span class="quad-title">—</span></header>
+          <div class="quad-body"></div>
+        </section>
+        <section class="quad-panel" data-slot="3">
+          <header class="quad-head"><span class="quad-title">—</span></header>
+          <div class="quad-body"></div>
+        </section>
+      </div>
       <div class="hud-top">
         <span id="hudPos">—</span>
         <span id="hudSeq">序号 —</span>
@@ -154,6 +213,7 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="static/app.js?v=18"></script>
+  <script src="static/quad.js?v=2"></script>
+  <script src="static/app.js?v=23"></script>
 </body>
 </html>

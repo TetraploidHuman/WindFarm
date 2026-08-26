@@ -4,13 +4,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.LifecycleService
 import cn.tetraploid.rtwind.sensor.MainActivity
 import cn.tetraploid.rtwind.sensor.R
 import cn.tetraploid.rtwind.sensor.sensor.TelemetryAggregator
@@ -22,13 +22,13 @@ import kotlinx.coroutines.cancel
 import javax.inject.Inject
 
 @AndroidEntryPoint
-class TelemetryService : Service() {
+class TelemetryService : LifecycleService() {
 
     @Inject lateinit var aggregator: TelemetryAggregator
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
     override fun onCreate() {
         super.onCreate()
@@ -36,18 +36,22 @@ class TelemetryService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
         val notification = buildNotification("正在采集并上传传感器数据")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
+            val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            val fgsTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            } else {
+                types
+            }
+            startForeground(NOTIFICATION_ID, notification, fgsTypes)
         } else {
             @Suppress("DEPRECATION")
             startForeground(NOTIFICATION_ID, notification)
         }
-        aggregator.start(scope)
+        aggregator.start(scope, this)
         return START_STICKY
     }
 

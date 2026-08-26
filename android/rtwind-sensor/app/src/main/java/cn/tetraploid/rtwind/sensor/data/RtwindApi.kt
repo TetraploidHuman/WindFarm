@@ -49,6 +49,8 @@ class RtwindApi @Inject constructor(
     )
     /** Latest frame for HTTP coalesce (always overwrite). */
     private val latestHttp = AtomicReference<TelemetryPayload?>(null)
+    private data class CameraUpload(val jpeg: ByteArray, val vehicleId: String)
+    private val latestCamera = AtomicReference<CameraUpload?>(null)
     private var transportJob: Job? = null
     private val connected = MutableStateFlow(false)
     private val sendMutex = Mutex()
@@ -60,6 +62,17 @@ class RtwindApi @Inject constructor(
         val text = resp.bodyAsText()
         if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}: $text")
         text
+    }
+
+    private var onCameraUploadResult: ((success: Boolean, frameKb: Int, error: String?) -> Unit)? = null
+
+    fun setCameraUploadListener(listener: (success: Boolean, frameKb: Int, error: String?) -> Unit) {
+        onCameraUploadResult = listener
+    }
+
+    /** Non-blocking camera JPEG publish (coalesced HTTP upload). */
+    fun publishCamera(jpeg: ByteArray, vehicleId: String) {
+        latestCamera.set(CameraUpload(jpeg, vehicleId))
     }
 
     /** Non-blocking publish: WS queue + HTTP latest coalesce. */
@@ -91,7 +104,28 @@ class RtwindApi @Inject constructor(
                         }
                         if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
                     }
-                    // immediately loop — if newer frame arrived during request, send it next
+                }
+            }
+
+            val cameraWorker = launch {
+                while (isActive) {
+                    val upload = latestCamera.getAndSet(null)
+                    if (upload == null) {
+                        delay(8)
+                        continue
+                    }
+                    val frameKb = (upload.jpeg.size + 1023) / 1024
+                    runCatching {
+                        val resp = client.post("$baseUrl/api/camera/upload?vehicle_id=${upload.vehicleId}") {
+                            contentType(ContentType.Image.JPEG)
+                            setBody(upload.jpeg)
+                        }
+                        if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
+                    }.onSuccess {
+                        onCameraUploadResult?.invoke(true, frameKb, null)
+                    }.onFailure { e ->
+                        onCameraUploadResult?.invoke(false, frameKb, e.message ?: "upload failed")
+                    }
                 }
             }
 
@@ -131,6 +165,7 @@ class RtwindApi @Inject constructor(
             }
 
             httpWorker.join()
+            cameraWorker.cancel()
             wsWorker.cancel()
         }
     }
@@ -140,6 +175,7 @@ class RtwindApi @Inject constructor(
         transportJob = null
         connected.value = false
         latestHttp.set(null)
+        latestCamera.set(null)
     }
 
     // Back-compat names used by aggregator

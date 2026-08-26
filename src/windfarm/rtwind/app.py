@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .belief_runtime import BeliefRuntime
+from .camera_hub import CameraHub
 from .geo import GeoContext
 from .hub import TelemetryHub
 from .live_source import LiveIngestSource
@@ -31,6 +32,16 @@ class SimControlBody(BaseModel):
 class BeliefResetBody(BaseModel):
     lat: float | None = None
     lon: float | None = None
+
+
+class PrefetchBody(BaseModel):
+    center_lat: float
+    center_lon: float
+    size_km: float = Field(default=10.0, ge=1.0, le=30.0)
+    weather_nx: int = Field(default=11, ge=2, le=15)
+    weather_ny: int = Field(default=11, ge=2, le=15)
+    dem: bool = True
+    weather: bool = True
 
 
 class IngestBody(BaseModel):
@@ -59,10 +70,15 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     sim = SimDroneSource(hub, config)
     live = LiveIngestSource(hub, config)
     belief = BeliefRuntime()
+    camera = CameraHub()
     static_dir = Path(__file__).resolve().parent / "static"
 
     async def _on_source_change(previous: SourceKind, current: SourceKind) -> None:
-        belief.reset()
+        if current == "sim":
+            belief.reset(lat=sim.origin_lat, lon=sim.origin_lon)
+            await camera.clear()
+        else:
+            belief.reset()
         if previous == "sim":
             await sim.stop()
         if previous == "live":
@@ -84,6 +100,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if config.active_source == "sim" and config.sim_enabled:
+            belief.reset(lat=sim.origin_lat, lon=sim.origin_lon)
             await sim.start()
         elif config.active_source == "live":
             await live.start()
@@ -101,6 +118,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     app.state.sim = sim
     app.state.live = live
     app.state.belief = belief
+    app.state.camera = camera
     app.state.config = config
 
     @app.get("/api/health")
@@ -163,6 +181,131 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         return await asyncio.to_thread(geo.wind_field, south, west, north, east, nx=nx, ny=ny)
 
+    @app.post("/api/env/prefetch")
+    async def env_prefetch(body: PrefetchBody) -> dict[str, Any]:
+        """Pre-download a fixed mission patch (default 10×10 km) of DEM + weather."""
+        result = await asyncio.to_thread(
+            geo.prefetch_region,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            center_lat=body.center_lat,
+            center_lon=body.center_lon,
+            size_km=body.size_km,
+            weather_nx=body.weather_nx,
+            weather_ny=body.weather_ny,
+            dem=body.dem,
+            weather=body.weather,
+        )
+        if result.get("ok") or result.get("partial"):
+            st = belief.status()
+            clat, clon = st.get("center_lat"), st.get("center_lon")
+            moved = (
+                clat is None
+                or clon is None
+                or abs(clat - body.center_lat) > 0.0005
+                or abs(clon - body.center_lon) > 0.0005
+            )
+            if moved:
+                belief.reset(lat=body.center_lat, lon=body.center_lon)
+        return result
+
+    @app.post("/api/env/prefetch/stream")
+    async def env_prefetch_stream(body: PrefetchBody) -> StreamingResponse:
+        """NDJSON progress stream for mission-patch prefetch."""
+
+        def _maybe_realign_belief(result: dict[str, Any]) -> None:
+            if not (result.get("ok") or result.get("partial")):
+                return
+            st = belief.status()
+            clat, clon = st.get("center_lat"), st.get("center_lon")
+            moved = (
+                clat is None
+                or clon is None
+                or abs(clat - body.center_lat) > 0.0005
+                or abs(clon - body.center_lon) > 0.0005
+            )
+            if moved:
+                belief.reset(lat=body.center_lat, lon=body.center_lon)
+
+        async def gen():
+            import json as _json
+            from queue import Queue
+            from threading import Thread
+
+            q: Queue = Queue()
+
+            def worker() -> None:
+                try:
+                    for ev in geo.prefetch_region_progress(
+                        center_lat=body.center_lat,
+                        center_lon=body.center_lon,
+                        size_km=body.size_km,
+                        weather_nx=body.weather_nx,
+                        weather_ny=body.weather_ny,
+                        dem=body.dem,
+                        weather=body.weather,
+                    ):
+                        q.put(ev)
+                except Exception as exc:
+                    q.put({"type": "done", "ok": False, "error": str(exc), "pct": 100})
+                finally:
+                    q.put(None)
+
+            Thread(target=worker, daemon=True).start()
+            while True:
+                ev = await asyncio.to_thread(q.get)
+                if ev is None:
+                    break
+                if ev.get("type") == "done":
+                    _maybe_realign_belief(ev)
+                yield _json.dumps(ev, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+    @app.get("/api/env/region")
+    async def env_region() -> dict[str, Any]:
+        return geo.region_status()
+
+    @app.get("/api/camera/status")
+    async def camera_status() -> dict[str, Any]:
+        return await camera.status()
+
+    @app.get("/api/camera/latest")
+    async def camera_latest() -> Response:
+        data = await camera.latest_bytes()
+        if not data:
+            return Response(status_code=404, content="no camera frame yet")
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/camera/upload")
+    async def camera_upload(request: Request, vehicle_id: str = "live-1") -> dict[str, Any]:
+        body = await request.body()
+        return await camera.put(body, vehicle_id=vehicle_id)
+
+    @app.get("/api/camera/stream")
+    async def camera_stream() -> StreamingResponse:
+        async def gen():
+            while True:
+                data = await camera.latest_bytes()
+                if data:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
+                    )
+                await asyncio.sleep(0.15)
+
+        return StreamingResponse(
+            gen(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/api/belief/status")
     async def belief_status() -> dict[str, Any]:
         return belief.status()
@@ -198,6 +341,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     async def sim_control(body: SimControlBody) -> dict[str, Any]:
         if body.action == "reset":
             sim.reset(lat=body.lat, lon=body.lon)
+            belief.reset(lat=sim.origin_lat, lon=sim.origin_lon)
             if hub.active == "sim":
                 await hub.set_active("sim", clear_track=True)
                 await sim.start()

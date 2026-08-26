@@ -27,6 +27,9 @@ class SettingsRepository @Inject constructor(
         val HZ = intPreferencesKey("upload_hz")
         val CAMERA = booleanPreferencesKey("enable_camera")
         val IMU = booleanPreferencesKey("enable_imu")
+        val CAMERA_HEIGHT = intPreferencesKey("camera_height")
+        val CAMERA_HZ = intPreferencesKey("camera_upload_hz")
+        val CAMERA_QUALITY = intPreferencesKey("camera_jpeg_quality")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -36,6 +39,15 @@ class SettingsRepository @Inject constructor(
             uploadHz = (prefs[Keys.HZ] ?: 10).coerceIn(1, 20),
             enableCamera = prefs[Keys.CAMERA] ?: true,
             enableImu = prefs[Keys.IMU] ?: true,
+            cameraHeight = (prefs[Keys.CAMERA_HEIGHT] ?: 480).let { h ->
+                when {
+                    h <= 360 -> 360
+                    h <= 480 -> 480
+                    else -> 720
+                }
+            },
+            cameraUploadHz = (prefs[Keys.CAMERA_HZ] ?: 15).coerceIn(1, 20),
+            cameraJpegQuality = (prefs[Keys.CAMERA_QUALITY] ?: 38).coerceIn(28, 70),
         )
     }
 
@@ -44,6 +56,15 @@ class SettingsRepository @Inject constructor(
     suspend fun updateHz(hz: Int) = edit { it[Keys.HZ] = hz.coerceIn(1, 20) }
     suspend fun updateCamera(enabled: Boolean) = edit { it[Keys.CAMERA] = enabled }
     suspend fun updateImu(enabled: Boolean) = edit { it[Keys.IMU] = enabled }
+    suspend fun updateCameraHeight(height: Int) = edit {
+        it[Keys.CAMERA_HEIGHT] = when {
+            height <= 360 -> 360
+            height <= 480 -> 480
+            else -> 720
+        }
+    }
+    suspend fun updateCameraUploadHz(hz: Int) = edit { it[Keys.CAMERA_HZ] = hz.coerceIn(1, 20) }
+    suspend fun updateCameraJpegQuality(q: Int) = edit { it[Keys.CAMERA_QUALITY] = q.coerceIn(28, 70) }
 
     private suspend fun edit(block: suspend (MutablePreferences) -> Unit) {
         context.dataStore.edit { block(it) }

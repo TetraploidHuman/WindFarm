@@ -27,6 +27,15 @@
     layerBelief: document.getElementById("layerBelief"),
     beliefLayer: document.getElementById("beliefLayer"),
     layerMeta: document.getElementById("layerMeta"),
+    btnPrefetchRegion: document.getElementById("btnPrefetchRegion"),
+    prefetchMeta: document.getElementById("prefetchMeta"),
+    prefetchNotice: document.getElementById("prefetchNotice"),
+    prefetchNoticeText: document.getElementById("prefetchNoticeText"),
+    btnPrefetchAccept: document.getElementById("btnPrefetchAccept"),
+    btnPrefetchDismiss: document.getElementById("btnPrefetchDismiss"),
+    prefetchProgress: document.getElementById("prefetchProgress"),
+    prefetchBarFill: document.getElementById("prefetchBarFill"),
+    prefetchProgressText: document.getElementById("prefetchProgressText"),
     mAir: document.getElementById("mAir"),
     mGs: document.getElementById("mGs"),
     mMsl: document.getElementById("mMsl"),
@@ -69,7 +78,39 @@
     altHist: [],
     spdHist: [],
     simOrigin: { lat: 27.908, lon: 112.922, radius_m: 450 },
+    missionRegion: null,
+    livePrefetchAsked: false,
+    livePrefetchPending: null,
+    prefetchBusy: false,
   };
+
+  const MISSION_SIZE_KM = 10;
+
+  function isMapView() {
+    const stage = document.getElementById("stage");
+    return !stage || stage.dataset.view !== "quad";
+  }
+
+  function missionCenter() {
+    if (state.active === "sim") {
+      return { lat: state.simOrigin.lat, lon: state.simOrigin.lon };
+    }
+    if (state.frame) {
+      return { lat: state.frame.lat, lon: state.frame.lon };
+    }
+    const c = map.getCenter();
+    return { lat: c.lat, lon: c.lng };
+  }
+
+  function snapFollow(force = false) {
+    if (!els.follow?.checked || !isMapView() || !state.frame) return;
+    const now = performance.now();
+    if (!force && state.lastFollowPanAt && now - state.lastFollowPanAt < 80) return;
+    state.lastFollowPanAt = now;
+    state.ignoreMoveEnd = performance.now() + 400;
+    map.invalidateSize({ pan: false });
+    map.setView([state.frame.lat, state.frame.lon], map.getZoom(), { animate: false });
+  }
 
   const map = L.map("map", { zoomControl: true, attributionControl: true }).setView([27.908, 112.922], 14);
   const TILES = {
@@ -117,6 +158,7 @@
       els.btnTheme.title = next === "dark" ? "切换到明亮模式" : "切换到暗黑模式";
       els.btnTheme.setAttribute("aria-label", els.btnTheme.title);
     }
+    if (window.__rtwindQuad) window.__rtwindQuad.onTheme();
   }
 
   const trackLine = L.polyline([], { color: "#3dd6c6", weight: 3, opacity: 0.85 }).addTo(map);
@@ -352,8 +394,12 @@
           { cache: "no-store", signal },
         );
         if (!res.ok) throw new Error(`风场 HTTP ${res.status}`);
-        applyWindLayer(await res.json());
-        bits.push("风场");
+        const wind = await res.json();
+        applyWindLayer(wind);
+        bits.push(wind.missing > 0 ? `风场(缺${wind.missing})` : "风场");
+        if (wind.missing > 0 && els.prefetchMeta) {
+          els.prefetchMeta.textContent = `任务区内仍有 ${wind.missing} 个气象点缺失，请「预下载任务区」`;
+        }
         els.layerMeta.textContent = `${bits.join(" + ")} 已更新…`;
       } else {
         windLayer.clearLayers();
@@ -364,8 +410,15 @@
           { cache: "no-store", signal },
         );
         if (!res.ok) throw new Error(`地形 HTTP ${res.status}`);
-        applyDemLayer(await res.json());
+        const dem = await res.json();
+        applyDemLayer(dem);
         bits.push("地形");
+        if (dem.missing > 0) {
+          bits.push(`缺${dem.missing}点`);
+          if (els.prefetchMeta) {
+            els.prefetchMeta.textContent = `任务区内仍有 ${dem.missing} 个地形点缺失，请「预下载任务区」`;
+          }
+        }
       } else if (demOverlay) {
         map.removeLayer(demOverlay);
         demOverlay = null;
@@ -534,6 +587,7 @@
   }
 
   function setActiveUi(active) {
+    const prev = state.active;
     state.active = active;
     els.btnSim.classList.toggle("active", active === "sim");
     els.btnLive.classList.toggle("active", active === "live");
@@ -544,12 +598,17 @@
     trackLine.setStyle({ color: active === "live" ? colors.live : colors.sim });
     if (active === "sim") {
       updateOriginVisual(state.simOrigin.lat, state.simOrigin.lon, state.simOrigin.radius_m);
+      dismissLivePrefetchNotice();
     } else {
       map.removeLayer(originMarker);
       map.removeLayer(originOrbit);
       setPickOriginMode(false);
+      if (prev !== "live") {
+        state.livePrefetchAsked = false;
+      }
     }
     document.getElementById("map").classList.toggle("pick-origin", els.pickOrigin.checked && active === "sim");
+    if (window.__rtwindQuad) window.__rtwindQuad.onActiveChange();
   }
 
   function setBadge(frame) {
@@ -584,6 +643,136 @@
     ctx.stroke();
   }
 
+  function setPrefetchProgress(pct, message) {
+    if (els.prefetchProgress) els.prefetchProgress.hidden = false;
+    if (els.prefetchNotice) els.prefetchNotice.hidden = true;
+    if (els.prefetchBarFill) els.prefetchBarFill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (els.prefetchProgressText) els.prefetchProgressText.textContent = message || "下载中…";
+  }
+
+  function hidePrefetchProgress() {
+    if (els.prefetchProgress) els.prefetchProgress.hidden = true;
+  }
+
+  function showLivePrefetchNotice(lat, lon) {
+    state.livePrefetchPending = { lat, lon };
+    if (els.prefetchNoticeText) {
+      els.prefetchNoticeText.textContent =
+        `已定位 ${Number(lat).toFixed(5)}, ${Number(lon).toFixed(5)}。是否预下载以飞机为中心的 ${MISSION_SIZE_KM}×${MISSION_SIZE_KM} km 地形与气象？`;
+    }
+    if (els.prefetchNotice) {
+      els.prefetchNotice.hidden = false;
+      try {
+        els.prefetchNotice.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (_) { /* ignore */ }
+    }
+    hidePrefetchProgress();
+  }
+
+  function dismissLivePrefetchNotice() {
+    if (els.prefetchNotice) els.prefetchNotice.hidden = true;
+    state.livePrefetchPending = null;
+  }
+
+  function maybeAskLivePrefetch(frame) {
+    if (!frame || frame.source !== "live") return;
+    if (state.livePrefetchAsked || state.prefetchBusy) return;
+    if (!Number.isFinite(frame.lat) || !Number.isFinite(frame.lon)) return;
+    if (Math.abs(frame.lat) < 1e-6 && Math.abs(frame.lon) < 1e-6) return;
+    // Already have a nearby prefetched region — skip prompt.
+    if (state.missionRegion?.center_lat != null) {
+      const dLat = Math.abs(state.missionRegion.center_lat - frame.lat);
+      const dLon = Math.abs(state.missionRegion.center_lon - frame.lon);
+      if (dLat < 0.02 && dLon < 0.02) {
+        state.livePrefetchAsked = true;
+        return;
+      }
+    }
+    state.livePrefetchAsked = true;
+    showLivePrefetchNotice(frame.lat, frame.lon);
+  }
+
+  async function runPrefetchStream(center, { fromNotice = false } = {}) {
+    if (state.prefetchBusy) return null;
+    state.prefetchBusy = true;
+    if (els.btnPrefetchRegion) els.btnPrefetchRegion.disabled = true;
+    if (fromNotice) dismissLivePrefetchNotice();
+    setPrefetchProgress(0, `开始预下载 ${MISSION_SIZE_KM}×${MISSION_SIZE_KM} km…`);
+    if (els.prefetchMeta) {
+      els.prefetchMeta.textContent =
+        `正在预下载（中心 ${center.lat.toFixed(5)}, ${center.lon.toFixed(5)}）…`;
+    }
+    let finalResult = null;
+    try {
+      const res = await fetch(api("/api/env/prefetch/stream"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+        body: JSON.stringify({
+          center_lat: center.lat,
+          center_lon: center.lon,
+          size_km: MISSION_SIZE_KM,
+          weather_nx: 11,
+          weather_ny: 11,
+          dem: true,
+          weather: true,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(errBody || `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          let ev;
+          try {
+            ev = JSON.parse(line);
+          } catch (_) {
+            continue;
+          }
+          const pct = Number(ev.pct) || 0;
+          setPrefetchProgress(pct, ev.message || "下载中…");
+          if (ev.type === "done") {
+            finalResult = ev;
+            if (ev.error) throw new Error(ev.error);
+          }
+        }
+      }
+      if (!finalResult) throw new Error("未收到完成事件");
+      state.missionRegion = finalResult;
+      const demOk = finalResult.dem?.ok ?? 0;
+      const demFail = finalResult.dem?.failed ?? 0;
+      const wOk = finalResult.weather?.ok ?? 0;
+      const wFail = finalResult.weather?.failed ?? 0;
+      const tip = `${MISSION_SIZE_KM}×${MISSION_SIZE_KM} km · 地形 ${demOk}/${demOk + demFail} 瓦片 · 气象 ${wOk}/${wOk + wFail} 点`
+        + (finalResult.ok ? " · 完成" : (finalResult.partial ? " · 部分完成" : " · 部分失败"));
+      setPrefetchProgress(100, tip);
+      if (els.prefetchMeta) els.prefetchMeta.textContent = tip;
+      scheduleLayerRefresh(80, { force: true });
+      if (window.__rtwindQuad && window.__rtwindQuad.isQuad()) {
+        window.__rtwindQuad.refreshLayers(true);
+      }
+      setTimeout(() => hidePrefetchProgress(), 2500);
+      return finalResult;
+    } catch (err) {
+      setPrefetchProgress(100, `预下载失败: ${err.message}`);
+      if (els.prefetchMeta) els.prefetchMeta.textContent = `预下载失败: ${err.message}`;
+      throw err;
+    } finally {
+      state.prefetchBusy = false;
+      if (els.btnPrefetchRegion) els.btnPrefetchRegion.disabled = false;
+    }
+  }
+
   function applyFrame(frame) {
     if (!frame) return;
     const prev = state.frame;
@@ -604,6 +793,7 @@
     els.hudSeq.textContent = `序号 ${frame.seq}`;
     els.clock.textContent = frame.t;
 
+    maybeAskLivePrefetch(frame);
     marker.setLatLng([frame.lat, frame.lon]);
     setAircraftHeading(movementBearing(prev, frame));
 
@@ -614,16 +804,12 @@
     drawSpark(els.spdChart, state.spdHist, colors.sim);
 
     if (els.follow.checked) {
-      // 无动画跟随：动画 panTo(0.25s) 在高频率遥测下会堆积，看起来像巨大延迟
-      state.ignoreMoveEnd = performance.now() + 400;
-      const nowPan = performance.now();
-      if (!state.lastFollowPanAt || nowPan - state.lastFollowPanAt >= 80) {
-        state.lastFollowPanAt = nowPan;
-        map.setView([frame.lat, frame.lon], map.getZoom(), { animate: false });
-      }
-      const viewKey = boundsKey(mapBoundsQuery({ pad: 0.22 }));
-      if (viewKey !== state.layerBoundsKey && (anyMapLayerOn())) {
-        scheduleLayerRefresh(2500);
+      snapFollow();
+      if (isMapView()) {
+        const viewKey = boundsKey(mapBoundsQuery({ pad: 0.22 }));
+        if (viewKey !== state.layerBoundsKey && anyMapLayerOn()) {
+          scheduleLayerRefresh(2500);
+        }
       }
     }
 
@@ -632,15 +818,17 @@
       state.envTimer = now;
       refreshEnv(frame.lat, frame.lon, frame.alt_msl);
     }
-    if (now - state.layerTimer > (els.layerBelief && els.layerBelief.checked ? 5000 : 20000) && (anyMapLayerOn())) {
+    if (now - state.layerTimer > (els.layerBelief && els.layerBelief.checked ? 5000 : 20000) && anyMapLayerOn() && isMapView()) {
       state.layerTimer = now;
       scheduleLayerRefresh(200, { force: true });
     }
+    if (window.__rtwindQuad) window.__rtwindQuad.onFrame(frame);
   }
 
   function applyTrack(points) {
     state.track = points || [];
     trackLine.setLatLngs(state.track.map((p) => [p.lat, p.lon]));
+    if (window.__rtwindQuad) window.__rtwindQuad.onTrack(state.track);
   }
 
   async function refreshEnv(lat, lon, altMsl) {
@@ -730,6 +918,9 @@
     );
   });
   els.pickOrigin.addEventListener("change", () => setPickOriginMode(els.pickOrigin.checked));
+  els.follow.addEventListener("change", () => {
+    if (els.follow.checked) snapFollow(true);
+  });
   map.on("click", async (ev) => {
     if (!els.pickOrigin.checked || state.active !== "sim") return;
     try {
@@ -740,11 +931,32 @@
   });
   els.layerDem.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
   els.layerWind.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
+  if (els.btnPrefetchRegion) {
+    els.btnPrefetchRegion.addEventListener("click", () => {
+      const center = missionCenter();
+      runPrefetchStream(center).catch(() => {});
+    });
+  }
+  if (els.btnPrefetchAccept) {
+    els.btnPrefetchAccept.addEventListener("click", () => {
+      const pending = state.livePrefetchPending || missionCenter();
+      runPrefetchStream(pending, { fromNotice: true }).catch(() => {});
+    });
+  }
+  if (els.btnPrefetchDismiss) {
+    els.btnPrefetchDismiss.addEventListener("click", () => {
+      dismissLivePrefetchNotice();
+      if (els.prefetchMeta) els.prefetchMeta.textContent = "已跳过本次预下载，可稍后手动点击按钮";
+    });
+  }
   if (els.layerBelief) {
     els.layerBelief.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
   }
   if (els.beliefLayer) {
-    els.beliefLayer.addEventListener("change", () => scheduleLayerRefresh(50, { force: true }));
+    els.beliefLayer.addEventListener("change", () => {
+      scheduleLayerRefresh(50, { force: true });
+      if (window.__rtwindQuad) window.__rtwindQuad.onBeliefTick();
+    });
   }
   map.on("moveend", () => {
     if (performance.now() < state.ignoreMoveEnd) {
@@ -796,12 +1008,41 @@
       if (msg.type === "belief_tick" && els.layerBelief && els.layerBelief.checked) {
         scheduleLayerRefresh(400, { force: true });
       }
+      if (msg.type === "belief_tick" && window.__rtwindQuad) {
+        window.__rtwindQuad.onBeliefTick();
+      }
     };
     ws.onclose = () => {
       els.badge.textContent = `${sourceLabel(state.active)} · 重连中`;
       setTimeout(connectWs, 1500);
     };
   }
+
+  window.__rtwindQuad = window.createRtwindQuad({
+    api,
+    L,
+    TILES,
+    mainMap: map,
+    getTheme: currentTheme,
+    themeColors,
+    getActive: () => state.active,
+    getFrame: () => state.frame,
+    getTrack: () => state.track,
+    getBeliefLayer: () => (els.beliefLayer && els.beliefLayer.value) || "energy",
+    followEnabled: () => !!(els.follow && els.follow.checked),
+    onMapModeEnter: () => snapFollow(true),
+  });
+
+  fetch(api("/api/env/region"))
+    .then((r) => r.json())
+    .then((d) => {
+      if (d.prefetched && els.prefetchMeta) {
+        state.missionRegion = d;
+        const km = d.size_km || MISSION_SIZE_KM;
+        els.prefetchMeta.textContent = `已预下载 ${km}×${km} km 任务区 · ${d.fetched_at || ""}`;
+      }
+    })
+    .catch(() => {});
 
   fetch(api("/api/sim"))
     .then((r) => r.json())

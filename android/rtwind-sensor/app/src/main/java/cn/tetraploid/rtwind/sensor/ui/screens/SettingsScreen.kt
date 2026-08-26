@@ -2,11 +2,13 @@ package cn.tetraploid.rtwind.sensor.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -89,9 +91,53 @@ private fun SettingsForm(settings: AppSettings, viewModel: SettingsViewModel) {
         onCheckedChange = viewModel::saveImu,
     )
     ToggleRow(
-        label = "启用摄像头预览",
+        label = "启用摄像头上传",
         checked = settings.enableCamera,
         onCheckedChange = viewModel::saveCamera,
+    )
+
+    Text("摄像头分辨率: ${settings.cameraHeight}p")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(360, 480, 720).forEach { h ->
+            FilterChip(
+                selected = settings.cameraHeight == h,
+                onClick = { viewModel.saveCameraHeight(h) },
+                label = { Text("${h}p") },
+            )
+        }
+    }
+
+    var camHz by remember(settings.cameraUploadHz) { mutableStateOf(settings.cameraUploadHz.toFloat()) }
+    Text("摄像头上传: ${camHz.toInt()} Hz · JPEG ${settings.cameraJpegQuality}%")
+    Slider(
+        value = camHz,
+        onValueChange = {
+            camHz = it
+            viewModel.saveCameraUploadHz(it.toInt())
+        },
+        valueRange = 5f..20f,
+        steps = 14,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    var camQ by remember(settings.cameraJpegQuality) { mutableStateOf(settings.cameraJpegQuality.toFloat()) }
+    Slider(
+        value = camQ,
+        onValueChange = {
+            camQ = it
+            viewModel.saveCameraJpegQuality(it.toInt())
+        },
+        valueRange = 28f..65f,
+        steps = 36,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(
+        "较低 JPEG 质量 + 360/480p 可稳定维持约 15 帧/秒上传。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
     )
 
     Text(
