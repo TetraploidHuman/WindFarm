@@ -12,7 +12,23 @@
   const DEFAULT_SLOTS = ["track", "weather", "belief", "terrain"];
   const STORAGE_KEY = "rtwind-quad";
 
-  // Wireframe glider/UAV in body axes: +X nose, +Y right, +Z down (NED-ish).
+  function hasPos(frame) {
+    if (!frame) return false;
+    const { lat, lon } = frame;
+    if (lat == null || lon == null || !Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+      return false;
+    }
+    return !(Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6);
+  }
+
+  function setHudNA(hud) {
+    if (!hud) return;
+    hud.querySelectorAll("[data-k]").forEach((el) => {
+      el.textContent = "暂无";
+    });
+  }
+
+  // Wireframe glider/UAV in body axes: +X nose, +Y right, +Z down (NED-ish). +X nose, +Y right, +Z down (NED-ish).
   const AC_VERTS = [
     [1.6, 0, 0], // 0 nose
     [-1.2, 0, 0], // 1 tail
@@ -611,6 +627,10 @@
       if (view !== "quad" || !p.map || p.busy) return;
       const frame = getFrame();
       if (!frame) return;
+      if (!hasPos(frame)) {
+        if (p.hud) setHudNA(p.hud);
+        return;
+      }
       const b = padBounds(frame.lat, frame.lon, 0.02);
       const key = `${p.type}:${frame.lat.toFixed(3)},${frame.lon.toFixed(3)}:${getBeliefLayer()}`;
       if (!force && key === p.lastKey) return;
@@ -631,10 +651,10 @@
               const el = p.hud.querySelector(`[data-k="${k}"]`);
               if (el) el.textContent = v;
             };
-            set("wind", env.wind_speed_mps != null ? Number(env.wind_speed_mps).toFixed(1) : "—");
-            set("dir", env.wind_dir_deg != null ? `${Math.round(env.wind_dir_deg)}°` : "—");
-            set("temp", env.temperature_c != null ? `${Number(env.temperature_c).toFixed(1)}°` : "—");
-            set("dem", env.dem_msl != null ? `${Number(env.dem_msl).toFixed(0)}m` : "—");
+            set("wind", env.wind_speed_mps != null ? Number(env.wind_speed_mps).toFixed(1) : "暂无");
+            set("dir", env.wind_dir_deg != null ? `${Math.round(env.wind_dir_deg)}°` : "暂无");
+            set("temp", env.temperature_c != null ? `${Number(env.temperature_c).toFixed(1)}°` : "暂无");
+            set("dem", env.dem_msl != null ? `${Number(env.dem_msl).toFixed(0)}m` : "暂无");
           }
           p.map.setView([frame.lat, frame.lon], Math.max(p.map.getZoom(), 13), { animate: false });
         } else if (p.type === "terrain") {
@@ -690,7 +710,7 @@
           return;
         }
         if (!p.map) return;
-        if (p.marker) {
+        if (hasPos(frame) && p.marker) {
           p.marker.setLatLng([frame.lat, frame.lon]);
           syncMarkerHeading(p.marker, frame.heading);
         }
@@ -699,7 +719,7 @@
           p.trackLine.setLatLngs(track.map((pt) => [pt.lat, pt.lon]));
           p.trackLine.setStyle({ color: getActive() === "live" ? colors.live : colors.sim });
         }
-        if (p.type === "track" && followEnabled()) {
+        if (p.type === "track" && followEnabled() && hasPos(frame)) {
           if (!lastFollowPan || now - lastFollowPan >= 80) {
             lastFollowPan = now;
             p.map.invalidateSize({ pan: false });

@@ -12,13 +12,19 @@ from .types import RtwindConfig, TelemetryFrame, SourceKind
 
 def _parse_ingest(payload: dict[str, Any], *, source: SourceKind = "live") -> TelemetryFrame:
     now = datetime.now(timezone.utc).isoformat()
+    lat_raw = payload.get("lat")
+    lon_raw = payload.get("lon")
+    lat = float(lat_raw) if lat_raw is not None else None
+    lon = float(lon_raw) if lon_raw is not None else None
+    alt_raw = payload.get("alt_msl", payload.get("alt"))
+    alt_msl = float(alt_raw) if alt_raw is not None else None
     return TelemetryFrame(
         source=source,
         vehicle_id=str(payload.get("vehicle_id") or "live-1"),
         t=str(payload.get("t") or now),
-        lat=float(payload["lat"]),
-        lon=float(payload["lon"]),
-        alt_msl=float(payload.get("alt_msl", payload.get("alt", 0.0))),
+        lat=lat,
+        lon=lon,
+        alt_msl=alt_msl,
         heading=float(payload.get("heading", payload.get("yaw", 0.0))),
         roll=float(payload.get("roll", 0.0)),
         pitch=float(payload.get("pitch", 0.0)),

@@ -45,8 +45,8 @@ class PrefetchBody(BaseModel):
 
 
 class IngestBody(BaseModel):
-    lat: float
-    lon: float
+    lat: float | None = None
+    lon: float | None = None
     alt_msl: float | None = None
     alt: float | None = None
     heading: float | None = None
@@ -155,7 +155,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         # Enrich AGL on latest if positions close
         frame = hub.latest()
         payload = env.to_dict()
-        if frame and env.dem_msl is not None:
+        if frame and env.dem_msl is not None and frame.alt_msl is not None:
             payload["alt_agl_estimate"] = frame.alt_msl - env.dem_msl
         return payload
 

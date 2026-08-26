@@ -64,16 +64,17 @@ class TelemetryHub:
             if frame.source == "live":
                 self._live_last_rx = time.monotonic()
             self._latest = frame
-            self._track.append(
-                TrackPoint(
-                    t=frame.t,
-                    lat=frame.lat,
-                    lon=frame.lon,
-                    alt_msl=frame.alt_msl,
-                    heading=frame.heading,
-                    seq=frame.seq,
+            if frame.lat is not None and frame.lon is not None:
+                self._track.append(
+                    TrackPoint(
+                        t=frame.t,
+                        lat=frame.lat,
+                        lon=frame.lon,
+                        alt_msl=frame.alt_msl if frame.alt_msl is not None else 0.0,
+                        heading=frame.heading,
+                        seq=frame.seq,
+                    )
                 )
-            )
         await self._broadcast({"type": "telemetry", "frame": frame.to_dict()})
         for cb in self._on_frame:
             result = cb(frame)

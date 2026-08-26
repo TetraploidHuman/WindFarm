@@ -197,36 +197,32 @@ class TelemetryAggregator @Inject constructor(
     }
 
     private fun pushFrame() {
-        val g = gps ?: run {
-            _snapshot.update {
-                it.copy(lastUploadOk = false, lastUploadError = "等待定位…")
-            }
-            return
-        }
-
         val minIntervalMs = (1000L / cachedSettings.uploadHz.coerceIn(1, 20)).coerceAtLeast(50L)
         val now = System.currentTimeMillis()
         if (now - lastPushMs < minIntervalMs) return
         lastPushMs = now
 
+        val g = gps
         val payload = TelemetryPayload(
-            lat = g.lat,
-            lon = g.lon,
-            altMsl = g.altMsl,
-            heading = if (g.speedMps > 0.5) g.bearing else imu.yawDeg,
+            lat = g?.lat,
+            lon = g?.lon,
+            altMsl = g?.altMsl,
+            heading = when {
+                g != null && g.speedMps > 0.5 -> g.bearing
+                else -> imu.yawDeg
+            },
             roll = if (cachedSettings.enableImu) imu.rollDeg else 0.0,
             pitch = if (cachedSettings.enableImu) imu.pitchDeg else 0.0,
             yaw = if (cachedSettings.enableImu) imu.yawDeg else null,
-            airspeed = g.speedMps,
-            groundspeed = g.speedMps,
-            climbRate = computeClimbRate(g.altMsl),
+            airspeed = g?.speedMps ?: 0.0,
+            groundspeed = g?.speedMps,
+            climbRate = g?.let { computeClimbRate(it.altMsl) } ?: 0.0,
             battery = readBatteryPct(),
             vehicleId = cachedSettings.vehicleId,
             t = TelemetryPayload.nowIso(),
             clientTs = now / 1000.0,
         )
 
-        // 完全非阻塞：内部 WS 队列 + HTTP 合并发送
         api.publish(payload)
         _snapshot.update {
             it.copy(
