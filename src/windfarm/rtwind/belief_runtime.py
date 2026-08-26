@@ -70,6 +70,8 @@ class BeliefRuntime:
     def observe_frame(self, frame: TelemetryFrame) -> None:
         if not self._enabled:
             return
+        if frame.lat is None or frame.lon is None:
+            return
         with self._lock:
             if frame.seq == self._last_frame_seq:
                 return

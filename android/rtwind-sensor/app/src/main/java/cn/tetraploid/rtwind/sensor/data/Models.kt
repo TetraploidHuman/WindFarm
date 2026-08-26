@@ -6,8 +6,8 @@ import java.time.Instant
 
 @Serializable
 data class TelemetryPayload(
-    val lat: Double,
-    val lon: Double,
+    val lat: Double? = null,
+    val lon: Double? = null,
     @SerialName("alt_msl") val altMsl: Double? = null,
     val heading: Double? = null,
     val roll: Double = 0.0,

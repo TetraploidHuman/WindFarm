@@ -95,15 +95,31 @@
     if (state.active === "sim") {
       return { lat: state.simOrigin.lat, lon: state.simOrigin.lon };
     }
-    if (state.frame) {
+    if (state.frame && hasPos(state.frame)) {
       return { lat: state.frame.lat, lon: state.frame.lon };
     }
     const c = map.getCenter();
     return { lat: c.lat, lon: c.lng };
   }
 
+  function hasPos(frame) {
+    if (!frame) return false;
+    const { lat, lon } = frame;
+    if (lat == null || lon == null || !Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+      return false;
+    }
+    return !(Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6);
+  }
+
+  function fmtPos(lat, lon) {
+    if (lat == null || lon == null || !Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+      return "暂无";
+    }
+    return `${Number(lat).toFixed(5)}, ${Number(lon).toFixed(5)}`;
+  }
+
   function snapFollow(force = false) {
-    if (!els.follow?.checked || !isMapView() || !state.frame) return;
+    if (!els.follow?.checked || !isMapView() || !state.frame || !hasPos(state.frame)) return;
     const now = performance.now();
     if (!force && state.lastFollowPanAt && now - state.lastFollowPanAt < 80) return;
     state.lastFollowPanAt = now;
@@ -181,7 +197,7 @@
   }
 
   function movementBearing(prev, frame) {
-    if (!prev) return frame.heading;
+    if (!prev || !hasPos(prev) || !hasPos(frame)) return frame.heading;
     const dLat = frame.lat - prev.lat;
     const dLon = frame.lon - prev.lon;
     if (Math.hypot(dLat, dLon) < 1e-10) return frame.heading;
@@ -241,7 +257,7 @@
   }
 
   function fmt(n, d = 1) {
-    if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+    if (n === null || n === undefined || Number.isNaN(Number(n))) return "暂无";
     return Number(n).toFixed(d);
   }
 
@@ -677,8 +693,7 @@
   function maybeAskLivePrefetch(frame) {
     if (!frame || frame.source !== "live") return;
     if (state.livePrefetchAsked || state.prefetchBusy) return;
-    if (!Number.isFinite(frame.lat) || !Number.isFinite(frame.lon)) return;
-    if (Math.abs(frame.lat) < 1e-6 && Math.abs(frame.lon) < 1e-6) return;
+    if (!hasPos(frame)) return;
     // Already have a nearby prefetched region — skip prompt.
     if (state.missionRegion?.center_lat != null) {
       const dLat = Math.abs(state.missionRegion.center_lat - frame.lat);
@@ -781,24 +796,28 @@
     els.mAir.textContent = fmt(frame.airspeed, 1);
     els.mGs.textContent = fmt(frame.groundspeed, 1);
     els.mMsl.textContent = fmt(frame.alt_msl, 1);
-    els.mAgl.textContent = frame.alt_agl != null ? fmt(frame.alt_agl, 1) : els.mAgl.textContent;
+    els.mAgl.textContent = frame.alt_agl != null ? fmt(frame.alt_agl, 1) : "暂无";
     els.mHdg.textContent = fmt(frame.heading, 0);
     els.mClimb.textContent = fmt(frame.climb_rate, 2);
     els.mRoll.textContent = fmt(frame.roll, 1);
     els.mPitch.textContent = fmt(frame.pitch, 1);
     els.mYaw.textContent = fmt(frame.yaw, 0);
     els.mLink.textContent = linkLabel(frame.link);
-    els.attBall.style.transform = `translateY(${(-frame.pitch) * 1.2}px) rotate(${frame.roll}deg)`;
-    els.hudPos.textContent = `${frame.lat.toFixed(5)}, ${frame.lon.toFixed(5)}`;
-    els.hudSeq.textContent = `序号 ${frame.seq}`;
-    els.clock.textContent = frame.t;
+    els.attBall.style.transform = `translateY(${(-Number(frame.pitch) || 0) * 1.2}px) rotate(${Number(frame.roll) || 0}deg)`;
+    els.hudPos.textContent = fmtPos(frame.lat, frame.lon);
+    els.hudSeq.textContent = frame.seq != null ? `序号 ${frame.seq}` : "序号 暂无";
+    els.clock.textContent = frame.t || "暂无";
 
     maybeAskLivePrefetch(frame);
-    marker.setLatLng([frame.lat, frame.lon]);
-    setAircraftHeading(movementBearing(prev, frame));
+    if (hasPos(frame)) {
+      marker.setLatLng([frame.lat, frame.lon]);
+      setAircraftHeading(movementBearing(prev, frame));
+    } else {
+      setAircraftHeading(frame.heading);
+    }
 
-    pushHist(state.altHist, frame.alt_msl);
-    pushHist(state.spdHist, frame.airspeed);
+    if (frame.alt_msl != null) pushHist(state.altHist, frame.alt_msl);
+    if (frame.airspeed != null) pushHist(state.spdHist, frame.airspeed);
     const colors = themeColors(currentTheme());
     drawSpark(els.altChart, state.altHist, colors.alt);
     drawSpark(els.spdChart, state.spdHist, colors.sim);
@@ -814,7 +833,7 @@
     }
 
     const now = performance.now();
-    if (now - state.envTimer > 8000) {
+    if (hasPos(frame) && now - state.envTimer > 8000) {
       state.envTimer = now;
       refreshEnv(frame.lat, frame.lon, frame.alt_msl);
     }
@@ -833,8 +852,16 @@
 
   async function refreshEnv(lat, lon, altMsl) {
     const reqId = ++state.envReq;
-    const hadValues = els.eWind.textContent !== "—";
+    const hadValues = els.eWind.textContent !== "暂无" && els.eWind.textContent !== "—";
     try {
+      if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+        els.eDem.textContent = "暂无";
+        els.eWind.textContent = "暂无";
+        els.eDir.textContent = "暂无";
+        els.eTemp.textContent = "暂无";
+        els.eMeta.textContent = "暂无 GPS，环境数据不可用";
+        return;
+      }
       if (!hadValues) els.eMeta.textContent = "环境加载中…";
       const res = await fetch(api(`/api/env/at?lat=${lat}&lon=${lon}`), { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -994,7 +1021,7 @@
       }
       if (msg.type === "telemetry" && msg.frame) {
         applyFrame(msg.frame);
-        if (state.track.length === 0 || state.track[state.track.length - 1].seq !== msg.frame.seq) {
+        if (hasPos(msg.frame) && (state.track.length === 0 || state.track[state.track.length - 1].seq !== msg.frame.seq)) {
           state.track.push({
             lat: msg.frame.lat,
             lon: msg.frame.lon,

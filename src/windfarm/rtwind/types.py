@@ -12,9 +12,6 @@ class TelemetryFrame:
     source: SourceKind
     vehicle_id: str
     t: str
-    lat: float
-    lon: float
-    alt_msl: float
     heading: float
     roll: float
     pitch: float
@@ -22,6 +19,9 @@ class TelemetryFrame:
     airspeed: float
     groundspeed: float
     climb_rate: float
+    lat: float | None = None
+    lon: float | None = None
+    alt_msl: float | None = None
     battery: float | None = None
     link: LinkState = "ok"
     seq: int = 0
