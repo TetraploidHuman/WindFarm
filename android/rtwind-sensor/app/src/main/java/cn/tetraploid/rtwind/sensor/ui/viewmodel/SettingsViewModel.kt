@@ -23,4 +23,7 @@ class SettingsViewModel @Inject constructor(
     fun saveHz(hz: Int) = viewModelScope.launch { repository.updateHz(hz) }
     fun saveCamera(enabled: Boolean) = viewModelScope.launch { repository.updateCamera(enabled) }
     fun saveImu(enabled: Boolean) = viewModelScope.launch { repository.updateImu(enabled) }
+    fun saveCameraHeight(height: Int) = viewModelScope.launch { repository.updateCameraHeight(height) }
+    fun saveCameraUploadHz(hz: Int) = viewModelScope.launch { repository.updateCameraUploadHz(hz) }
+    fun saveCameraJpegQuality(q: Int) = viewModelScope.launch { repository.updateCameraJpegQuality(q) }
 }

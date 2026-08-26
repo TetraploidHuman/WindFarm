@@ -17,23 +17,26 @@ from .types import TelemetryFrame
 class BeliefRuntime:
     """Maintains a geo-anchored belief map updated from live/sim telemetry."""
 
+    # Fixed mission patch: 10 km × 10 km at 50 m cells (201×201).
+    MISSION_SIZE_KM = 10.0
+    MISSION_RESOLUTION_M = 50.0
+    MISSION_CELLS = int(MISSION_SIZE_KM * 1000 / MISSION_RESOLUTION_M) + 1
+
     def __init__(
         self,
         *,
-        width: int = 81,
-        height: int = 81,
-        resolution_m: float = 50.0,
+        width: int | None = None,
+        height: int | None = None,
+        resolution_m: float = MISSION_RESOLUTION_M,
         levels: int = 1,
-        recenter_frac: float = 0.35,
     ):
-        self.width = width
-        self.height = height
+        self.width = width if width is not None else self.MISSION_CELLS
+        self.height = height if height is not None else self.MISSION_CELLS
         self.resolution_m = resolution_m
         self.levels = levels
-        self.recenter_frac = recenter_frac
         self._lock = threading.Lock()
         self._grid: GeoGrid | None = None
-        self._belief = create_belief_map(width, height, levels)
+        self._belief = create_belief_map(self.width, self.height, levels)
         self._updater = BeliefUpdater()
         self._step = 0
         self._last_frame_seq = -1
@@ -58,17 +61,10 @@ class BeliefRuntime:
             else:
                 self._grid = None
 
-    def ensure_centered(self, lat: float, lon: float) -> GeoGrid:
-        """Must be called while holding self._lock."""
+    def ensure_anchored(self, lat: float, lon: float) -> GeoGrid:
+        """Anchor once; never recentre/reset during flight (10 km patch is fixed)."""
         if self._grid is None:
             self._grid = GeoGrid(lat, lon, self.width, self.height, self.resolution_m)
-            return self._grid
-        x, y = self._grid.latlon_to_xy(lat, lon)
-        margin = self.recenter_frac * min(self.width, self.height)
-        if x < margin or y < margin or x > self.width - 1 - margin or y > self.height - 1 - margin:
-            self._grid = GeoGrid(lat, lon, self.width, self.height, self.resolution_m)
-            self._belief = create_belief_map(self.width, self.height, self.levels)
-            self._step = 0
         return self._grid
 
     def observe_frame(self, frame: TelemetryFrame) -> None:
@@ -77,9 +73,10 @@ class BeliefRuntime:
         with self._lock:
             if frame.seq == self._last_frame_seq:
                 return
-            grid = self.ensure_centered(frame.lat, frame.lon)
+            grid = self.ensure_anchored(frame.lat, frame.lon)
             cell = grid.latlon_to_cell(frame.lat, frame.lon)
             if cell is None:
+                # Outside fixed 10 km mission patch — skip update, keep existing belief.
                 return
             ix, iy = cell
 
@@ -192,6 +189,7 @@ class BeliefRuntime:
                 "width": self.width,
                 "height": self.height,
                 "resolution_m": self.resolution_m,
+                "size_km": self.MISSION_SIZE_KM,
                 "obs_count": self._obs_count,
                 "step": self._step,
             }

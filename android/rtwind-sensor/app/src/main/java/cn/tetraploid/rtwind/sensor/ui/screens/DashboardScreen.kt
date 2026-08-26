@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -38,6 +39,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.tetraploid.rtwind.sensor.data.TelemetrySnapshot
 import cn.tetraploid.rtwind.sensor.ui.viewmodel.DashboardViewModel
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 @Composable
 fun DashboardScreen(
@@ -88,7 +90,7 @@ fun DashboardScreen(
         )
 
         if (settings.enableCamera && permissionsReady) {
-            CameraPreviewCard(viewModel)
+            CameraPreviewCard(viewModel, snapshot.serviceRunning)
         }
 
         TelemetryCard(snapshot)
@@ -121,8 +123,9 @@ fun DashboardScreen(
 }
 
 @Composable
-private fun CameraPreviewCard(viewModel: DashboardViewModel) {
+private fun CameraPreviewCard(viewModel: DashboardViewModel, serviceRunning: Boolean) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
     Card(
@@ -143,13 +146,27 @@ private fun CameraPreviewCard(viewModel: DashboardViewModel) {
         }
     }
 
-    LaunchedEffect(previewView) {
+    LaunchedEffect(previewView, serviceRunning) {
         val view = previewView ?: return@LaunchedEffect
-        runCatching { viewModel.cameraController.bindPreview(lifecycleOwner, view) }
+        runCatching {
+            if (serviceRunning) {
+                viewModel.cameraController.attachPreview(lifecycleOwner, view)
+            } else {
+                viewModel.cameraController.bindPreview(lifecycleOwner, view)
+            }
+        }
     }
 
-    DisposableEffect(Unit) {
-        onDispose { viewModel.cameraController.unbind() }
+    DisposableEffect(serviceRunning) {
+        onDispose {
+            if (serviceRunning) {
+                scope.launch {
+                    runCatching { viewModel.cameraController.detachPreview() }
+                }
+            } else {
+                viewModel.cameraController.unbind()
+            }
+        }
     }
 }
 
@@ -179,6 +196,13 @@ private fun TelemetryCard(snapshot: TelemetrySnapshot) {
                 "${snapshot.uploadsTotal} 成功 / ${snapshot.uploadsFailed} 失败" +
                     (snapshot.lastUploadError?.let { " · $it" } ?: ""),
             )
+            if (snapshot.cameraUploadsTotal > 0 || snapshot.cameraLastFrameKb > 0) {
+                MetricRow(
+                    "摄像头",
+                    "${snapshot.cameraUploadsTotal} 帧 · 最近 ${snapshot.cameraLastFrameKb} KB" +
+                        (snapshot.cameraLastError?.let { " · $it" } ?: ""),
+                )
+            }
         }
     }
 }

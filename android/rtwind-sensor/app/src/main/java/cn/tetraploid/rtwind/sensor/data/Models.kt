@@ -33,6 +33,12 @@ data class AppSettings(
     val uploadHz: Int = 10,
     val enableCamera: Boolean = true,
     val enableImu: Boolean = true,
+    /** Output height: 360 / 480 / 720 */
+    val cameraHeight: Int = 480,
+    /** Camera JPEG upload rate (1–20 Hz, default 15). */
+    val cameraUploadHz: Int = 15,
+    /** JPEG quality 28–70; lower = smaller files. */
+    val cameraJpegQuality: Int = 38,
 ) {
     companion object {
         const val DEFAULT_SERVER = "http://tetraploid.cn:11024/rtwind"
@@ -59,4 +65,8 @@ data class TelemetrySnapshot(
     val uploadsTotal: Long = 0,
     val uploadsFailed: Long = 0,
     val serviceRunning: Boolean = false,
+    val cameraUploadsTotal: Long = 0,
+    val cameraUploadsFailed: Long = 0,
+    val cameraLastFrameKb: Int = 0,
+    val cameraLastError: String? = null,
 )
