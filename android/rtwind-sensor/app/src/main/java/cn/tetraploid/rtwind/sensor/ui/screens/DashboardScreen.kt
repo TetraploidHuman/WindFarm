@@ -158,21 +158,29 @@ private fun CameraPreviewCard(viewModel: DashboardViewModel, serviceRunning: Boo
         val view = previewView ?: return@LaunchedEffect
         runCatching {
             if (serviceRunning) {
-                viewModel.cameraController.attachPreview(lifecycleOwner, view)
+                viewModel.bindCameraForUpload(lifecycleOwner, view)
             } else {
-                viewModel.cameraController.bindPreview(lifecycleOwner, view)
+                viewModel.bindCameraPreviewOnly(lifecycleOwner, view)
             }
+        }.onFailure {
+            Toast.makeText(
+                view.context,
+                "摄像头启动失败: ${it.message ?: "未知错误"}",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
     DisposableEffect(serviceRunning) {
         onDispose {
-            if (serviceRunning) {
-                scope.launch {
-                    runCatching { viewModel.cameraController.detachPreview() }
+            scope.launch {
+                runCatching {
+                    if (serviceRunning) {
+                        viewModel.cameraController.detachPreview()
+                    } else {
+                        viewModel.cameraController.unbind()
+                    }
                 }
-            } else {
-                viewModel.cameraController.unbind()
             }
         }
     }
