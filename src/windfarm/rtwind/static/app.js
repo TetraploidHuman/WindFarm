@@ -104,6 +104,8 @@
       last_error: null,
     },
     systemLayersTimer: 0,
+    chartTimer: 0,
+    trackRedrawTimer: 0,
     cartoBasemapKey: "",
     lastDemMsl: null,
   };
@@ -845,6 +847,7 @@
 
   function applyFrame(frame) {
     if (!frame) return;
+    const now = performance.now();
     const prev = state.frame;
     state.frame = frame;
     setBadge(frame);
@@ -858,7 +861,8 @@
     els.mPitch.textContent = fmt(frame.pitch, 1);
     els.mYaw.textContent = fmt(frame.yaw, 0);
     els.mLink.textContent = linkLabel(frame.link);
-    els.attBall.style.transform = `translateY(${(-Number(frame.pitch) || 0) * 1.2}px) rotate(${Number(frame.roll) || 0}deg)`;
+    // Horizon ball: bank right → horizon tilts left (opposite sign to body roll).
+    els.attBall.style.transform = `translateY(${(Number(frame.pitch) || 0) * 1.2}px) rotate(${-(Number(frame.roll) || 0)}deg)`;
     els.hudPos.textContent = fmtPos(frame.lat, frame.lon);
     els.hudSeq.textContent = frame.seq != null ? `序号 ${frame.seq}` : "序号 暂无";
     els.clock.textContent = frame.t || "暂无";
@@ -873,9 +877,12 @@
 
     if (frame.alt_msl != null) pushHist(state.altHist, frame.alt_msl);
     if (frame.airspeed != null) pushHist(state.spdHist, frame.airspeed);
-    const colors = themeColors(currentTheme());
-    drawSpark(els.altChart, state.altHist, colors.alt);
-    drawSpark(els.spdChart, state.spdHist, colors.sim);
+    if (now - state.chartTimer > 300) {
+      state.chartTimer = now;
+      const colors = themeColors(currentTheme());
+      drawSpark(els.altChart, state.altHist, colors.alt);
+      drawSpark(els.spdChart, state.spdHist, colors.sim);
+    }
 
     if (els.follow.checked) {
       snapFollow();
@@ -887,7 +894,6 @@
       }
     }
 
-    const now = performance.now();
     if (hasPos(frame) && now - state.envTimer > 20000) {
       state.envTimer = now;
       refreshEnv(frame.lat, frame.lon, frame.alt_msl);
@@ -897,7 +903,46 @@
       scheduleLayerRefresh(200, { force: true });
     }
     if (window.__rtwindQuad) window.__rtwindQuad.onFrame(frame);
-    refreshSystemLayers();
+    if (now - state.systemLayersTimer > 4000) refreshSystemLayers();
+  }
+
+  let pendingTelemetryFrame = null;
+  let telemetryRaf = 0;
+  let lastTrackPushSeq = -1;
+
+  function redrawTrackLine() {
+    trackLine.setLatLngs(state.track.map((p) => [p.lat, p.lon]));
+    if (window.__rtwindQuad) window.__rtwindQuad.onTrack(state.track);
+  }
+
+  function pushTrackPoint(frame) {
+    if (!hasPos(frame)) return;
+    if (state.track.length > 0 && state.track[state.track.length - 1].seq === frame.seq) return;
+    state.track.push({
+      lat: frame.lat,
+      lon: frame.lon,
+      seq: frame.seq,
+    });
+    if (state.track.length > 1200) state.track.shift();
+    const now = performance.now();
+    if (state.track.length <= 2 || now - state.trackRedrawTimer >= 200) {
+      state.trackRedrawTimer = now;
+      redrawTrackLine();
+    }
+    lastTrackPushSeq = frame.seq;
+  }
+
+  function scheduleTelemetryFrame(frame) {
+    pendingTelemetryFrame = frame;
+    if (telemetryRaf) return;
+    telemetryRaf = requestAnimationFrame(() => {
+      telemetryRaf = 0;
+      const next = pendingTelemetryFrame;
+      pendingTelemetryFrame = null;
+      if (!next) return;
+      applyFrame(next);
+      if (next.seq !== lastTrackPushSeq) pushTrackPoint(next);
+    });
   }
 
   function setStatusBar(msg) {
@@ -1239,33 +1284,31 @@
   function connectWs() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}${prefix}/api/ws`);
+    let lastBeliefTickAt = 0;
     ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch (_) {
+        return;
+      }
       if (msg.type === "hello" || msg.type === "source_changed") {
         if (msg.active) setActiveUi(msg.active);
       }
       if (msg.type === "telemetry" && msg.frame) {
-        applyFrame(msg.frame);
-        if (hasPos(msg.frame) && (state.track.length === 0 || state.track[state.track.length - 1].seq !== msg.frame.seq)) {
-          state.track.push({
-            lat: msg.frame.lat,
-            lon: msg.frame.lon,
-            seq: msg.frame.seq,
-          });
-          if (state.track.length > 1200) state.track.shift();
-          trackLine.setLatLngs(state.track.map((p) => [p.lat, p.lon]));
-          if (window.__rtwindQuad) window.__rtwindQuad.onTrack(state.track);
-        }
+        scheduleTelemetryFrame(msg.frame);
+        return;
       }
       if (msg.type === "track_snapshot") applyTrack(msg.track);
-      if (msg.type === "belief_tick" && els.layerBelief && els.layerBelief.checked) {
-        scheduleLayerRefresh(400, { force: true });
-      }
       if (msg.type === "belief_tick") {
-        refreshSystemLayers(true);
-      }
-      if (msg.type === "belief_tick" && window.__rtwindQuad) {
-        window.__rtwindQuad.onBeliefTick();
+        const tickNow = performance.now();
+        if (tickNow - lastBeliefTickAt < 3000) return;
+        lastBeliefTickAt = tickNow;
+        if (els.layerBelief && els.layerBelief.checked) {
+          scheduleLayerRefresh(1200, { force: false });
+        }
+        if (window.__rtwindQuad) window.__rtwindQuad.onBeliefTick();
+        return;
       }
       if (msg.type === "plan_update") {
         applyPlanPath(msg);
