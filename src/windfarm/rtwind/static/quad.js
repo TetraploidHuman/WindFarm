@@ -241,8 +241,8 @@
 
   /**
    * NED body: +X nose, +Y right, +Z down.
-   * Attitude indicator: roll/pitch only (no yaw — heading does not bank the 3D model).
-   * View: orthographic from nose/tail (±X), wings level on screen when roll=pitch=0.
+   * Roll/pitch only — yaw never rotates the model.
+   * Rear orthographic: camera on −X (tail), looks along +X; wings horizontal when level.
    */
   function buildBodyMatrix(rollDeg, pitchDeg) {
     const roll = rollDeg * DEG;
@@ -340,7 +340,7 @@
     ctx.fillText(`P ${pitch.toFixed(1)}°`, 12, 36);
     ctx.fillText(`Y ${yaw.toFixed(1)}°`, 12, 52);
     ctx.fillStyle = colors.wire || "#1e40af";
-    ctx.fillText("surface mesh", w - 92, 20);
+    ctx.fillText("后方正视", w - 72, 20);
   }
 
   function demColor(t) {
