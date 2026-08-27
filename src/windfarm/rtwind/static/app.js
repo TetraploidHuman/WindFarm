@@ -858,7 +858,7 @@
     els.mPitch.textContent = fmt(frame.pitch, 1);
     els.mYaw.textContent = fmt(frame.yaw, 0);
     els.mLink.textContent = linkLabel(frame.link);
-    els.attBall.style.transform = `translateY(${(Number(frame.pitch) || 0) * 1.2}px) rotate(${Number(frame.roll) || 0}deg)`;
+    els.attBall.style.transform = `translateY(${(-Number(frame.pitch) || 0) * 1.2}px) rotate(${Number(frame.roll) || 0}deg)`;
     els.hudPos.textContent = fmtPos(frame.lat, frame.lon);
     els.hudSeq.textContent = frame.seq != null ? `序号 ${frame.seq}` : "序号 暂无";
     els.clock.textContent = frame.t || "暂无";
