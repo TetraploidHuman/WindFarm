@@ -21,8 +21,8 @@ data class ImuReading(
 )
 
 /**
- * IMU with mount remap: screen up, phone top (+Y device) = nose (+X body), right wing = +Y body.
- * Outputs aviation-style angles: roll = bank (right wing down +), pitch = nose up +, yaw = heading.
+ * Mount: screen up, phone top (+Y device) = nose (+X body), right wing = +Y body.
+ * Aviation angles: roll = bank (right wing down +), pitch = nose up +, yaw = heading.
  */
 @Singleton
 class ImuTracker @Inject constructor(
@@ -55,9 +55,13 @@ class ImuTracker @Inject constructor(
                             System.arraycopy(deviceRot, 0, bodyRot, 0, 9)
                         }
                         SensorManager.getOrientation(bodyRot, orient)
+                        // orient[1] ≈ roll (about nose), orient[2] ≈ pitch (about wing).
+                        // Screen-up level has orient[2]≈±π; offset so level screen-up → pitch 0.
                         last = ImuReading(
-                            rollDeg = Math.toDegrees(orient[1].toDouble()),
-                            pitchDeg = -Math.toDegrees(orient[2].toDouble()),
+                            rollDeg = normalizeSigned(Math.toDegrees(orient[1].toDouble())),
+                            pitchDeg = normalizeSigned(
+                                -Math.toDegrees(orient[2].toDouble()) + 180.0,
+                            ),
                             yawDeg = normalizeHeading(Math.toDegrees(orient[0].toDouble())),
                         )
                         trySend(last)
@@ -92,7 +96,18 @@ class ImuTracker @Inject constructor(
         val gDown = az
         val pitch = Math.toDegrees(atan2(gForward, sqrt(gRight * gRight + gDown * gDown)))
         val roll = Math.toDegrees(atan2(gRight, gDown))
-        return ImuReading(rollDeg = roll, pitchDeg = pitch, yawDeg = 0.0)
+        return ImuReading(
+            rollDeg = normalizeSigned(roll),
+            pitchDeg = normalizeSigned(pitch),
+            yawDeg = 0.0,
+        )
+    }
+
+    private fun normalizeSigned(deg: Double): Double {
+        var d = deg
+        while (d > 180.0) d -= 360.0
+        while (d < -180.0) d += 360.0
+        return d
     }
 
     private fun normalizeHeading(deg: Double): Double {

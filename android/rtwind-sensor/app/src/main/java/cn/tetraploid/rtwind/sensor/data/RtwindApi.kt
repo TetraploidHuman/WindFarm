@@ -1,5 +1,6 @@
 package cn.tetraploid.rtwind.sensor.data
 
+import cn.tetraploid.rtwind.sensor.log.AppLog
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.get
@@ -14,6 +15,7 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.CloseReason
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -22,6 +24,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -84,89 +87,110 @@ class RtwindApi @Inject constructor(
     fun startTransport(scope: CoroutineScope, baseUrl: String) {
         if (transportJob?.isActive == true) return
         val wsUrl = toWsUrl(baseUrl)
-        transportJob = scope.launch {
-            // HTTP coalesce worker: never blocks producers; always sends newest pending frame
-            val httpWorker = launch {
-                while (isActive) {
-                    if (connected.value) {
-                        delay(50)
-                        continue
-                    }
-                    val payload = latestHttp.getAndSet(null)
-                    if (payload == null) {
-                        delay(40)
-                        continue
-                    }
-                    runCatching {
-                        val resp = client.post("$baseUrl/api/ingest") {
-                            contentType(ContentType.Application.Json)
-                            setBody(payload)
+        val errHandler = CoroutineExceptionHandler { _, e ->
+            AppLog.e(TAG, "transport coroutine error", e)
+        }
+        transportJob = scope.launch(errHandler) {
+            supervisorScope {
+                val httpWorker = launch(errHandler) {
+                    while (isActive) {
+                        if (connected.value) {
+                            delay(50)
+                            continue
                         }
-                        if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
+                        val payload = latestHttp.getAndSet(null)
+                        if (payload == null) {
+                            delay(40)
+                            continue
+                        }
+                        runCatching {
+                            val resp = client.post("$baseUrl/api/ingest") {
+                                contentType(ContentType.Application.Json)
+                                setBody(payload)
+                            }
+                            if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
+                            runCatching { resp.bodyAsText() }
+                        }.onFailure { e ->
+                            AppLog.w(TAG, "http ingest failed", e)
+                        }
                     }
                 }
-            }
 
-            val cameraWorker = launch {
-                while (isActive) {
-                    val upload = latestCamera.getAndSet(null)
-                    if (upload == null) {
-                        delay(8)
-                        continue
-                    }
-                    val frameKb = (upload.jpeg.size + 1023) / 1024
-                    runCatching {
-                        val resp = client.post("$baseUrl/api/camera/upload?vehicle_id=${upload.vehicleId}") {
-                            contentType(ContentType.Image.JPEG)
-                            setBody(upload.jpeg)
+                val cameraWorker = launch(errHandler) {
+                    while (isActive) {
+                        val upload = latestCamera.getAndSet(null)
+                        if (upload == null) {
+                            delay(8)
+                            continue
                         }
-                        if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
-                    }.onSuccess {
-                        onCameraUploadResult?.invoke(true, frameKb, null)
-                    }.onFailure { e ->
-                        onCameraUploadResult?.invoke(false, frameKb, e.message ?: "upload failed")
+                        val frameKb = (upload.jpeg.size + 1023) / 1024
+                        runCatching {
+                            val resp = client.post(
+                                "$baseUrl/api/camera/upload?vehicle_id=${upload.vehicleId}",
+                            ) {
+                                contentType(ContentType.Image.JPEG)
+                                setBody(upload.jpeg)
+                            }
+                            if (!resp.status.isSuccess()) error("HTTP ${resp.status.value}")
+                            runCatching { resp.bodyAsText() }
+                        }.onSuccess {
+                            onCameraUploadResult?.invoke(true, frameKb, null)
+                        }.onFailure { e ->
+                            AppLog.w(TAG, "camera upload failed", e)
+                            onCameraUploadResult?.invoke(false, frameKb, e.message ?: "upload failed")
+                        }
                     }
                 }
-            }
 
-            // WS worker with fast reconnect
-            val wsWorker = launch {
-                while (isActive) {
-                    try {
-                        val session = client.webSocketSession { url(wsUrl) }
-                        connected.value = true
-                        val sender = launch {
-                            outbound.collect { payload ->
-                                sendMutex.withLock {
-                                    session.send(
-                                        Frame.Text(json.encodeToString(WsIngestEnvelope(frame = payload))),
-                                    )
+                val wsWorker = launch(errHandler) {
+                    while (isActive) {
+                        try {
+                            val session = client.webSocketSession { url(wsUrl) }
+                            connected.value = true
+                            val sender = launch(errHandler) {
+                                outbound.collect { payload ->
+                                    runCatching {
+                                        sendMutex.withLock {
+                                            session.send(
+                                                Frame.Text(
+                                                    json.encodeToString(WsIngestEnvelope(frame = payload)),
+                                                ),
+                                            )
+                                        }
+                                    }.onFailure { e ->
+                                        AppLog.w(TAG, "ws send failed", e)
+                                    }
                                 }
                             }
-                        }
-                        val reader = launch {
-                            try {
-                                for (frame in session.incoming) {
-                                    if (frame is Frame.Text) frame.readText()
+                            val reader = launch(errHandler) {
+                                runCatching {
+                                    for (frame in session.incoming) {
+                                        if (frame is Frame.Text) {
+                                            runCatching { frame.readText() }
+                                        }
+                                    }
+                                }.onFailure { e ->
+                                    AppLog.w(TAG, "ws read ended", e)
                                 }
-                            } catch (_: Exception) {
                             }
+                            reader.join()
+                            sender.cancel()
+                            runCatching {
+                                session.close(CloseReason(CloseReason.Codes.NORMAL, "bye"))
+                            }
+                        } catch (e: Exception) {
+                            AppLog.w(TAG, "ws session error", e)
+                        } finally {
+                            connected.value = false
                         }
-                        reader.join()
-                        sender.cancel()
-                        runCatching { session.close(CloseReason(CloseReason.Codes.NORMAL, "bye")) }
-                    } catch (_: Exception) {
-                        // fall through to reconnect
-                    } finally {
-                        connected.value = false
+                        delay(300)
                     }
-                    delay(300)
                 }
-            }
 
-            httpWorker.join()
-            cameraWorker.cancel()
-            wsWorker.cancel()
+                httpWorker.join()
+                cameraWorker.cancel()
+                wsWorker.cancel()
+            }
         }
     }
 
@@ -184,6 +208,8 @@ class RtwindApi @Inject constructor(
     fun stopWebSocket() = stopTransport()
 
     companion object {
+        private const val TAG = "RtwindApi"
+
         fun toWsUrl(baseUrl: String): String {
             val b = baseUrl.trim().trimEnd('/')
             val withScheme = when {
