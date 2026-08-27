@@ -39,20 +39,30 @@ class ImuTracker @Inject constructor(
                 when (event.sensor.type) {
                     Sensor.TYPE_ROTATION_VECTOR -> {
                         SensorManager.getRotationMatrixFromVector(rotMat, event.values)
-                        SensorManager.getOrientation(rotMat, orient)
+                        // Portrait, screen up, nose = top of phone (+Y), right wing = +X on screen.
+                        val mapped = FloatArray(9)
+                        val ok = SensorManager.remapCoordinateSystem(
+                            rotMat,
+                            SensorManager.AXIS_Y,
+                            SensorManager.AXIS_MINUS_X,
+                            mapped,
+                        )
+                        SensorManager.getOrientation(if (ok) mapped else rotMat, orient)
                         last = ImuReading(
                             rollDeg = Math.toDegrees(orient[2].toDouble()),
+                            // Aviation: pitch + = nose up (after body-axis remap).
                             pitchDeg = Math.toDegrees(orient[1].toDouble()),
                             yawDeg = normalizeHeading(Math.toDegrees(orient[0].toDouble())),
                         )
                         trySend(last)
                     }
                     Sensor.TYPE_ACCELEROMETER -> if (rotation == null) {
+                        // Portrait screen-up fallback (matches remap above).
                         val ax = event.values[0].toDouble()
                         val ay = event.values[1].toDouble()
                         val az = event.values[2].toDouble()
-                        val pitch = Math.toDegrees(atan2(-ax, sqrt(ay * ay + az * az)))
-                        val roll = Math.toDegrees(atan2(ay, az))
+                        val pitch = Math.toDegrees(atan2(-ay, sqrt(ax * ax + az * az)))
+                        val roll = Math.toDegrees(atan2(ax, az))
                         last = last.copy(rollDeg = roll, pitchDeg = pitch)
                         trySend(last)
                     }
