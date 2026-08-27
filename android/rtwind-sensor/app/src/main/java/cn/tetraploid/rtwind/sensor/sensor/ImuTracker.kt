@@ -22,7 +22,7 @@ data class ImuReading(
 
 /**
  * Mount: screen up, phone top (+Y device) = nose (+X body), right wing = +Y body.
- * Aviation angles: roll = bank (right wing down +), pitch = nose up +, yaw = heading.
+ * Pitch/roll from gravity (accelerometer); yaw from rotation vector (mag+fused).
  */
 @Singleton
 class ImuTracker @Inject constructor(
@@ -36,6 +36,7 @@ class ImuTracker @Inject constructor(
     private val deviceRot = FloatArray(9)
     private val bodyRot = FloatArray(9)
     private val orient = FloatArray(3)
+    private var lastAccel = floatArrayOf(0f, 0f, 9.81f)
 
     fun readings(): Flow<ImuReading> = callbackFlow {
         var last = ImuReading(0.0, 0.0, 0.0)
@@ -43,6 +44,13 @@ class ImuTracker @Inject constructor(
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 when (event.sensor.type) {
+                    Sensor.TYPE_ACCELEROMETER -> {
+                        lastAccel = event.values.copyOf()
+                        if (rotation == null) {
+                            last = bodyAnglesFromAccel(event.values)
+                            trySend(last)
+                        }
+                    }
                     Sensor.TYPE_ROTATION_VECTOR -> {
                         SensorManager.getRotationMatrixFromVector(deviceRot, event.values)
                         if (!SensorManager.remapCoordinateSystem(
@@ -55,19 +63,12 @@ class ImuTracker @Inject constructor(
                             System.arraycopy(deviceRot, 0, bodyRot, 0, 9)
                         }
                         SensorManager.getOrientation(bodyRot, orient)
-                        // orient[1] ≈ roll (about nose), orient[2] ≈ pitch (about wing).
-                        // Screen-up level has orient[2]≈±π; offset so level screen-up → pitch 0.
+                        val tilt = bodyAnglesFromAccel(lastAccel)
                         last = ImuReading(
-                            rollDeg = normalizeSigned(Math.toDegrees(orient[1].toDouble())),
-                            pitchDeg = normalizeSigned(
-                                -Math.toDegrees(orient[2].toDouble()) + 180.0,
-                            ),
+                            rollDeg = tilt.rollDeg,
+                            pitchDeg = tilt.pitchDeg,
                             yawDeg = normalizeHeading(Math.toDegrees(orient[0].toDouble())),
                         )
-                        trySend(last)
-                    }
-                    Sensor.TYPE_ACCELEROMETER -> if (rotation == null) {
-                        last = bodyAnglesFromAccel(event.values)
                         trySend(last)
                     }
                 }
@@ -86,7 +87,10 @@ class ImuTracker @Inject constructor(
         awaitClose { sensorManager.unregisterListener(listener) }
     }
 
-    /** Gravity tilt in body frame (screen up, nose = device +Y). */
+    /**
+     * Gravity tilt in body frame (screen up, nose = device +Y).
+     * Nose up → pitch positive; right wing down → roll positive.
+     */
     private fun bodyAnglesFromAccel(values: FloatArray): ImuReading {
         val ax = values[0].toDouble()
         val ay = values[1].toDouble()
