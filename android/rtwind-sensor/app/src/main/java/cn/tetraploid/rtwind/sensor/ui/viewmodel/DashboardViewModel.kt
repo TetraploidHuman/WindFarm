@@ -34,7 +34,7 @@ class DashboardViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
 
     fun startTelemetry() {
-        TelemetryService.start(context)
+        TelemetryService.start(context, settings.value.enableCamera)
     }
 
     fun stopTelemetry() {

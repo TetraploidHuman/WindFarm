@@ -1,15 +1,19 @@
 package cn.tetraploid.rtwind.sensor.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import cn.tetraploid.rtwind.sensor.MainActivity
 import cn.tetraploid.rtwind.sensor.R
@@ -37,23 +41,40 @@ class TelemetryService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        val enableCamera = intent?.getBooleanExtra(EXTRA_ENABLE_CAMERA, true) ?: true
         val notification = buildNotification("正在采集并上传传感器数据")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            val fgsTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, resolveForegroundServiceTypes(enableCamera))
             } else {
-                types
+                @Suppress("DEPRECATION")
+                startForeground(NOTIFICATION_ID, notification)
             }
-            startForeground(NOTIFICATION_ID, notification, fgsTypes)
-        } else {
-            @Suppress("DEPRECATION")
-            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "startForeground failed (missing permission for FGS type?)", e)
+            stopSelf()
+            return START_NOT_STICKY
         }
-        aggregator.start(scope, this)
+        aggregator.start(scope, this, enableCamera)
         return START_STICKY
     }
+
+    /** Android 14+ 声明 CAMERA 类型时必须已授予相机权限，否则直接 SecurityException 闪退。 */
+    private fun resolveForegroundServiceTypes(enableCamera: Boolean): Int {
+        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            enableCamera &&
+            hasCameraPermission()
+        ) {
+            types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        }
+        return types
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
 
     override fun onDestroy() {
         aggregator.stop()
@@ -90,11 +111,15 @@ class TelemetryService : LifecycleService() {
     }
 
     companion object {
+        private const val TAG = "TelemetryService"
         const val CHANNEL_ID = "rtwind_telemetry"
         const val NOTIFICATION_ID = 1001
+        const val EXTRA_ENABLE_CAMERA = "enable_camera"
 
-        fun start(context: Context) {
-            val intent = Intent(context, TelemetryService::class.java)
+        fun start(context: Context, enableCamera: Boolean = true) {
+            val intent = Intent(context, TelemetryService::class.java).apply {
+                putExtra(EXTRA_ENABLE_CAMERA, enableCamera)
+            }
             context.startForegroundService(intent)
         }
 
