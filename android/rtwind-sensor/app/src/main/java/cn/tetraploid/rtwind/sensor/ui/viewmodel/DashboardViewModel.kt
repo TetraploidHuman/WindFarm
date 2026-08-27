@@ -2,7 +2,10 @@ package cn.tetraploid.rtwind.sensor.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.camera.view.PreviewView
+import androidx.lifecycle.LifecycleOwner
 import cn.tetraploid.rtwind.sensor.camera.CameraController
+import cn.tetraploid.rtwind.sensor.camera.CameraStreamConfig
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
@@ -34,11 +37,33 @@ class DashboardViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
 
     fun startTelemetry() {
-        TelemetryService.start(context, settings.value.enableCamera)
+        viewModelScope.launch {
+            runCatching { cameraController.unbind() }
+            TelemetryService.start(context, settings.value.enableCamera)
+        }
     }
 
     fun stopTelemetry() {
-        TelemetryService.stop(context)
+        viewModelScope.launch {
+            runCatching { cameraController.stopStream() }
+            TelemetryService.stop(context)
+        }
+    }
+
+    suspend fun bindCameraForUpload(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        val s = settings.value
+        if (!s.enableCamera) return
+        val config = CameraStreamConfig.fromSettings(s)
+        cameraController.startStream(lifecycleOwner, config) { jpeg ->
+            api.publishCamera(jpeg, s.vehicleId)
+        }
+        cameraController.attachPreview(lifecycleOwner, previewView)
+    }
+
+    suspend fun bindCameraPreviewOnly(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        if (settings.value.enableCamera) {
+            cameraController.bindPreview(lifecycleOwner, previewView)
+        }
     }
 
     fun pingServer(onResult: (String) -> Unit) {

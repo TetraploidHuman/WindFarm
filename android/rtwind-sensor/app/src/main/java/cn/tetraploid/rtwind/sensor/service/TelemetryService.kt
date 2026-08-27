@@ -54,8 +54,18 @@ class TelemetryService : LifecycleService() {
             Log.e(TAG, "startForeground failed (missing permission for FGS type?)", e)
             stopSelf()
             return START_NOT_STICKY
+        } catch (e: Exception) {
+            Log.e(TAG, "onStartCommand failed", e)
+            stopSelf()
+            return START_NOT_STICKY
         }
-        aggregator.start(scope, this, enableCamera)
+        try {
+            aggregator.start(scope)
+        } catch (e: Exception) {
+            Log.e(TAG, "aggregator.start failed", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         return START_STICKY
     }
 

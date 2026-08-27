@@ -1,13 +1,10 @@
 package cn.tetraploid.rtwind.sensor.sensor
 
-import android.Manifest
 import android.content.Context
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.os.BatteryManager
-import androidx.core.content.ContextCompat
+import android.os.Build
 import cn.tetraploid.rtwind.sensor.camera.CameraController
-import cn.tetraploid.rtwind.sensor.camera.CameraStreamConfig
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
@@ -21,11 +18,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -50,10 +48,9 @@ class TelemetryAggregator @Inject constructor(
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
     private var linkJob: Job? = null
-    private var cameraSettingsJob: Job? = null
     private var cachedSettings: AppSettings = AppSettings()
 
-    fun start(scope: CoroutineScope, lifecycleOwner: LifecycleOwner, enableCamera: Boolean = true) {
+    fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
         _snapshot.update {
             it.copy(
@@ -85,26 +82,6 @@ class TelemetryAggregator @Inject constructor(
             api.startTransport(scope, cachedSettings.serverBaseUrl)
             settingsRepository.settings.collect { s ->
                 cachedSettings = s
-            }
-        }
-
-        cameraSettingsJob = scope.launch {
-            val initial = settingsRepository.settings.first()
-            cachedSettings = initial
-            if (initial.enableCamera && enableCamera && hasCameraPermission()) {
-                startCameraStream(lifecycleOwner, initial)
-            }
-            settingsRepository.settings.collect { s ->
-                cachedSettings = s
-                if (!s.enableCamera || !hasCameraPermission()) {
-                    cameraController.stopStream()
-                } else if (!cameraController.isStreaming) {
-                    startCameraStream(lifecycleOwner, s)
-                } else {
-                    launch {
-                        cameraController.updateConfig(CameraStreamConfig.fromSettings(s))
-                    }
-                }
             }
         }
 
@@ -162,9 +139,9 @@ class TelemetryAggregator @Inject constructor(
         uploadJob = null
         linkJob?.cancel()
         linkJob = null
-        cameraSettingsJob?.cancel()
-        cameraSettingsJob = null
-        cameraController.stopStream()
+        runBlocking(Dispatchers.Main.immediate) {
+            runCatching { cameraController.stopStream() }
+        }
         api.stopTransport()
         _snapshot.update {
             it.copy(
@@ -248,23 +225,17 @@ class TelemetryAggregator @Inject constructor(
     }
 
     private fun readBatteryPct(): Double? {
-        val intent = context.registerReceiver(null, IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
-            ?: return null
+        val filter = IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(null, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            context.registerReceiver(null, filter)
+        } ?: return null
         val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
         if (level < 0 || scale <= 0) return null
         return level * 100.0 / scale
     }
 
-    private suspend fun startCameraStream(lifecycleOwner: LifecycleOwner, settings: AppSettings) {
-        if (!hasCameraPermission()) return
-        val config = CameraStreamConfig.fromSettings(settings)
-        cameraController.startStream(lifecycleOwner, config) { jpeg ->
-            api.publishCamera(jpeg, settings.vehicleId)
-        }
-    }
-
-    private fun hasCameraPermission(): Boolean =
-        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
 }

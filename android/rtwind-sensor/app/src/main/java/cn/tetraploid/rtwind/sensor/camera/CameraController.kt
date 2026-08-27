@@ -1,6 +1,7 @@
 package cn.tetraploid.rtwind.sensor.camera
 
 import android.content.Context
+import android.util.Log
 import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -17,12 +18,17 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 @Singleton
 class CameraController @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val bindMutex = Mutex()
     private var imageCapture: ImageCapture? = null
 
     private var streamConfig: CameraStreamConfig? = null
@@ -37,26 +43,26 @@ class CameraController @Inject constructor(
         lifecycleOwner: LifecycleOwner,
         config: CameraStreamConfig,
         onJpeg: (ByteArray) -> Unit,
-    ) {
+    ) = withMain {
         streamConfig = config
         onJpegFrame = onJpeg
         boundOwner = lifecycleOwner
-        rebind()
+        rebindInternal()
     }
 
-    suspend fun attachPreview(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+    suspend fun attachPreview(lifecycleOwner: LifecycleOwner, previewView: PreviewView) = withMain {
         boundOwner = lifecycleOwner
         this.previewView = previewView
-        rebind()
+        rebindInternal()
     }
 
-    suspend fun detachPreview() {
+    suspend fun detachPreview() = withMain {
         previewView = null
-        if (isStreaming) rebind()
+        if (isStreaming) rebindInternal()
     }
 
     /** Preview only (no upload) when service is stopped. */
-    suspend fun bindPreview(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+    suspend fun bindPreview(lifecycleOwner: LifecycleOwner, previewView: PreviewView) = withMain {
         boundOwner = lifecycleOwner
         this.previewView = previewView
         if (!isStreaming) {
@@ -76,16 +82,16 @@ class CameraController @Inject constructor(
                 capture,
             )
         } else {
-            rebind()
+            rebindInternal()
         }
     }
 
-    suspend fun updateConfig(config: CameraStreamConfig) {
+    suspend fun updateConfig(config: CameraStreamConfig) = withMain {
         streamConfig = config
-        if (isStreaming) rebind()
+        if (isStreaming) rebindInternal()
     }
 
-    private suspend fun rebind() {
+    private suspend fun rebindInternal() {
         val owner = boundOwner ?: return
         val config = streamConfig
         val callback = onJpegFrame
@@ -145,14 +151,18 @@ class CameraController @Inject constructor(
         )
     }
 
-    fun stopStream() {
+    suspend fun stopStream() = withMain {
         onJpegFrame = null
         streamConfig = null
         previewView = null
-        unbind()
+        unbindInternal()
     }
 
-    fun unbind() {
+    suspend fun unbind() = withMain {
+        unbindInternal()
+    }
+
+    private fun unbindInternal() {
         runCatching { getProviderBlocking().unbindAll() }
         imageCapture = null
         if (!isStreaming) {
@@ -168,4 +178,20 @@ class CameraController @Inject constructor(
 
     private fun getProviderBlocking(): ProcessCameraProvider =
         ProcessCameraProvider.getInstance(context).get()
+
+    private suspend inline fun <T> withMain(crossinline block: suspend () -> T): T =
+        withContext(Dispatchers.Main.immediate) {
+            bindMutex.withLock {
+                try {
+                    block()
+                } catch (e: Exception) {
+                    Log.e(TAG, "camera op failed", e)
+                    throw e
+                }
+            }
+        }
+
+    companion object {
+        private const val TAG = "CameraController"
+    }
 }
