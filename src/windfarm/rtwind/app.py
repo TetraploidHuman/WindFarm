@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -15,6 +16,7 @@ from .camera_hub import CameraHub
 from .geo import GeoContext
 from .hub import TelemetryHub
 from .live_source import LiveIngestSource
+from .plan_runtime import PlanRuntime
 from .sim_source import SimDroneSource
 from .types import RtwindConfig, SourceKind, TelemetryFrame
 
@@ -41,7 +43,7 @@ class PrefetchBody(BaseModel):
     weather_nx: int = Field(default=11, ge=2, le=15)
     weather_ny: int = Field(default=11, ge=2, le=15)
     dem: bool = True
-    weather: bool = True
+    weather: bool = False
 
 
 class IngestBody(BaseModel):
@@ -70,10 +72,12 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     sim = SimDroneSource(hub, config)
     live = LiveIngestSource(hub, config)
     belief = BeliefRuntime()
+    plan = PlanRuntime()
     camera = CameraHub()
     static_dir = Path(__file__).resolve().parent / "static"
 
     async def _on_source_change(previous: SourceKind, current: SourceKind) -> None:
+        plan.reset()
         if current == "sim":
             belief.reset(lat=sim.origin_lat, lon=sim.origin_lon)
             await camera.clear()
@@ -88,11 +92,41 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         if current == "live":
             await live.start()
 
+    _last_plan_check_mono = 0.0
+    _last_belief_observe_mono = 0.0
+    _last_belief_tick_mono = 0.0
+
     async def _on_frame(frame: TelemetryFrame) -> None:
-        await asyncio.to_thread(belief.observe_frame, frame)
+        nonlocal _last_belief_observe_mono, _last_belief_tick_mono
+        now = time.monotonic()
+        if now - _last_belief_observe_mono >= 0.25:
+            _last_belief_observe_mono = now
+            await asyncio.to_thread(belief.observe_frame, frame)
         st = belief.status()
-        if st.get("obs_count", 0) > 0 and st["obs_count"] % 8 == 0:
+        obs = int(st.get("obs_count") or 0)
+        if obs > 0 and obs % 32 == 0 and now - _last_belief_tick_mono >= 3.0:
+            _last_belief_tick_mono = now
             await hub._broadcast({"type": "belief_tick", "status": st})
+        if frame.lat is None or frame.lon is None:
+            return
+        nonlocal _last_plan_check_mono
+        now = time.monotonic()
+        if now - _last_plan_check_mono < 2.0:
+            return
+        _last_plan_check_mono = now
+        upd = await asyncio.to_thread(
+            plan.maybe_replan,
+            frame,
+            belief=belief,
+            geo=geo,
+            origin_lat=sim.origin_lat if hub.active == "sim" else None,
+            origin_lon=sim.origin_lon if hub.active == "sim" else None,
+        )
+        if upd:
+            await hub._broadcast(upd)
+        elif plan.status().get("ready"):
+            lam = await asyncio.to_thread(plan.update_lambda, frame.lat, frame.lon)
+            await hub._broadcast({"type": "plan_progress", "lambda": round(lam, 4)})
 
     hub.add_source_listener(_on_source_change)
     hub.add_frame_listener(_on_frame)
@@ -118,14 +152,50 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     app.state.sim = sim
     app.state.live = live
     app.state.belief = belief
+    app.state.plan = plan
     app.state.camera = camera
     app.state.config = config
+
+    def _perception_status() -> dict[str, Any]:
+        region = geo.region_status()
+        prefetched = bool(region.get("prefetched"))
+        dem = region.get("dem") or {}
+        weather = region.get("weather") or {}
+        dem_ok = prefetched and int(dem.get("ok") or 0) > 0
+        weather_ok = prefetched and int(weather.get("ok") or 0) > 0
+        return {
+            "ready": dem_ok and weather_ok,
+            "prefetched": prefetched,
+            "dem_ok": dem_ok,
+            "weather_ok": weather_ok,
+            "partial": bool(region.get("partial")),
+            "size_km": region.get("size_km"),
+        }
+
+    @app.get("/api/config/public")
+    async def config_public() -> dict[str, Any]:
+        return {
+            "carto_basemap_key": config.carto_basemap_key or "",
+        }
+
+    @app.get("/api/system/layers")
+    async def system_layers() -> dict[str, Any]:
+        return {
+            "perception": _perception_status(),
+            "cognition": belief.status(),
+            "planning": plan.status(),
+        }
+
+    @app.get("/api/plan/path")
+    async def plan_path() -> dict[str, Any]:
+        return plan.path_payload()
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         payload = hub.health()
         payload["live"] = live.status()
         payload["belief"] = belief.status()
+        payload["plan"] = plan.status()
         return payload
 
     @app.get("/api/source")
@@ -150,9 +220,9 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         return {"active": hub.active, "track": hub.track(since=since, limit=limit)}
 
     @app.get("/api/env/at")
-    async def env_at(lat: float, lon: float) -> dict[str, Any]:
-        env = await asyncio.to_thread(geo.env_at, lat, lon)
-        # Enrich AGL on latest if positions close
+    async def env_at(lat: float, lon: float, weather: bool = False) -> dict[str, Any]:
+        """DEM from server; weather defaults off (browser fetches Open-Meteo directly)."""
+        env = await asyncio.to_thread(geo.env_at, lat, lon, weather=weather)
         frame = hub.latest()
         payload = env.to_dict()
         if frame and env.dem_msl is not None and frame.alt_msl is not None:
@@ -209,6 +279,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
             )
             if moved:
                 belief.reset(lat=body.center_lat, lon=body.center_lon)
+                plan.reset()
         return result
 
     @app.post("/api/env/prefetch/stream")
@@ -228,6 +299,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
             )
             if moved:
                 belief.reset(lat=body.center_lat, lon=body.center_lon)
+                plan.reset()
 
         async def gen():
             import json as _json
@@ -318,6 +390,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
     async def belief_reset(body: BeliefResetBody | None = None) -> dict[str, Any]:
         body = body or BeliefResetBody()
         belief.reset(lat=body.lat, lon=body.lon)
+        plan.reset()
         return {"ok": True, **belief.status()}
 
     @app.post("/api/ingest")
@@ -342,6 +415,7 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
         if body.action == "reset":
             sim.reset(lat=body.lat, lon=body.lon)
             belief.reset(lat=sim.origin_lat, lon=sim.origin_lon)
+            plan.reset()
             if hub.active == "sim":
                 await hub.set_active("sim", clear_track=True)
                 await sim.start()

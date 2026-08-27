@@ -82,3 +82,4 @@ class RtwindConfig:
     mavlink_publish_hz: float = 10.0
     data_dir: str = "data"
     root_path: str = ""
+    carto_basemap_key: str = ""

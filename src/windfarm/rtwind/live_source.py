@@ -99,7 +99,8 @@ class LiveIngestSource:
         self._last_frame = frame
         if self.hub.active != "live":
             return None
-        await self.hub.publish(frame)
+        # Never block the ingest socket/HTTP handler on belief/plan work.
+        asyncio.create_task(self.hub.publish(frame), name="rtwind-publish")
         return frame
 
     async def _mavlink_publish_loop(self) -> None:

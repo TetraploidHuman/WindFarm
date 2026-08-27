@@ -5,14 +5,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import cn.tetraploid.rtwind.sensor.data.MountNoseAxis
-import cn.tetraploid.rtwind.sensor.data.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.atan2
@@ -25,13 +21,12 @@ data class ImuReading(
 )
 
 /**
- * Screen-up belly mount. Pitch/roll from gravity; yaw from rotation vector.
- * Nose axis configurable: phone long edge (+X) or top edge (+Y).
+ * Fixed mount: screen up, phone top (+Y device) = nose (+X body), right wing = +Y body.
+ * Pitch/roll from gravity (accelerometer); yaw from remapped rotation vector.
  */
 @Singleton
 class ImuTracker @Inject constructor(
     @ApplicationContext context: Context,
-    private val settingsRepository: SettingsRepository,
 ) {
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -42,11 +37,8 @@ class ImuTracker @Inject constructor(
     private val bodyRot = FloatArray(9)
     private val orient = FloatArray(3)
     private var lastAccel = floatArrayOf(0f, 0f, 9.81f)
-    @Volatile private var mountNoseAxis: MountNoseAxis = MountNoseAxis.DEVICE_X
 
     fun readings(): Flow<ImuReading> = callbackFlow {
-        mountNoseAxis = runBlocking { settingsRepository.settings.first().mountNoseAxis }
-
         var last = ImuReading(0.0, 0.0, 0.0)
 
         val listener = object : SensorEventListener {
@@ -55,18 +47,23 @@ class ImuTracker @Inject constructor(
                     Sensor.TYPE_ACCELEROMETER -> {
                         lastAccel = event.values.copyOf()
                         if (rotation == null) {
-                            last = bodyAnglesFromAccel(event.values, mountNoseAxis)
+                            last = bodyAnglesFromAccel(event.values)
                             trySend(last)
                         }
                     }
                     Sensor.TYPE_ROTATION_VECTOR -> {
                         SensorManager.getRotationMatrixFromVector(deviceRot, event.values)
-                        val remapped = remapForMount(mountNoseAxis)
-                        if (!remapped) {
+                        if (!SensorManager.remapCoordinateSystem(
+                                deviceRot,
+                                SensorManager.AXIS_Y,
+                                SensorManager.AXIS_X,
+                                bodyRot,
+                            )
+                        ) {
                             System.arraycopy(deviceRot, 0, bodyRot, 0, 9)
                         }
                         SensorManager.getOrientation(bodyRot, orient)
-                        val tilt = bodyAnglesFromAccel(lastAccel, mountNoseAxis)
+                        val tilt = bodyAnglesFromAccel(lastAccel)
                         last = ImuReading(
                             rollDeg = tilt.rollDeg,
                             pitchDeg = tilt.pitchDeg,
@@ -90,48 +87,24 @@ class ImuTracker @Inject constructor(
         awaitClose { sensorManager.unregisterListener(listener) }
     }
 
-    /** Update mount axis when user changes settings (called from aggregator). */
-    fun updateMountAxis(axis: MountNoseAxis) {
-        mountNoseAxis = axis
-    }
-
-    private fun remapForMount(axis: MountNoseAxis): Boolean = when (axis) {
-        MountNoseAxis.DEVICE_Y -> SensorManager.remapCoordinateSystem(
-            deviceRot,
-            SensorManager.AXIS_Y,
-            SensorManager.AXIS_X,
-            bodyRot,
-        )
-        MountNoseAxis.DEVICE_X -> SensorManager.remapCoordinateSystem(
-            deviceRot,
-            SensorManager.AXIS_X,
-            SensorManager.AXIS_Y,
-            bodyRot,
-        )
-    }
-
     /**
-     * Gravity tilt; nose-up → pitch positive, right-wing-down → roll positive.
-     * Uses accelerometer reaction vector (screen up, belly mount).
+     * Map device accel to body tilt (screen up, nose = device +Y).
+     * Nose up → pitch +; right wing down → roll +.
      */
-    private fun bodyAnglesFromAccel(values: FloatArray, axis: MountNoseAxis): ImuReading {
+    private fun bodyAnglesFromAccel(values: FloatArray): ImuReading {
         val ax = values[0].toDouble()
         val ay = values[1].toDouble()
         val az = values[2].toDouble()
-        return when (axis) {
-            MountNoseAxis.DEVICE_Y -> {
-                // Nose = device +Y (portrait top forward)
-                val pitch = Math.toDegrees(atan2(-ay, sqrt(ax * ax + az * az)))
-                val roll = Math.toDegrees(atan2(-ax, az))
-                ImuReading(normalizeSigned(roll), normalizeSigned(pitch), 0.0)
-            }
-            MountNoseAxis.DEVICE_X -> {
-                // Nose = device +X (long edge forward) — typical flat belly mount
-                val pitch = Math.toDegrees(atan2(ax, sqrt(ay * ay + az * az)))
-                val roll = Math.toDegrees(atan2(-ay, az))
-                ImuReading(normalizeSigned(roll), normalizeSigned(pitch), 0.0)
-            }
-        }
+        val gForward = -ay
+        val gRight = -ax
+        val gDown = az
+        val pitch = -Math.toDegrees(atan2(gForward, sqrt(gRight * gRight + gDown * gDown)))
+        val roll = Math.toDegrees(atan2(gRight, gDown))
+        return ImuReading(
+            rollDeg = normalizeSigned(roll),
+            pitchDeg = normalizeSigned(pitch),
+            yawDeg = 0.0,
+        )
     }
 
     private fun normalizeSigned(deg: Double): Double {

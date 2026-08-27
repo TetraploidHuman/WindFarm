@@ -22,6 +22,8 @@ class TelemetryHub:
         self._live_last_rx = 0.0
         self._on_source_change: list[Callable[[SourceKind, SourceKind], Awaitable[None] | None]] = []
         self._on_frame: list[Callable[[TelemetryFrame], Awaitable[None] | None]] = []
+        self._frame_pending: TelemetryFrame | None = None
+        self._frame_worker: asyncio.Task[None] | None = None
 
     def add_source_listener(self, cb: Callable[[SourceKind, SourceKind], Awaitable[None] | None]) -> None:
         self._on_source_change.append(cb)
@@ -76,11 +78,26 @@ class TelemetryHub:
                     )
                 )
         await self._broadcast({"type": "telemetry", "frame": frame.to_dict()})
-        for cb in self._on_frame:
-            result = cb(frame)
-            if asyncio.iscoroutine(result):
-                await result
+        self._enqueue_frame(frame)
         return True
+
+    def _enqueue_frame(self, frame: TelemetryFrame) -> None:
+        """Coalesce heavy frame listeners — always keep the latest frame only."""
+        self._frame_pending = frame
+        if self._frame_worker is None or self._frame_worker.done():
+            self._frame_worker = asyncio.create_task(self._run_frame_listeners(), name="rtwind-frame-worker")
+
+    async def _run_frame_listeners(self) -> None:
+        try:
+            while self._frame_pending is not None:
+                frame = self._frame_pending
+                self._frame_pending = None
+                for cb in self._on_frame:
+                    result = cb(frame)
+                    if asyncio.iscoroutine(result):
+                        await result
+        finally:
+            self._frame_worker = None
 
     async def set_active(self, source: SourceKind, *, clear_track: bool = True) -> dict[str, Any]:
         async with self._lock:

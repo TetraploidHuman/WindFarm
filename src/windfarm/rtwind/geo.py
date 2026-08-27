@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from typing import Any
 from ..data_ingest import (
     SRTM_SIZE,
     _bilinear,
-    _urlopen,
+    _direct_opener,
     ensure_srtm_tile,
     read_hgt_elevation,
     tile_name,
@@ -105,6 +106,10 @@ class GeoContext:
             "_cached": False,
         }
 
+    def _open_meteo(self, req: urllib.request.Request, *, timeout: float):
+        """Fetch Open-Meteo over direct HTTPS (local Clash proxy breaks TLS to this host)."""
+        return _direct_opener().open(req, timeout=timeout)
+
     def _fetch_weather(self, lat: float, lon: float) -> dict[str, Any]:
         qlat = round(lat, 3)
         qlon = round(lon, 3)
@@ -125,8 +130,26 @@ class GeoContext:
             f"{OPEN_METEO_FORECAST}?{params}",
             headers={"User-Agent": "WindFarm-rtwind/0.1"},
         )
-        with _urlopen(req, timeout=12.0) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        try:
+            with self._open_meteo(req, timeout=12.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:240]
+            except Exception:
+                detail = ""
+            daily = exc.code == 429 and ("Daily" in detail or "daily" in detail.lower())
+            soft = "HTTP 429 daily" if daily else (f"HTTP {exc.code}" if exc.code else "HTTP")
+            if cached and exc.code in (429, 500, 502, 503, 504):
+                return {**cached[1], "_cached": True, "_soft_error": soft}
+            if daily:
+                raise RuntimeError("open-meteo daily limit exceeded") from None
+            raise
+        except Exception:
+            if cached:
+                return {**cached[1], "_cached": True, "_soft_error": "network"}
+            raise
         current = payload.get("current") or {}
         result = self._weather_from_current(current)
         self._weather_cache[(qlat, qlon)] = (now, result)
@@ -173,7 +196,7 @@ class GeoContext:
                 headers={"User-Agent": "WindFarm-rtwind/0.1"},
             )
             try:
-                with _urlopen(req, timeout=20.0) as resp:
+                with self._open_meteo(req, timeout=20.0) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                 if isinstance(payload, list):
                     rows = payload
@@ -211,33 +234,63 @@ class GeoContext:
                         out[point] = {}
         return out
 
-    def env_at(self, lat: float, lon: float) -> EnvAtPoint:
+    def env_at(self, lat: float, lon: float, *, weather: bool = False) -> EnvAtPoint:
         fetched = datetime.now(timezone.utc).isoformat()
         dem = self.elevation_msl(lat, lon)
         errs: list[str] = []
         if dem is None and self._last_dem_error:
             errs.append(self._last_dem_error)
-        weather: dict[str, Any] = {}
+        weather_data: dict[str, Any] = {}
         stale = False
-        try:
-            weather = self._fetch_weather(lat, lon)
-            stale = bool(weather.get("_cached"))
-        except Exception as exc:
-            errs.append(f"weather: {exc}")
-            qlat, qlon = round(lat, 3), round(lon, 3)
-            cached = self._weather_cache.get((qlat, qlon))
-            if cached:
-                weather = cached[1]
-                stale = True
+        if weather:
+            try:
+                weather_data = self._fetch_weather(lat, lon)
+                stale = bool(weather_data.get("_cached"))
+                soft = weather_data.get("_soft_error")
+                if soft == "HTTP 429 daily":
+                    errs.append("气象今日额度已用尽，使用缓存")
+                elif soft == "HTTP 429":
+                    errs.append("气象限流，使用缓存")
+                elif soft and soft.startswith("HTTP "):
+                    errs.append(f"气象服务暂不可用({soft})，使用缓存")
+                elif soft == "network":
+                    errs.append("气象网络波动，使用缓存")
+            except RuntimeError as exc:
+                if "daily limit" in str(exc).lower():
+                    errs.append("气象今日额度已用尽，请明天再试")
+                else:
+                    errs.append(f"weather: {exc}")
+                qlat, qlon = round(lat, 3), round(lon, 3)
+                cached = self._weather_cache.get((qlat, qlon))
+                if cached:
+                    weather_data = cached[1]
+                    stale = True
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    errs.append("气象限流，请稍后再试")
+                else:
+                    errs.append(f"weather: HTTP {exc.code}")
+                qlat, qlon = round(lat, 3), round(lon, 3)
+                cached = self._weather_cache.get((qlat, qlon))
+                if cached:
+                    weather_data = cached[1]
+                    stale = True
+            except Exception as exc:
+                errs.append(f"weather: {exc}")
+                qlat, qlon = round(lat, 3), round(lon, 3)
+                cached = self._weather_cache.get((qlat, qlon))
+                if cached:
+                    weather_data = cached[1]
+                    stale = True
         return EnvAtPoint(
             lat=lat,
             lon=lon,
             dem_msl=dem,
-            wind_speed_mps=weather.get("wind_speed_mps"),
-            wind_dir_deg=weather.get("wind_dir_deg"),
-            wind_u=weather.get("wind_u"),
-            wind_v=weather.get("wind_v"),
-            temperature_c=weather.get("temperature_c"),
+            wind_speed_mps=weather_data.get("wind_speed_mps"),
+            wind_dir_deg=weather_data.get("wind_dir_deg"),
+            wind_u=weather_data.get("wind_u"),
+            wind_v=weather_data.get("wind_v"),
+            temperature_c=weather_data.get("temperature_c"),
             fetched_at=fetched,
             stale=stale,
             error="; ".join(errs) if errs else None,

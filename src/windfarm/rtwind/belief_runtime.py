@@ -8,8 +8,10 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+
 from ..belief import BeliefUpdater, belief_snapshot, create_belief_map
-from ..types import Observation
+from ..types import BeliefMap, Observation
 from .geo_grid import GeoGrid
 from .types import TelemetryFrame
 
@@ -183,6 +185,19 @@ class BeliefRuntime:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            mean_unc = None
+            mean_conf = None
+            if self._belief.field_arrays is not None:
+                unc = self._belief.field_arrays.get("uncertainty")
+                conf = self._belief.field_arrays.get("confidence")
+                if unc is not None:
+                    arr = np.asarray(unc, dtype=np.float64)
+                    if arr.size:
+                        mean_unc = float(np.mean(arr))
+                if conf is not None:
+                    arr = np.asarray(conf, dtype=np.float64)
+                    if arr.size:
+                        mean_conf = float(np.mean(arr))
             return {
                 "enabled": self._enabled,
                 "anchored": self._grid is not None,
@@ -194,4 +209,14 @@ class BeliefRuntime:
                 "size_km": self.MISSION_SIZE_KM,
                 "obs_count": self._obs_count,
                 "step": self._step,
+                "mean_uncertainty": mean_unc,
+                "mean_confidence": mean_conf,
             }
+
+    def grid(self) -> GeoGrid | None:
+        with self._lock:
+            return self._grid
+
+    def belief_map(self) -> BeliefMap | None:
+        with self._lock:
+            return self._belief

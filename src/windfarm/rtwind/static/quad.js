@@ -28,7 +28,8 @@
     });
   }
 
-  // Parametric surface mesh (OpenVSP-style wire grid). Body: +X nose, +Y right, +Z down.
+  // Parametric surface mesh (OpenVSP-style wire grid).
+  // Body NED: +X = nose (prop at x≈0.62), −X = tail (x≈−1.02), +Y = right wing, +Z = down.
   function meshSurface(pointFn, nu, nv) {
     const grid = [];
     for (let i = 0; i <= nu; i += 1) {
@@ -238,34 +239,171 @@
   }
 
   const DEG = Math.PI / 180;
+  /** Body sky direction (NED +Z = down, so sky = −Z). */
+  const BODY_SKY = [0, 0, -1];
+
+  function vecDot(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+
+  function vecCross(a, b) {
+    return [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+  }
+
+  function vecNorm(v) {
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / l, v[1] / l, v[2] / l];
+  }
+
+  /** Nose (+X) and tail (−X) reference points on the mesh. */
+  const AC_NOSE = [0.62, 0, -0.03];
+  const AC_TAIL = [-1.02, 0, 0.02];
+
+  function projectOntoPlane(v, normal) {
+    const d = vecDot(v, normal);
+    return [
+      v[0] - normal[0] * d,
+      v[1] - normal[1] * d,
+      v[2] - normal[2] * d,
+    ];
+  }
 
   /**
-   * NED body: +X nose, +Y right, +Z down.
-   * Roll/pitch only — yaw never rotates the model.
-   * Rear orthographic: camera on −X (tail), looks along +X; wings horizontal when level.
+   * Orthographic camera. eyeDir = body origin → camera position.
+   * Sky (−Z) always up on screen.
    */
-  function buildBodyMatrix(rollDeg, pitchDeg) {
+  function makeViewCamera(eyeDir, upFallback = [1, 0, 0]) {
+    const forward = vecNorm(eyeDir.map((c) => -c));
+    let upRef = projectOntoPlane(BODY_SKY, forward);
+    let upLen = Math.hypot(upRef[0], upRef[1], upRef[2]);
+    if (upLen < 1e-6) {
+      upRef = projectOntoPlane(upFallback, forward);
+      upLen = Math.hypot(upRef[0], upRef[1], upRef[2]) || 1;
+    }
+    const up0 = [upRef[0] / upLen, upRef[1] / upLen, upRef[2] / upLen];
+    const right = vecNorm(vecCross(forward, up0));
+    const upFinal = vecNorm(vecCross(right, forward));
+    return (v) => ({
+      x: vecDot(v, right),
+      y: -vecDot(v, upFinal),
+      z: -vecDot(v, forward),
+    });
+  }
+
+  /** Clip rear view at this body +X plane (keep tail / discard nose). */
+  const REAR_CLIP_X = 0.10;
+
+  /** Return 0–1 segments kept on the tail (x ≤ maxX) side of a clip plane. */
+  function clipSegmentMaxX(a, b, maxX) {
+    const ax = a[0];
+    const bx = b[0];
+    if (ax <= maxX && bx <= maxX) return [[a, b]];
+    if (ax > maxX && bx > maxX) return [];
+    const t = (maxX - ax) / (bx - ax);
+    const p = [
+      ax + t * (b[0] - ax),
+      a[1] + t * (b[1] - a[1]),
+      a[2] + t * (b[2] - a[2]),
+    ];
+    if (ax > maxX) return [[p, b]];
+    return [[a, p]];
+  }
+
+  function meshLinesForView(viewId) {
+    if (viewId !== "rear") return AC_MESH_LINES;
+    const clipped = [];
+    AC_MESH_LINES.forEach(([a, b]) => {
+      clipSegmentMaxX(a, b, REAR_CLIP_X).forEach((seg) => clipped.push(seg));
+    });
+    return clipped;
+  }
+
+  /** eyeDir: camera position relative to aircraft origin (body NED, +X = nose/prop). */
+  const ATTITUDE_VIEWS = {
+    // Tail-on with nose clipped; slight elevation to expose H-stab / V-fin.
+    rear: { label: "后方", hint: "见尾椎/H翼", project: makeViewCamera([-1, 0.12, -0.18]) },
+    front: { label: "前方", hint: "见螺旋桨", project: makeViewCamera([1, 0, 0]) },
+    top: { label: "俯视", hint: "机头↑", project: makeViewCamera([0, 0, -1], [1, 0, 0]) },
+    right: { label: "右侧", hint: "右翼→", project: makeViewCamera([0, 1, 0]) },
+    left: { label: "左侧", hint: "左翼→", project: makeViewCamera([0, -1, 0]) },
+    // 45° elevation from above (rear-right); −Z = up in NED.
+    iso: { label: "斜视", hint: "后右俯视45°", project: makeViewCamera([-1, 1, -2], [0, 0, -1]) },
+  };
+  const ATTITUDE_VIEW_ORDER = ["rear", "front", "top", "right", "left", "iso"];
+  const DEFAULT_ATTITUDE_VIEW = "rear";
+
+  /**
+   * NED body: +X nose, +Y right wing, +Z down.
+   * Roll = rot about nose (X); pitch = rot about wing (Y).
+   * Sign: right wing down → roll + (matches ImuTracker body frame).
+   */
+  function buildBodyMatrix(rollDeg, pitchDeg, _viewId) {
     const roll = rollDeg * DEG;
     const pitch = pitchDeg * DEG;
     return mulMat(rotY(pitch), rotX(roll));
   }
 
-  function projectPoint(bodyMat, p, cx, cy, scale) {
-    const v = mulMatVec(bodyMat, p);
+  /** Exponential smoothing time constant (ms) for attitude interpolation. */
+  const ATT_SMOOTH_MS = 180;
+
+  function readFrameAttitude(frame) {
+    if (!frame) return { roll: 0, pitch: 0, yaw: 0 };
     return {
-      x: cx + v[1] * scale,
-      y: cy + v[2] * scale,
-      z: -v[0],
+      roll: Number(frame.roll) || 0,
+      pitch: Number(frame.pitch) || 0,
+      yaw: Number(frame.yaw != null ? frame.yaw : frame.heading) || 0,
     };
   }
 
-  function projectMeshLines(bodyMat, w, h) {
+  function lerpScalar(from, to, t) {
+    return from + (to - from) * t;
+  }
+
+  /** Shortest-path lerp for headings / signed angles (degrees). */
+  function lerpAngleDeg(from, to, t) {
+    let delta = ((to - from + 180) % 360 + 360) % 360 - 180;
+    return from + delta * t;
+  }
+
+  function smoothAttitudeStep(state, target, dtMs) {
+    const k = 1 - Math.exp(-Math.min(dtMs, 50) / ATT_SMOOTH_MS);
+    state.roll = lerpScalar(state.roll, target.roll, k);
+    state.pitch = lerpScalar(state.pitch, target.pitch, k);
+    state.yaw = lerpAngleDeg(state.yaw, target.yaw, k);
+  }
+
+  function snapAttitude(state, target) {
+    state.roll = target.roll;
+    state.pitch = target.pitch;
+    state.yaw = target.yaw;
+  }
+
+  function projectBodyPoint(bodyMat, p, viewId) {
+    const v = mulMatVec(bodyMat, p);
+    const view = ATTITUDE_VIEWS[viewId] || ATTITUDE_VIEWS.rear;
+    return view.project(v);
+  }
+
+  function projectPoint(bodyMat, p, cx, cy, scale, viewId) {
+    const pr = projectBodyPoint(bodyMat, p, viewId);
+    return {
+      x: cx + pr.x * scale,
+      y: cy + pr.y * scale,
+      z: pr.z,
+    };
+  }
+
+  function projectMeshLines(bodyMat, w, h, viewId) {
     const scale = Math.min(w, h) * 0.20;
     const cx = w * 0.5;
     const cy = h * 0.54;
-    return AC_MESH_LINES.map(([a, b]) => {
-      const pa = projectPoint(bodyMat, a, cx, cy, scale);
-      const pb = projectPoint(bodyMat, b, cx, cy, scale);
+    return meshLinesForView(viewId).map(([a, b]) => {
+      const pa = projectPoint(bodyMat, a, cx, cy, scale, viewId);
+      const pb = projectPoint(bodyMat, b, cx, cy, scale, viewId);
       return {
         x1: pa.x,
         y1: pa.y,
@@ -276,11 +414,11 @@
     });
   }
 
-  function drawAxisTriad(ctx, bodyMat, w, h, colors) {
+  function drawAxisTriad(ctx, bodyMat, w, h, colors, viewId) {
     const ox = 34;
     const oy = h - 34;
     const scale = 20;
-    const origin = projectPoint(bodyMat, [0, 0, 0], ox, oy, scale);
+    const origin = projectPoint(bodyMat, [0, 0, 0], ox, oy, scale, viewId);
     const axes = [
       { v: [1, 0, 0], color: colors.axisX || "#e05252", label: "X" },
       { v: [0, 1, 0], color: colors.axisY || "#3cb371", label: "Y" },
@@ -289,7 +427,7 @@
     ctx.lineWidth = 1.6;
     ctx.font = "9px ui-monospace, monospace";
     axes.forEach(({ v, color, label }) => {
-      const tip = projectPoint(bodyMat, v, ox, oy, scale);
+      const tip = projectPoint(bodyMat, v, ox, oy, scale, viewId);
       ctx.strokeStyle = color;
       ctx.beginPath();
       ctx.moveTo(origin.x, origin.y);
@@ -300,7 +438,26 @@
     });
   }
 
-  function drawWireAttitude(canvas, frame, colors) {
+  function drawEndMarkers(ctx, bodyMat, w, h, viewId, colors) {
+    const scale = Math.min(w, h) * 0.20;
+    const cx = w * 0.5;
+    const cy = h * 0.54;
+    [
+      { p: AC_NOSE, label: "N", color: colors.nose || "#e05252" },
+      { p: AC_TAIL, label: "T", color: colors.tail || "#64748b" },
+    ].filter(({ p }) => viewId !== "rear" || p[0] <= REAR_CLIP_X).forEach(({ p, label, color }) => {
+      const pt = projectPoint(bodyMat, p, cx, cy, scale, viewId);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = "bold 10px ui-monospace, monospace";
+      ctx.fillText(label, pt.x + 5, pt.y + 4);
+    });
+  }
+
+  function drawWireAttitude(canvas, attitude, colors, viewId) {
+    const view = ATTITUDE_VIEWS[viewId] || ATTITUDE_VIEWS.rear;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = canvas.clientWidth || 320;
     const h = canvas.clientHeight || 240;
@@ -314,11 +471,12 @@
     ctx.fillStyle = colors.bg || "#e9edf3";
     ctx.fillRect(0, 0, w, h);
 
-    const roll = frame ? Number(frame.roll) || 0 : 0;
-    const pitch = frame ? Number(frame.pitch) || 0 : 0;
-    const yaw = frame ? Number(frame.yaw != null ? frame.yaw : frame.heading) || 0 : 0;
-    const bodyMat = buildBodyMatrix(roll, pitch);
-    const lines = projectMeshLines(bodyMat, w, h).sort((a, b) => a.z - b.z);
+    const roll = attitude.roll;
+    const pitch = attitude.pitch;
+    const yaw = attitude.yaw;
+    // roll→bank(rotX), pitch→nose(rotY); do not swap, do not apply yaw to mesh
+    const bodyMat = buildBodyMatrix(roll, pitch, viewId);
+    const lines = projectMeshLines(bodyMat, w, h, viewId).sort((a, b) => a.z - b.z);
 
     ctx.strokeStyle = colors.wire || "#1e40af";
     ctx.lineWidth = 0.72;
@@ -332,7 +490,8 @@
     });
     ctx.globalAlpha = 1;
 
-    drawAxisTriad(ctx, bodyMat, w, h, colors);
+    drawEndMarkers(ctx, bodyMat, w, h, viewId, colors);
+    drawAxisTriad(ctx, bodyMat, w, h, colors, viewId);
 
     ctx.fillStyle = colors.muted || "#64748b";
     ctx.font = "11px ui-monospace, monospace";
@@ -340,7 +499,8 @@
     ctx.fillText(`P ${pitch.toFixed(1)}°`, 12, 36);
     ctx.fillText(`Y ${yaw.toFixed(1)}°`, 12, 52);
     ctx.fillStyle = colors.wire || "#1e40af";
-    ctx.fillText("后方正视", w - 72, 20);
+    const tag = `${view.label} · ${view.hint || ""}`;
+    ctx.fillText(tag, w - 12 - ctx.measureText(tag).width, 20);
   }
 
   function demColor(t) {
@@ -455,6 +615,52 @@
     let view = settings.view;
     let slots = settings.slots.slice();
     let lastFollowPan = 0;
+    let lastTrackDraw = 0;
+    let lastTrackSeq = -1;
+
+    const attTarget = { roll: 0, pitch: 0, yaw: 0 };
+    const attDisplay = { roll: 0, pitch: 0, yaw: 0 };
+    let attAnimId = 0;
+    let attLastTs = 0;
+
+    function hasAttitudePanel() {
+      return panels.some((p) => p.type === "attitude");
+    }
+
+    function syncAttTarget(frame, snap = false) {
+      const next = readFrameAttitude(frame);
+      attTarget.roll = next.roll;
+      attTarget.pitch = next.pitch;
+      attTarget.yaw = next.yaw;
+      if (snap) snapAttitude(attDisplay, attTarget);
+    }
+
+    function stopAttLoop() {
+      if (attAnimId) cancelAnimationFrame(attAnimId);
+      attAnimId = 0;
+      attLastTs = 0;
+    }
+
+    function attLoop(ts) {
+      attAnimId = 0;
+      if (view !== "quad" || !hasAttitudePanel()) return;
+      const dt = attLastTs ? Math.min(ts - attLastTs, 50) : 16;
+      attLastTs = ts;
+      smoothAttitudeStep(attDisplay, attTarget, dt);
+      panels.forEach((p) => {
+        if (p.type === "attitude") redrawAttitude(p);
+      });
+      attAnimId = requestAnimationFrame(attLoop);
+    }
+
+    function manageAttLoop(snap = false) {
+      syncAttTarget(getFrame(), snap);
+      if (view === "quad" && hasAttitudePanel()) {
+        if (!attAnimId) attAnimId = requestAnimationFrame(attLoop);
+      } else {
+        stopAttLoop();
+      }
+    }
 
     function fillSlotSelects() {
       slotSelects.forEach((sel, idx) => {
@@ -602,10 +808,34 @@
     function buildAttitude(p) {
       const wrap = document.createElement("div");
       wrap.className = "quad-att-wrap";
+      p.attView = p.attView || DEFAULT_ATTITUDE_VIEW;
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "quad-att-views";
+      ATTITUDE_VIEW_ORDER.forEach((id) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "quad-att-view-btn";
+        btn.textContent = ATTITUDE_VIEWS[id].label;
+        btn.dataset.view = id;
+        btn.classList.toggle("active", id === p.attView);
+        btn.addEventListener("click", () => {
+          p.attView = id;
+          toolbar.querySelectorAll(".quad-att-view-btn").forEach((b) => {
+            b.classList.toggle("active", b.dataset.view === id);
+          });
+          redrawAttitude(p);
+        });
+        toolbar.appendChild(btn);
+      });
+
       const canvas = document.createElement("canvas");
+      wrap.appendChild(toolbar);
       wrap.appendChild(canvas);
       p.body.appendChild(wrap);
       p.canvas = canvas;
+      p.attToolbar = toolbar;
+      manageAttLoop(true);
       redrawAttitude(p);
     }
 
@@ -679,6 +909,7 @@
 
     function rebuildAll() {
       panels.forEach((_, i) => rebuildPanel(i));
+      manageAttLoop(true);
       if (view === "quad") {
         requestAnimationFrame(() => {
           panels.forEach((p) => {
@@ -700,6 +931,7 @@
       if (view === "quad") {
         rebuildAll();
       } else {
+        stopAttLoop();
         panels.forEach(destroyPanel);
         requestAnimationFrame(() => {
           if (deps.mainMap) deps.mainMap.invalidateSize();
@@ -719,14 +951,14 @@
     function redrawAttitude(p) {
       if (!p.canvas) return;
       const light = getTheme() === "light";
-      drawWireAttitude(p.canvas, getFrame(), {
+      drawWireAttitude(p.canvas, attDisplay, {
         bg: light ? "#e9edf3" : "#141b26",
         wire: light ? "#1e40af" : "#6b9cff",
         muted: light ? "#64748b" : "#8b9bb0",
         axisX: "#e05252",
         axisY: "#3cb371",
         axisZ: "#3b82f6",
-      });
+      }, p.attView || DEFAULT_ATTITUDE_VIEW);
     }
 
     function padBounds(lat, lon, padDeg = 0.018) {
@@ -862,13 +1094,12 @@
 
     function onFrame(frame) {
       if (view !== "quad" || !frame) return;
+      syncAttTarget(frame);
+      if (hasAttitudePanel() && !attAnimId) manageAttLoop();
       const colors = themeColors(getTheme());
       const now = performance.now();
       panels.forEach((p) => {
-        if (p.type === "attitude") {
-          redrawAttitude(p);
-          return;
-        }
+        if (p.type === "attitude") return;
         if (!p.map) return;
         if (hasPos(frame) && p.marker) {
           p.marker.setLatLng([frame.lat, frame.lon]);
@@ -876,8 +1107,13 @@
         }
         if (p.trackLine) {
           const track = getTrack();
-          p.trackLine.setLatLngs(track.map((pt) => [pt.lat, pt.lon]));
-          p.trackLine.setStyle({ color: getActive() === "live" ? colors.live : colors.sim });
+          const seq = track.length ? track[track.length - 1].seq : -1;
+          if (seq !== lastTrackSeq || now - lastTrackDraw >= 150) {
+            lastTrackSeq = seq;
+            lastTrackDraw = now;
+            p.trackLine.setLatLngs(track.map((pt) => [pt.lat, pt.lon]));
+            p.trackLine.setStyle({ color: getActive() === "live" ? colors.live : colors.sim });
+          }
         }
         if (p.type === "track" && followEnabled() && hasPos(frame)) {
           if (!lastFollowPan || now - lastFollowPan >= 80) {
@@ -886,7 +1122,7 @@
             p.map.setView([frame.lat, frame.lon], p.map.getZoom(), { animate: false });
           }
         }
-        const interval = p.type === "belief" ? 4000 : 10000;
+        const interval = p.type === "belief" ? 8000 : 15000;
         if (now - p.layerTimer > interval) {
           p.layerTimer = now;
           refreshPanelLayers(p, { force: true });

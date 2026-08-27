@@ -138,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     rtwind_cmd.add_argument("--no-mavlink", action="store_true", help="Disable MAVLink UDP listener")
     rtwind_cmd.add_argument("--mavlink-bind", default="0.0.0.0")
     rtwind_cmd.add_argument("--mavlink-port", type=int, default=14550)
+    rtwind_cmd.add_argument(
+        "--carto-basemap-key",
+        default=None,
+        help="CARTO Basemaps API key (or set RTWIND_CARTO_BASEMAP_KEY)",
+    )
 
     repo_cmd = sub.add_parser("run-demo")
     repo_cmd.add_argument("--config", required=True)
@@ -276,6 +281,7 @@ def main() -> None:
             mavlink_enabled=not args.no_mavlink,
             mavlink_bind=args.mavlink_bind,
             mavlink_udp_port=args.mavlink_port,
+            carto_basemap_key=args.carto_basemap_key,
         )
         return
 

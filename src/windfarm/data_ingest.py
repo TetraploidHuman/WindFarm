@@ -72,6 +72,12 @@ def _detect_local_clash_proxy() -> str:
     return ""
 
 
+def _direct_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_ssl_context()),
+    )
+
+
 def _proxy_opener() -> urllib.request.OpenerDirector:
     """Build a URL opener that honors Clash/system proxy env vars + system CAs.
 
@@ -102,6 +108,34 @@ def _proxy_opener() -> urllib.request.OpenerDirector:
 
 def _urlopen(request: urllib.request.Request, timeout: float):
     return _proxy_opener().open(request, timeout=timeout)
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """True for transport failures that may succeed via an alternate route."""
+    if isinstance(exc, (TimeoutError, OSError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        # HTTPError is a URLError subclass but means the server responded.
+        return not isinstance(exc, urllib.error.HTTPError)
+    return False
+
+
+def _urlopen_resilient(request: urllib.request.Request, timeout: float):
+    """Open URL: direct HTTPS first; proxy only if the direct attempt cannot connect.
+
+    Do not fall through to a broken Clash proxy on HTTP 429 / 4xx / 5xx — that
+    previously surfaced as a misleading SSL EOF while the real issue was rate limiting.
+    """
+    try:
+        return _direct_opener().open(request, timeout=timeout)
+    except Exception as direct_exc:
+        if not _is_connection_error(direct_exc):
+            raise
+        try:
+            return _proxy_opener().open(request, timeout=timeout)
+        except Exception as proxy_exc:
+            # Prefer the direct error when proxy also fails (often SSL via Clash).
+            raise direct_exc from proxy_exc
 
 
 @dataclass(frozen=True, slots=True)

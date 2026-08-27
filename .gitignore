@@ -41,6 +41,10 @@ runs/
 .DS_Store
 Thumbs.db
 
+# rtwind local secrets (CARTO key etc.)
+.rtwind.local.env
+rtwind.local.env
+
 # Proprietary system fonts vendored locally for chart rendering (SimHei 黑体)
 fonts/SimHei.ttf
 fonts/*.ttf
