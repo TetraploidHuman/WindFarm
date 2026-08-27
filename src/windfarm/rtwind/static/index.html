@@ -28,7 +28,7 @@
     })();
   </script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="static/style.css?v=15" />
+  <link rel="stylesheet" href="static/style.css?v=19" />
 </head>
 <body>
   <div id="app">
@@ -44,12 +44,6 @@
           <span class="theme-icon-light" aria-hidden="true">☀</span>
         </button>
       </div>
-
-      <div class="source-switch" role="group" aria-label="遥测数据源">
-        <button type="button" id="btnSim" class="src-btn active" data-source="sim">模拟</button>
-        <button type="button" id="btnLive" class="src-btn" data-source="live">真机</button>
-      </div>
-      <div id="sourceBadge" class="badge sim">模拟 · 连接中</div>
 
       <section class="panel">
         <h2>飞行状态</h2>
@@ -88,6 +82,46 @@
           <div><span>气温</span><strong id="eTemp">—</strong><em>°C</em></div>
         </div>
         <p class="meta" id="eMeta">环境待机</p>
+      </section>
+
+      <section class="panel layer-stack">
+        <h2>系统三层</h2>
+        <div class="layer-rows">
+          <div class="layer-row wait" id="layerPerception">
+            <span class="layer-dot" aria-hidden="true"></span>
+            <div class="layer-copy">
+              <strong>物理感知</strong>
+              <span class="layer-detail" id="layerPerceptionMeta">DEM / 风场 · 待机</span>
+            </div>
+          </div>
+          <div class="layer-row wait" id="layerCognition">
+            <span class="layer-dot" aria-hidden="true"></span>
+            <div class="layer-copy">
+              <strong>认知推理</strong>
+              <span class="layer-detail" id="layerCognitionMeta">信念场 · 未锚定</span>
+            </div>
+          </div>
+          <div class="layer-row wait" id="layerPlanning">
+            <span class="layer-dot" aria-hidden="true"></span>
+            <div class="layer-copy">
+              <strong>规划决策</strong>
+              <span class="layer-detail" id="layerPlanningMeta">路径 · 等待信念</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>认知 · 规划</h2>
+        <div class="metrics compact">
+          <div><span>观测数</span><strong id="cObs">—</strong></div>
+          <div><span>平均不确定性</span><strong id="cUnc">—</strong></div>
+          <div><span>平均置信度</span><strong id="cConf">—</strong></div>
+          <div><span>λ 进度</span><strong id="pLambda">—</strong></div>
+          <div><span>规划耗时</span><strong id="pMs">—</strong><em>ms</em></div>
+          <div><span>规划模式</span><strong id="pMode">—</strong></div>
+        </div>
+        <p class="meta" id="planMeta">信念锚定后每 5s 自动重规划</p>
       </section>
 
       <section class="panel sim-panel" id="simPanel">
@@ -181,6 +215,15 @@
         <button type="button" id="btnResetSim" class="ghost">重置模拟</button>
       </div>
       <p class="meta" id="clock">—</p>
+
+      <div class="rail-footer">
+        <p class="status-bar" id="statusBar" hidden></p>
+        <div class="source-switch" role="group" aria-label="遥测数据源">
+          <button type="button" id="btnSim" class="src-btn active" data-source="sim">模拟</button>
+          <button type="button" id="btnLive" class="src-btn" data-source="live">真机</button>
+        </div>
+        <div id="sourceBadge" class="badge sim">模拟 · 连接中</div>
+      </div>
     </aside>
 
     <main class="stage" id="stage" data-view="map">
@@ -207,13 +250,15 @@
       </div>
       <div class="hud-top">
         <span id="hudPos">—</span>
+        <span id="hudLambda">λ —</span>
         <span id="hudSeq">序号 —</span>
       </div>
     </main>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="static/quad.js?v=3"></script>
-  <script src="static/app.js?v=24"></script>
+  <script src="static/meteo.js?v=1"></script>
+  <script src="static/quad.js?v=16"></script>
+  <script src="static/app.js?v=31"></script>
 </body>
 </html>

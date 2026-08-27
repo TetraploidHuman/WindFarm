@@ -28,27 +28,155 @@
     });
   }
 
-  // Wireframe glider/UAV in body axes: +X nose, +Y right, +Z down (NED-ish). +X nose, +Y right, +Z down (NED-ish).
-  const AC_VERTS = [
-    [1.6, 0, 0], // 0 nose
-    [-1.2, 0, 0], // 1 tail
-    [0.1, 1.4, 0.05], // 2 right wing tip
-    [0.1, -1.4, 0.05], // 3 left wing tip
-    [-0.15, 0.55, 0.05], // 4 right wing root
-    [-0.15, -0.55, 0.05], // 5 left wing root
-    [-1.05, 0.45, 0], // 6 h-stab R
-    [-1.05, -0.45, 0], // 7 h-stab L
-    [-1.15, 0, -0.55], // 8 v-stab top
-    [0.35, 0, 0.12], // 9 canopy
-    [-0.4, 0, 0.08], // 10 mid fuselage
-  ];
-  const AC_EDGES = [
-    [0, 9], [9, 10], [10, 1], // fuselage
-    [3, 5], [5, 4], [4, 2], // wing
-    [5, 10], [4, 10],
-    [1, 6], [1, 7], [6, 7], // h-stab
-    [1, 8], // v-stab
-    [0, 2], [0, 3], // leading wing lines
+  // Parametric surface mesh (OpenVSP-style wire grid). Body: +X nose, +Y right, +Z down.
+  function meshSurface(pointFn, nu, nv) {
+    const grid = [];
+    for (let i = 0; i <= nu; i += 1) {
+      const row = [];
+      for (let j = 0; j <= nv; j += 1) {
+        row.push(pointFn(i / nu, j / nv));
+      }
+      grid.push(row);
+    }
+    const segs = [];
+    for (let i = 0; i <= nu; i += 1) {
+      for (let j = 0; j < nv; j += 1) {
+        segs.push([grid[i][j], grid[i][j + 1]]);
+      }
+    }
+    for (let j = 0; j <= nv; j += 1) {
+      for (let i = 0; i < nu; i += 1) {
+        segs.push([grid[i][j], grid[i + 1][j]]);
+      }
+    }
+    return segs;
+  }
+
+  /** High-aspect wing on central pylon. */
+  function wingPoint(u, v) {
+    const span = 1.12;
+    const y = (v - 0.5) * 2 * span;
+    const t = Math.min(Math.abs(y) / span, 1);
+    const xLE = 0.20 - 0.09 * t;
+    const xTE = -0.16 - 0.04 * t;
+    const x = xLE + u * (xTE - xLE);
+    const z = -0.05 + 0.012 * u;
+    return [x, y, z];
+  }
+
+  /** Thick central pylon: wing → payload pod. */
+  function centerPylonPoint(u, v) {
+    const zTop = 0.01;
+    const zBot = 0.10;
+    const z = zTop + u * (zBot - zTop);
+    const th = v * Math.PI * 2;
+    const taper = 1 - u * 0.10;
+    const rx = (0.08 + u * 0.015) * taper;
+    const ry = (0.11 + u * 0.008) * taper;
+    const x = 0.05 - u * 0.04;
+    return [x, ry * Math.cos(th), z + rx * Math.sin(th) * 0.42];
+  }
+
+  /** Belly cylinder (mission pod) — compact, under pylon. */
+  function payloadPoint(u, v) {
+    const xNose = 0.26;
+    const xTail = -0.20;
+    const x = xNose + u * (xTail - xNose);
+    const th = v * Math.PI * 2;
+    const r = 0.08;
+    const zCenter = 0.18;
+    let rEff = r;
+    if (u > 0.90) {
+      const t = (u - 0.90) / 0.10;
+      rEff = r * (1 - 0.30 * t);
+    }
+    return [x, rEff * Math.cos(th), zCenter + rEff * Math.sin(th)];
+  }
+
+  /** Forward camera gimbal dome. */
+  function cameraDomePoint(u, v) {
+    const phi = u * (Math.PI / 2);
+    const theta = v * Math.PI * 2;
+    const r = 0.08;
+    const cx = 0.28;
+    const cz = 0.18;
+    const rim = r * Math.sin(phi);
+    return [cx + r * Math.cos(phi), rim * Math.cos(theta), cz + rim * Math.sin(theta)];
+  }
+
+  /** Forward boom: wing LE → motor. */
+  function motorBoomPoint(u, v) {
+    const x = 0.22 + u * (0.50 - 0.22);
+    const th = v * Math.PI * 2;
+    const r = 0.024;
+    const zc = -0.03;
+    return [x, r * Math.cos(th), zc + r * Math.sin(th)];
+  }
+
+  /** Tractor motor nacelle at front. */
+  function motorNacellePoint(u, v) {
+    const x = 0.50 + u * (0.58 - 0.50);
+    const th = v * Math.PI * 2;
+    const r = 0.048;
+    const zc = -0.03;
+    return [x, r * Math.cos(th), zc + r * Math.sin(th)];
+  }
+
+  /** Tractor propeller — two blades. */
+  function tractorPropLines() {
+    const cx = 0.62;
+    const cz = -0.03;
+    const r = 0.17;
+    return [
+      [[cx, 0, cz], [cx, r, cz]],
+      [[cx, 0, cz], [cx, -r, cz]],
+    ];
+  }
+
+  /** Tail boom from wing center aft (same level as wing). */
+  const TAIL_X = -1.02;
+  const TAIL_Z = 0.02;
+
+  function boomPoint(u, v) {
+    const x = -0.14 + u * (TAIL_X - -0.14);
+    const th = v * Math.PI * 2;
+    const r = 0.018;
+    return [x, r * Math.cos(th), TAIL_Z + r * Math.sin(th)];
+  }
+
+  /** Horizontal stabilizers — flat, left/right at boom tip. */
+  function hstabPoint(u, v) {
+    const span = 0.26;
+    const y = (v - 0.5) * 2 * span;
+    const t = Math.min(Math.abs(y) / span, 1);
+    const chord = 0.09 * (1 - 0.25 * t);
+    const x = TAIL_X + u * chord;
+    const z = TAIL_Z;
+    return [x, y, z];
+  }
+
+  /** Vertical fin — points up from boom tip (+Z is down). */
+  function vfinPoint(u, v) {
+    const height = 0.18;
+    const rootX = TAIL_X;
+    const tipX = TAIL_X - 0.05;
+    const x = rootX + u * (tipX - rootX);
+    const z = TAIL_Z + v * (-height);
+    const y = 0.014 * (1 - 2 * Math.abs(u - 0.5));
+    return [x, y, z];
+  }
+
+  const AC_MESH_LINES = [
+    ...meshSurface(wingPoint, 12, 18),
+    ...meshSurface(centerPylonPoint, 10, 12),
+    ...meshSurface(payloadPoint, 14, 16),
+    ...meshSurface(cameraDomePoint, 10, 14),
+    ...meshSurface(motorBoomPoint, 10, 6),
+    ...meshSurface(motorNacellePoint, 6, 8),
+    ...tractorPropLines(),
+    ...meshSurface(boomPoint, 14, 6),
+    ...meshSurface(hstabPoint, 6, 10),
+    ...meshSurface(vfinPoint, 10, 12),
   ];
 
   function loadSettings() {
@@ -109,22 +237,100 @@
     return out;
   }
 
-  /** Body attitude (deg) then fixed 45° isometric camera. */
-  function projectAircraft(rollDeg, pitchDeg, yawDeg, w, h) {
-    const roll = (rollDeg * Math.PI) / 180;
-    const pitch = (pitchDeg * Math.PI) / 180;
-    const yaw = (yawDeg * Math.PI) / 180;
-    // Aircraft: yaw (heading) → pitch → roll (ZYX)
-    const body = mulMat(rotZ(yaw), mulMat(rotY(pitch), rotX(roll)));
-    // Camera: look from NE-ish at 45° elevation (classic isometric tilt)
-    const cam = mulMat(rotX((-45 * Math.PI) / 180), rotZ((-45 * Math.PI) / 180));
-    const view = mulMat(cam, body);
-    const scale = Math.min(w, h) * 0.22;
+  const DEG = Math.PI / 180;
+
+  function vecNorm(v) {
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / l, v[1] / l, v[2] / l];
+  }
+
+  function vecCross(a, b) {
+    return [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+  }
+
+  function vecDot(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+
+  /** NED body attitude: aviation pitch + = nose up. */
+  function buildBodyMatrix(rollDeg, pitchDeg, yawDeg) {
+    const roll = rollDeg * DEG;
+    const pitch = pitchDeg * DEG;
+    const yaw = yawDeg * DEG;
+    return mulMat(rotZ(yaw), mulMat(rotY(pitch), rotX(roll)));
+  }
+
+  /** Fixed orbit camera in reference frame (front-right-above). Wings level at P=R=Y=0. */
+  const CAMERA_AXES = (() => {
+    const eye = vecNorm([1.4, 1.0, -1.2]);
+    const worldUp = [0, 0, -1];
+    const fwd = vecNorm([-eye[0], -eye[1], -eye[2]]);
+    let right = vecCross(fwd, worldUp);
+    right = vecNorm(right);
+    const up = vecCross(right, fwd);
+    return { right, up, fwd };
+  })();
+
+  function transformPoint(bodyMat, p) {
+    const w = mulMatVec(bodyMat, p);
+    return {
+      x: vecDot(w, CAMERA_AXES.right),
+      y: -vecDot(w, CAMERA_AXES.up),
+      z: vecDot(w, CAMERA_AXES.fwd),
+    };
+  }
+
+  function projectPoint(bodyMat, p, cx, cy, scale) {
+    const v = transformPoint(bodyMat, p);
+    return {
+      x: cx + v.x * scale,
+      y: cy + v.y * scale,
+      z: v.z,
+    };
+  }
+
+  function projectMeshLines(bodyMat, w, h) {
+    const scale = Math.min(w, h) * 0.20;
     const cx = w * 0.5;
-    const cy = h * 0.52;
-    return AC_VERTS.map((v) => {
-      const p = mulMatVec(view, v);
-      return { x: cx + p[0] * scale, y: cy + p[1] * scale, z: p[2] };
+    const cy = h * 0.54;
+    return AC_MESH_LINES.map(([a, b]) => {
+      const pa = projectPoint(bodyMat, a, cx, cy, scale);
+      const pb = projectPoint(bodyMat, b, cx, cy, scale);
+      return {
+        x1: pa.x,
+        y1: pa.y,
+        x2: pb.x,
+        y2: pb.y,
+        z: (pa.z + pb.z) * 0.5,
+      };
+    });
+  }
+
+  function drawAxisTriad(ctx, bodyMat, w, h, colors) {
+    const ox = 34;
+    const oy = h - 34;
+    const scale = 20;
+    const origin = projectPoint(bodyMat, [0, 0, 0], ox, oy, scale);
+    const axes = [
+      { v: [1, 0, 0], color: colors.axisX || "#e05252", label: "X" },
+      { v: [0, 1, 0], color: colors.axisY || "#3cb371", label: "Y" },
+      { v: [0, 0, 1], color: colors.axisZ || "#3b82f6", label: "Z" },
+    ];
+    ctx.lineWidth = 1.6;
+    ctx.font = "9px ui-monospace, monospace";
+    axes.forEach(({ v, color, label }) => {
+      const tip = projectPoint(bodyMat, v, ox, oy, scale);
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(origin.x, origin.y);
+      ctx.lineTo(tip.x, tip.y);
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.fillText(label, tip.x + 3, tip.y + 3);
     });
   }
 
@@ -138,68 +344,37 @@
     }
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
 
-    // Ground grid hint (45° plane)
-    ctx.strokeStyle = colors.grid;
-    ctx.lineWidth = 1;
-    ctx.globalAlpha = 0.35;
-    for (let i = -4; i <= 4; i += 1) {
-      const y0 = h * 0.62 + i * 10;
-      ctx.beginPath();
-      ctx.moveTo(w * 0.15, y0);
-      ctx.lineTo(w * 0.85, y0 - 28);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
+    ctx.fillStyle = colors.bg || "#e9edf3";
+    ctx.fillRect(0, 0, w, h);
 
     const roll = frame ? Number(frame.roll) || 0 : 0;
     const pitch = frame ? Number(frame.pitch) || 0 : 0;
     const yaw = frame ? Number(frame.yaw != null ? frame.yaw : frame.heading) || 0 : 0;
-    const pts = projectAircraft(roll, pitch, yaw, w, h);
+    const bodyMat = buildBodyMatrix(roll, pitch, yaw);
+    const lines = projectMeshLines(bodyMat, w, h).sort((a, b) => a.z - b.z);
 
-    // Depth-sort edges by average z
-    const edges = AC_EDGES.map(([a, b]) => ({
-      a, b,
-      z: (pts[a].z + pts[b].z) * 0.5,
-    })).sort((u, v) => u.z - v.z);
-
-    // Shadow on "ground"
-    ctx.strokeStyle = colors.shadow;
-    ctx.lineWidth = 1.5;
-    ctx.globalAlpha = 0.35;
-    edges.forEach(({ a, b }) => {
+    ctx.strokeStyle = colors.wire || "#1e40af";
+    ctx.lineWidth = 0.72;
+    ctx.lineCap = "round";
+    ctx.globalAlpha = 0.95;
+    lines.forEach(({ x1, y1, x2, y2 }) => {
       ctx.beginPath();
-      ctx.moveTo(pts[a].x, h * 0.78 + (pts[a].y - h * 0.52) * 0.15);
-      ctx.lineTo(pts[b].x, h * 0.78 + (pts[b].y - h * 0.52) * 0.15);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
       ctx.stroke();
     });
     ctx.globalAlpha = 1;
 
-    edges.forEach(({ a, b }, idx) => {
-      const mid = idx / Math.max(edges.length - 1, 1);
-      ctx.strokeStyle = mid > 0.55 ? colors.accent : colors.line;
-      ctx.lineWidth = mid > 0.7 ? 2.2 : 1.5;
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(pts[a].x, pts[a].y);
-      ctx.lineTo(pts[b].x, pts[b].y);
-      ctx.stroke();
-    });
+    drawAxisTriad(ctx, bodyMat, w, h, colors);
 
-    // Nose accent dot
-    ctx.fillStyle = colors.accent;
-    ctx.beginPath();
-    ctx.arc(pts[0].x, pts[0].y, 3.2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Labels
-    ctx.fillStyle = colors.muted;
+    ctx.fillStyle = colors.muted || "#64748b";
     ctx.font = "11px ui-monospace, monospace";
     ctx.fillText(`R ${roll.toFixed(1)}°`, 12, 20);
     ctx.fillText(`P ${pitch.toFixed(1)}°`, 12, 36);
     ctx.fillText(`Y ${yaw.toFixed(1)}°`, 12, 52);
-    ctx.fillText("45° wireframe", w - 100, 20);
+    ctx.fillStyle = colors.wire || "#1e40af";
+    ctx.fillText("surface mesh", w - 92, 20);
   }
 
   function demColor(t) {
@@ -275,6 +450,7 @@
       api,
       L,
       TILES,
+      cartoTileOptions,
       getTheme,
       themeColors,
       getActive,
@@ -371,7 +547,7 @@
         attributionControl: false,
         preferCanvas: true,
       }).setView([27.908, 112.922], 14);
-      const basemap = L.tileLayer(TILES[theme] || TILES.dark, { maxZoom: 19 }).addTo(map);
+      const basemap = L.tileLayer(TILES[theme] || TILES.dark, cartoTileOptions()).addTo(map);
       return { map, basemap };
     }
 
@@ -386,28 +562,41 @@
       }
     }
 
+    function attachMapAircraft(p, map) {
+      const colors = themeColors(getTheme());
+      p.trackLine = L.polyline([], {
+        color: getActive() === "live" ? colors.live : colors.sim,
+        weight: 3,
+        opacity: 0.85,
+      }).addTo(map);
+      p.marker = L.marker([27.908, 112.922], { icon: aircraftIcon(), zIndexOffset: 1000 }).addTo(map);
+      const track = getTrack();
+      const frame = getFrame();
+      if (track.length) {
+        p.trackLine.setLatLngs(track.map((pt) => [pt.lat, pt.lon]));
+        const last = track[track.length - 1];
+        if (hasPos(last)) {
+          p.marker.setLatLng([last.lat, last.lon]);
+          if (frame?.heading != null) syncMarkerHeading(p.marker, frame.heading);
+        }
+      } else if (frame && hasPos(frame)) {
+        p.marker.setLatLng([frame.lat, frame.lon]);
+        syncMarkerHeading(p.marker, frame.heading);
+      }
+    }
+
     function buildTrack(p) {
       const host = document.createElement("div");
       host.className = "qmap";
       p.body.appendChild(host);
       const { map, basemap } = makeMap(host);
-      const colors = themeColors(getTheme());
-      const trackLine = L.polyline([], {
-        color: getActive() === "live" ? colors.live : colors.sim,
-        weight: 3,
-        opacity: 0.9,
-      }).addTo(map);
-      const marker = L.marker([27.908, 112.922], { icon: aircraftIcon(), zIndexOffset: 1000 }).addTo(map);
       p.map = map;
       p.basemap = basemap;
-      p.trackLine = trackLine;
-      p.marker = marker;
+      attachMapAircraft(p, map);
       const track = getTrack();
       if (track.length) {
-        trackLine.setLatLngs(track.map((pt) => [pt.lat, pt.lon]));
         const last = track[track.length - 1];
-        marker.setLatLng([last.lat, last.lon]);
-        map.setView([last.lat, last.lon], 14, { animate: false });
+        if (hasPos(last)) map.setView([last.lat, last.lon], 14, { animate: false });
       }
       requestAnimationFrame(() => map.invalidateSize());
     }
@@ -428,7 +617,7 @@
       p.basemap = basemap;
       p.windLayer = L.layerGroup().addTo(map);
       p.hud = hud;
-      p.marker = L.marker([27.908, 112.922], { icon: aircraftIcon(), zIndexOffset: 1000 }).addTo(map);
+      attachMapAircraft(p, map);
       requestAnimationFrame(() => map.invalidateSize());
     }
 
@@ -439,7 +628,7 @@
       const { map, basemap } = makeMap(host);
       p.map = map;
       p.basemap = basemap;
-      p.marker = L.marker([27.908, 112.922], { icon: aircraftIcon(), zIndexOffset: 1000 }).addTo(map);
+      attachMapAircraft(p, map);
       p._heatKind = kind;
       requestAnimationFrame(() => map.invalidateSize());
     }
@@ -563,13 +752,14 @@
 
     function redrawAttitude(p) {
       if (!p.canvas) return;
-      const colors = themeColors(getTheme());
+      const light = getTheme() === "light";
       drawWireAttitude(p.canvas, getFrame(), {
-        accent: colors.sim,
-        line: getTheme() === "light" ? "#334155" : "#c5d0de",
-        muted: getTheme() === "light" ? "#64748b" : "#8b9bb0",
-        grid: getTheme() === "light" ? "#94a3b8" : "#2a3548",
-        shadow: getTheme() === "light" ? "#64748b" : "#0a1018",
+        bg: light ? "#e9edf3" : "#141b26",
+        wire: light ? "#1e40af" : "#6b9cff",
+        muted: light ? "#64748b" : "#8b9bb0",
+        axisX: "#e05252",
+        axisY: "#3cb371",
+        axisZ: "#3b82f6",
       });
     }
 
@@ -640,21 +830,25 @@
       p.busy = true;
       try {
         if (p.type === "weather") {
-          const [windRes, envRes] = await Promise.all([
-            fetch(api(`/api/env/wind-field?south=${b.south}&west=${b.west}&north=${b.north}&east=${b.east}&nx=6&ny=6`), { cache: "no-store", signal }),
-            fetch(api(`/api/env/at?lat=${frame.lat}&lon=${frame.lon}`), { cache: "no-store", signal }),
+          const meteo = window.RtwindMeteo;
+          const [wind, envDem] = await Promise.all([
+            meteo
+              ? meteo.fetchWindField(b.south, b.west, b.north, b.east, 6, 6, { signal })
+              : Promise.reject(new Error("气象客户端未加载")),
+            fetch(api(`/api/env/at?lat=${frame.lat}&lon=${frame.lon}&weather=0`), { cache: "no-store", signal })
+              .then((r) => (r.ok ? r.json() : null)),
           ]);
-          if (windRes.ok) applyWind(p, await windRes.json());
-          if (envRes.ok && p.hud) {
-            const env = await envRes.json();
+          const wx = meteo ? await meteo.fetchWeatherAt(frame.lat, frame.lon, { signal }) : null;
+          applyWind(p, wind);
+          if (p.hud) {
             const set = (k, v) => {
               const el = p.hud.querySelector(`[data-k="${k}"]`);
               if (el) el.textContent = v;
             };
-            set("wind", env.wind_speed_mps != null ? Number(env.wind_speed_mps).toFixed(1) : "暂无");
-            set("dir", env.wind_dir_deg != null ? `${Math.round(env.wind_dir_deg)}°` : "暂无");
-            set("temp", env.temperature_c != null ? `${Number(env.temperature_c).toFixed(1)}°` : "暂无");
-            set("dem", env.dem_msl != null ? `${Number(env.dem_msl).toFixed(0)}m` : "暂无");
+            set("wind", wx?.wind_speed_mps != null ? Number(wx.wind_speed_mps).toFixed(1) : "暂无");
+            set("dir", wx?.wind_dir_deg != null ? `${Math.round(wx.wind_dir_deg)}°` : "暂无");
+            set("temp", wx?.temperature_c != null ? `${Number(wx.temperature_c).toFixed(1)}°` : "暂无");
+            set("dem", envDem?.dem_msl != null ? `${Number(envDem.dem_msl).toFixed(0)}m` : "暂无");
           }
           p.map.setView([frame.lat, frame.lon], Math.max(p.map.getZoom(), 13), { animate: false });
         } else if (p.type === "terrain") {
@@ -736,10 +930,24 @@
 
     function onTrack(points) {
       if (view !== "quad") return;
+      const pts = points || [];
       panels.forEach((p) => {
         if (p.trackLine) {
-          p.trackLine.setLatLngs((points || []).map((pt) => [pt.lat, pt.lon]));
+          p.trackLine.setLatLngs(pts.map((pt) => [pt.lat, pt.lon]));
+          const colors = themeColors(getTheme());
+          p.trackLine.setStyle({ color: getActive() === "live" ? colors.live : colors.sim });
         }
+      });
+    }
+
+    function onBasemapKey() {
+      if (view !== "quad") return;
+      const theme = getTheme();
+      panels.forEach((p) => {
+        if (!p.map || !p.basemap) return;
+        p.map.removeLayer(p.basemap);
+        p.basemap = L.tileLayer(TILES[theme] || TILES.dark, cartoTileOptions()).addTo(p.map);
+        p.basemap.bringToBack();
       });
     }
 
@@ -748,7 +956,7 @@
       panels.forEach((p) => {
         if (p.map && p.basemap) {
           p.map.removeLayer(p.basemap);
-          p.basemap = L.tileLayer(TILES[theme] || TILES.dark, { maxZoom: 19 }).addTo(p.map);
+          p.basemap = L.tileLayer(TILES[theme] || TILES.dark, cartoTileOptions()).addTo(p.map);
           p.basemap.bringToBack();
         }
         if (p.type === "attitude") redrawAttitude(p);
@@ -805,6 +1013,7 @@
       setSlots,
       onFrame,
       onTrack,
+      onBasemapKey,
       onTheme,
       onBeliefTick,
       onActiveChange,
