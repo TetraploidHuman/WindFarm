@@ -1,7 +1,7 @@
 package cn.tetraploid.rtwind.sensor.camera
 
 import android.content.Context
-import android.util.Log
+import cn.tetraploid.rtwind.sensor.log.AppLog
 import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -185,7 +185,7 @@ class CameraController @Inject constructor(
                 try {
                     block()
                 } catch (e: Exception) {
-                    Log.e(TAG, "camera op failed", e)
+                    AppLog.e(TAG, "camera op failed", e)
                     throw e
                 }
             }

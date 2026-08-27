@@ -2,6 +2,7 @@ package cn.tetraploid.rtwind.sensor.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -18,11 +19,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import cn.tetraploid.rtwind.sensor.ui.screens.DashboardScreen
+import cn.tetraploid.rtwind.sensor.ui.screens.LogsScreen
 import cn.tetraploid.rtwind.sensor.ui.screens.SettingsScreen
 
 private sealed class Route(val path: String, val label: String) {
     data object Dashboard : Route("dashboard", "仪表盘")
     data object Settings : Route("settings", "设置")
+    data object Logs : Route("logs", "日志")
 }
 
 @Composable
@@ -34,7 +37,7 @@ fun RtwindSensorApp() {
     Scaffold(
         bottomBar = {
             NavigationBar {
-                listOf(Route.Dashboard, Route.Settings).forEach { route ->
+                listOf(Route.Dashboard, Route.Settings, Route.Logs).forEach { route ->
                     NavigationBarItem(
                         selected = destination?.hierarchy?.any { it.route == route.path } == true,
                         onClick = { nav.navigate(route.path) { launchSingleTop = true } },
@@ -43,6 +46,7 @@ fun RtwindSensorApp() {
                                 when (route) {
                                     Route.Dashboard -> Icons.Default.Home
                                     Route.Settings -> Icons.Default.Settings
+                                    Route.Logs -> Icons.Default.BugReport
                                 },
                                 contentDescription = route.label,
                             )
@@ -60,6 +64,7 @@ fun RtwindSensorApp() {
         ) {
             composable(Route.Dashboard.path) { DashboardScreen() }
             composable(Route.Settings.path) { SettingsScreen() }
+            composable(Route.Logs.path) { LogsScreen() }
         }
     }
 }
