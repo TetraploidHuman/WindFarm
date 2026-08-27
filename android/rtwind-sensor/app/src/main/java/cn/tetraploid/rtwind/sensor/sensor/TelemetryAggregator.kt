@@ -63,6 +63,7 @@ class TelemetryAggregator @Inject constructor(
 
         linkJob = scope.launch {
             cachedSettings = settingsRepository.settings.first()
+            imuTracker.updateMountAxis(cachedSettings.mountNoseAxis)
             api.setCameraUploadListener { success, frameKb, error ->
                 _snapshot.update {
                     if (success) {
@@ -82,6 +83,7 @@ class TelemetryAggregator @Inject constructor(
             api.startTransport(scope, cachedSettings.serverBaseUrl)
             settingsRepository.settings.collect { s ->
                 cachedSettings = s
+                imuTracker.updateMountAxis(s.mountNoseAxis)
             }
         }
 

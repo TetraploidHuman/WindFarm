@@ -27,12 +27,27 @@ data class TelemetryPayload(
     }
 }
 
+enum class MountNoseAxis(val id: String, val label: String) {
+    /** Screen up; phone top edge (+Y) points forward (short edge ahead). */
+    DEVICE_Y("y", "手机顶部朝前"),
+    /** Screen up; phone long edge (+X) points forward — common belly mount. */
+    DEVICE_X("x", "手机长边朝前"),
+    ;
+
+    companion object {
+        fun fromId(id: String?): MountNoseAxis =
+            entries.firstOrNull { it.id == id } ?: DEVICE_X
+    }
+}
+
 data class AppSettings(
     val serverBaseUrl: String = DEFAULT_SERVER,
     val vehicleId: String = "android-drone-1",
     val uploadHz: Int = 10,
     val enableCamera: Boolean = true,
     val enableImu: Boolean = true,
+    /** Screen-up mount: which device axis points toward aircraft nose. */
+    val mountNoseAxis: MountNoseAxis = MountNoseAxis.DEVICE_X,
     /** Output height: 360 / 480 / 720 */
     val cameraHeight: Int = 480,
     /** Camera JPEG upload rate (1–20 Hz, default 15). */
