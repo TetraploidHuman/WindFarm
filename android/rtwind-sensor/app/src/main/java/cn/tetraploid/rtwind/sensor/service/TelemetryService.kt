@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import cn.tetraploid.rtwind.sensor.MainActivity
+import cn.tetraploid.rtwind.sensor.log.AppLog
 import cn.tetraploid.rtwind.sensor.R
 import cn.tetraploid.rtwind.sensor.sensor.TelemetryAggregator
 import dagger.hilt.android.AndroidEntryPoint
@@ -51,17 +52,21 @@ class TelemetryService : LifecycleService() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: SecurityException) {
+            AppLog.e(TAG, "startForeground failed", e)
             Log.e(TAG, "startForeground failed (missing permission for FGS type?)", e)
             stopSelf()
             return START_NOT_STICKY
         } catch (e: Exception) {
+            AppLog.e(TAG, "onStartCommand failed", e)
             Log.e(TAG, "onStartCommand failed", e)
             stopSelf()
             return START_NOT_STICKY
         }
         try {
             aggregator.start(scope)
+            AppLog.i(TAG, "telemetry started enableCamera=$enableCamera")
         } catch (e: Exception) {
+            AppLog.e(TAG, "aggregator.start failed", e)
             Log.e(TAG, "aggregator.start failed", e)
             stopSelf()
             return START_NOT_STICKY
@@ -87,6 +92,7 @@ class TelemetryService : LifecycleService() {
             PackageManager.PERMISSION_GRANTED
 
     override fun onDestroy() {
+        AppLog.i(TAG, "service destroyed")
         aggregator.stop()
         scope.cancel()
         super.onDestroy()

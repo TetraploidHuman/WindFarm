@@ -11,6 +11,7 @@ import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
 import cn.tetraploid.rtwind.sensor.data.TelemetrySnapshot
 import cn.tetraploid.rtwind.sensor.sensor.TelemetryAggregator
+import cn.tetraploid.rtwind.sensor.log.AppLog
 import cn.tetraploid.rtwind.sensor.service.TelemetryService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -38,14 +39,20 @@ class DashboardViewModel @Inject constructor(
 
     fun startTelemetry() {
         viewModelScope.launch {
+            AppLog.i("Dashboard", "startTelemetry enableCamera=${settings.value.enableCamera}")
             runCatching { cameraController.unbind() }
-            TelemetryService.start(context, settings.value.enableCamera)
+                .onFailure { AppLog.w("Dashboard", "unbind before start failed", it) }
+            runCatching {
+                TelemetryService.start(context, settings.value.enableCamera)
+            }.onFailure { AppLog.e("Dashboard", "startTelemetry failed", it) }
         }
     }
 
     fun stopTelemetry() {
         viewModelScope.launch {
+            AppLog.i("Dashboard", "stopTelemetry")
             runCatching { cameraController.stopStream() }
+                .onFailure { AppLog.w("Dashboard", "stopStream failed", it) }
             TelemetryService.stop(context)
         }
     }
