@@ -1,8 +1,11 @@
 package cn.tetraploid.rtwind.sensor.sensor
 
+import android.Manifest
 import android.content.Context
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.BatteryManager
+import androidx.core.content.ContextCompat
 import cn.tetraploid.rtwind.sensor.camera.CameraController
 import cn.tetraploid.rtwind.sensor.camera.CameraStreamConfig
 import cn.tetraploid.rtwind.sensor.data.AppSettings
@@ -50,7 +53,7 @@ class TelemetryAggregator @Inject constructor(
     private var cameraSettingsJob: Job? = null
     private var cachedSettings: AppSettings = AppSettings()
 
-    fun start(scope: CoroutineScope, lifecycleOwner: LifecycleOwner) {
+    fun start(scope: CoroutineScope, lifecycleOwner: LifecycleOwner, enableCamera: Boolean = true) {
         if (sensorJobs.isNotEmpty()) return
         _snapshot.update {
             it.copy(
@@ -88,12 +91,12 @@ class TelemetryAggregator @Inject constructor(
         cameraSettingsJob = scope.launch {
             val initial = settingsRepository.settings.first()
             cachedSettings = initial
-            if (initial.enableCamera) {
+            if (initial.enableCamera && enableCamera && hasCameraPermission()) {
                 startCameraStream(lifecycleOwner, initial)
             }
             settingsRepository.settings.collect { s ->
                 cachedSettings = s
-                if (!s.enableCamera) {
+                if (!s.enableCamera || !hasCameraPermission()) {
                     cameraController.stopStream()
                 } else if (!cameraController.isStreaming) {
                     startCameraStream(lifecycleOwner, s)
@@ -254,9 +257,14 @@ class TelemetryAggregator @Inject constructor(
     }
 
     private suspend fun startCameraStream(lifecycleOwner: LifecycleOwner, settings: AppSettings) {
+        if (!hasCameraPermission()) return
         val config = CameraStreamConfig.fromSettings(settings)
         cameraController.startStream(lifecycleOwner, config) { jpeg ->
             api.publishCamera(jpeg, settings.vehicleId)
         }
     }
+
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
 }

@@ -1,7 +1,9 @@
 package cn.tetraploid.rtwind.sensor.ui.screens
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
@@ -56,23 +58,29 @@ fun DashboardScreen(
     ) { grants ->
         val hasLocation = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
             grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        permissionsReady = hasLocation
-        if (!hasLocation) {
-            Toast.makeText(context, "需要定位权限才能上传遥测（请选「精确位置」）", Toast.LENGTH_LONG).show()
-        } else if (grants[Manifest.permission.ACCESS_FINE_LOCATION] != true) {
-            Toast.makeText(context, "建议授予「精确位置」，否则定位可能很慢或不准", Toast.LENGTH_LONG).show()
+        val hasCamera = grants[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        val needCamera = settings.enableCamera
+        permissionsReady = hasLocation && (!needCamera || hasCamera)
+        when {
+            !hasLocation ->
+                Toast.makeText(context, "需要定位权限才能上传遥测（请选「精确位置」）", Toast.LENGTH_LONG).show()
+            needCamera && !hasCamera ->
+                Toast.makeText(context, "已启用摄像头上传，需授予相机权限；或在设置里关闭摄像头", Toast.LENGTH_LONG).show()
+            grants[Manifest.permission.ACCESS_FINE_LOCATION] != true ->
+                Toast.makeText(context, "建议授予「精确位置」，否则定位可能很慢或不准", Toast.LENGTH_LONG).show()
         }
     }
 
-    LaunchedEffect(Unit) {
-        permissionLauncher.launch(
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION,
-                Manifest.permission.CAMERA,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ),
-        )
+    LaunchedEffect(settings.enableCamera) {
+        val perms = buildList {
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            add(Manifest.permission.POST_NOTIFICATIONS)
+            if (settings.enableCamera) add(Manifest.permission.CAMERA)
+        }
+        permissionLauncher.launch(perms.toTypedArray())
     }
 
     Column(
