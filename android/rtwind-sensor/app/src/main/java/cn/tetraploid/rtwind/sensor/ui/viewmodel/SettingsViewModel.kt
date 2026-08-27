@@ -3,6 +3,7 @@ package cn.tetraploid.rtwind.sensor.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.tetraploid.rtwind.sensor.data.AppSettings
+import cn.tetraploid.rtwind.sensor.data.MountNoseAxis
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -26,4 +27,5 @@ class SettingsViewModel @Inject constructor(
     fun saveCameraHeight(height: Int) = viewModelScope.launch { repository.updateCameraHeight(height) }
     fun saveCameraUploadHz(hz: Int) = viewModelScope.launch { repository.updateCameraUploadHz(hz) }
     fun saveCameraJpegQuality(q: Int) = viewModelScope.launch { repository.updateCameraJpegQuality(q) }
+    fun saveMountNoseAxis(axis: MountNoseAxis) = viewModelScope.launch { repository.updateMountNoseAxis(axis) }
 }

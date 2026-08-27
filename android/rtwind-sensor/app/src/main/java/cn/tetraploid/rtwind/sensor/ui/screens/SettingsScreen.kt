@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.tetraploid.rtwind.sensor.data.AppSettings
+import cn.tetraploid.rtwind.sensor.data.MountNoseAxis
 import cn.tetraploid.rtwind.sensor.ui.viewmodel.SettingsViewModel
 
 @Composable
@@ -90,6 +91,26 @@ private fun SettingsForm(settings: AppSettings, viewModel: SettingsViewModel) {
         checked = settings.enableImu,
         onCheckedChange = viewModel::saveImu,
     )
+
+    Text("机头朝向（屏幕朝上固定时）", style = MaterialTheme.typography.titleSmall)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        MountNoseAxis.entries.forEach { axis ->
+            FilterChip(
+                selected = settings.mountNoseAxis == axis,
+                onClick = { viewModel.saveMountNoseAxis(axis) },
+                label = { Text(axis.label) },
+            )
+        }
+    }
+    Text(
+        "机头朝前、屏幕朝上仍不对时，切换另一项。机头抬起应显示俯仰为正。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+    )
+
     ToggleRow(
         label = "启用摄像头上传",
         checked = settings.enableCamera,
