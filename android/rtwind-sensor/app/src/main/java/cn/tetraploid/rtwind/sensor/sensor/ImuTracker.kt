@@ -20,6 +20,10 @@ data class ImuReading(
     val yawDeg: Double,
 )
 
+/**
+ * IMU with mount remap: screen up, phone top (+Y device) = nose (+X body), right wing = +Y body.
+ * Outputs aviation-style angles: roll = bank (right wing down +), pitch = nose up +, yaw = heading.
+ */
 @Singleton
 class ImuTracker @Inject constructor(
     @ApplicationContext context: Context,
@@ -29,41 +33,37 @@ class ImuTracker @Inject constructor(
     private val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
     private val magnet = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
+    private val deviceRot = FloatArray(9)
+    private val bodyRot = FloatArray(9)
+    private val orient = FloatArray(3)
+
     fun readings(): Flow<ImuReading> = callbackFlow {
-        val rotMat = FloatArray(9)
-        val orient = FloatArray(3)
         var last = ImuReading(0.0, 0.0, 0.0)
 
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 when (event.sensor.type) {
                     Sensor.TYPE_ROTATION_VECTOR -> {
-                        SensorManager.getRotationMatrixFromVector(rotMat, event.values)
-                        // Portrait, screen up, nose = top of phone (+Y), right wing = +X on screen.
-                        val mapped = FloatArray(9)
-                        val ok = SensorManager.remapCoordinateSystem(
-                            rotMat,
-                            SensorManager.AXIS_Y,
-                            SensorManager.AXIS_MINUS_X,
-                            mapped,
-                        )
-                        SensorManager.getOrientation(if (ok) mapped else rotMat, orient)
+                        SensorManager.getRotationMatrixFromVector(deviceRot, event.values)
+                        if (!SensorManager.remapCoordinateSystem(
+                                deviceRot,
+                                SensorManager.AXIS_Y,
+                                SensorManager.AXIS_X,
+                                bodyRot,
+                            )
+                        ) {
+                            System.arraycopy(deviceRot, 0, bodyRot, 0, 9)
+                        }
+                        SensorManager.getOrientation(bodyRot, orient)
                         last = ImuReading(
-                            rollDeg = Math.toDegrees(orient[2].toDouble()),
-                            // Aviation: pitch + = nose up (after body-axis remap).
-                            pitchDeg = Math.toDegrees(orient[1].toDouble()),
+                            rollDeg = Math.toDegrees(orient[1].toDouble()),
+                            pitchDeg = -Math.toDegrees(orient[2].toDouble()),
                             yawDeg = normalizeHeading(Math.toDegrees(orient[0].toDouble())),
                         )
                         trySend(last)
                     }
                     Sensor.TYPE_ACCELEROMETER -> if (rotation == null) {
-                        // Portrait screen-up fallback (matches remap above).
-                        val ax = event.values[0].toDouble()
-                        val ay = event.values[1].toDouble()
-                        val az = event.values[2].toDouble()
-                        val pitch = Math.toDegrees(atan2(-ay, sqrt(ax * ax + az * az)))
-                        val roll = Math.toDegrees(atan2(ax, az))
-                        last = last.copy(rollDeg = roll, pitchDeg = pitch)
+                        last = bodyAnglesFromAccel(event.values)
                         trySend(last)
                     }
                 }
@@ -80,6 +80,19 @@ class ImuTracker @Inject constructor(
 
         sensors.forEach { sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME) }
         awaitClose { sensorManager.unregisterListener(listener) }
+    }
+
+    /** Gravity tilt in body frame (screen up, nose = device +Y). */
+    private fun bodyAnglesFromAccel(values: FloatArray): ImuReading {
+        val ax = values[0].toDouble()
+        val ay = values[1].toDouble()
+        val az = values[2].toDouble()
+        val gForward = -ay
+        val gRight = -ax
+        val gDown = az
+        val pitch = Math.toDegrees(atan2(gForward, sqrt(gRight * gRight + gDown * gDown)))
+        val roll = Math.toDegrees(atan2(gRight, gDown))
+        return ImuReading(rollDeg = roll, pitchDeg = pitch, yawDeg = 0.0)
     }
 
     private fun normalizeHeading(deg: Double): Double {
