@@ -52,7 +52,19 @@
     eDir: document.getElementById("eDir"),
     eTemp: document.getElementById("eTemp"),
     eMeta: document.getElementById("eMeta"),
+    statusBar: document.getElementById("statusBar"),
+    layerPerception: document.getElementById("layerPerception"),
+    layerCognition: document.getElementById("layerCognition"),
+    layerPlanning: document.getElementById("layerPlanning"),
+    cObs: document.getElementById("cObs"),
+    cUnc: document.getElementById("cUnc"),
+    cConf: document.getElementById("cConf"),
+    pLambda: document.getElementById("pLambda"),
+    pMs: document.getElementById("pMs"),
+    pMode: document.getElementById("pMode"),
+    planMeta: document.getElementById("planMeta"),
     hudPos: document.getElementById("hudPos"),
+    hudLambda: document.getElementById("hudLambda"),
     hudSeq: document.getElementById("hudSeq"),
     clock: document.getElementById("clock"),
     altChart: document.getElementById("altChart"),
@@ -82,6 +94,18 @@
     livePrefetchAsked: false,
     livePrefetchPending: null,
     prefetchBusy: false,
+    plan: {
+      ready: false,
+      planned: [],
+      baseline: [],
+      lambda: 0,
+      planning_ms: null,
+      planning_mode: null,
+      last_error: null,
+    },
+    systemLayersTimer: 0,
+    cartoBasemapKey: "",
+    lastDemMsl: null,
   };
 
   const MISSION_SIZE_KM = 10;
@@ -129,15 +153,42 @@
   }
 
   const map = L.map("map", { zoomControl: true, attributionControl: true }).setView([27.908, 112.922], 14);
-  const TILES = {
-    dark: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    light: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-  };
-  let basemap = L.tileLayer(TILES.dark, {
-    maxZoom: 19,
-    attribution: "&copy; OSM &copy; CARTO",
-  }).addTo(map);
+
+  function buildCartoTiles(key) {
+    const q = key ? `?key=${encodeURIComponent(key)}` : "";
+    return {
+      dark: `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png${q}`,
+      light: `https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png${q}`,
+    };
+  }
+
+  function cartoTileOptions() {
+    return {
+      maxZoom: 20,
+      subdomains: "abcd",
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, © <a href="https://carto.com/attributions">CARTO</a>',
+    };
+  }
+
+  const TILES = buildCartoTiles("");
+  let basemap = L.tileLayer(TILES.dark, cartoTileOptions()).addTo(map);
   let basemapTheme = "dark";
+
+  function refreshBasemapLayer(theme = basemapTheme) {
+    map.removeLayer(basemap);
+    basemap = L.tileLayer(TILES[theme] || TILES.dark, cartoTileOptions()).addTo(map);
+    basemap.bringToBack();
+    basemapTheme = theme;
+  }
+
+  function applyCartoBasemapKey(key) {
+    const next = String(key || "").trim();
+    if (!next || next === state.cartoBasemapKey) return;
+    state.cartoBasemapKey = next;
+    Object.assign(TILES, buildCartoTiles(next));
+    refreshBasemapLayer(currentTheme());
+    if (window.__rtwindQuad) window.__rtwindQuad.onBasemapKey();
+  }
 
   function currentTheme() {
     return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
@@ -157,13 +208,7 @@
       try { localStorage.setItem("rtwind-theme", next); } catch (_) { /* ignore */ }
     }
     if (basemapTheme !== next) {
-      map.removeLayer(basemap);
-      basemap = L.tileLayer(TILES[next], {
-        maxZoom: 19,
-        attribution: "&copy; OSM &copy; CARTO",
-      }).addTo(map);
-      basemap.bringToBack();
-      basemapTheme = next;
+      refreshBasemapLayer(next);
     }
     const colors = themeColors(next);
     trackLine.setStyle({ color: state.active === "live" ? colors.live : colors.sim });
@@ -405,17 +450,12 @@
     const bits = [];
     try {
       if (wantWind) {
-        const res = await fetch(
-          api(`/api/env/wind-field?south=${south}&west=${west}&north=${north}&east=${east}&nx=${grid.windNx}&ny=${grid.windNy}`),
-          { cache: "no-store", signal },
+        if (!window.RtwindMeteo) throw new Error("气象客户端未加载");
+        const wind = await window.RtwindMeteo.fetchWindField(
+          south, west, north, east, grid.windNx, grid.windNy, { signal },
         );
-        if (!res.ok) throw new Error(`风场 HTTP ${res.status}`);
-        const wind = await res.json();
         applyWindLayer(wind);
         bits.push(wind.missing > 0 ? `风场(缺${wind.missing})` : "风场");
-        if (wind.missing > 0 && els.prefetchMeta) {
-          els.prefetchMeta.textContent = `任务区内仍有 ${wind.missing} 个气象点缺失，请「预下载任务区」`;
-        }
         els.layerMeta.textContent = `${bits.join(" + ")} 已更新…`;
       } else {
         windLayer.clearLayers();
@@ -729,7 +769,7 @@
           weather_nx: 11,
           weather_ny: 11,
           dem: true,
-          weather: true,
+          weather: false,
         }),
       });
       if (!res.ok) {
@@ -773,6 +813,7 @@
       setPrefetchProgress(100, tip);
       if (els.prefetchMeta) els.prefetchMeta.textContent = tip;
       scheduleLayerRefresh(80, { force: true });
+      refreshSystemLayers(true);
       if (window.__rtwindQuad && window.__rtwindQuad.isQuad()) {
         window.__rtwindQuad.refreshLayers(true);
       }
@@ -788,6 +829,20 @@
     }
   }
 
+  function updateAglDisplay(frame) {
+    if (!frame) return;
+    if (frame.alt_agl != null) {
+      els.mAgl.textContent = fmt(frame.alt_agl, 1);
+      return;
+    }
+    const msl = frame.alt_msl;
+    if (msl != null && state.lastDemMsl != null) {
+      els.mAgl.textContent = fmt(msl - state.lastDemMsl, 1);
+      return;
+    }
+    els.mAgl.textContent = "暂无";
+  }
+
   function applyFrame(frame) {
     if (!frame) return;
     const prev = state.frame;
@@ -796,14 +851,14 @@
     els.mAir.textContent = fmt(frame.airspeed, 1);
     els.mGs.textContent = fmt(frame.groundspeed, 1);
     els.mMsl.textContent = fmt(frame.alt_msl, 1);
-    els.mAgl.textContent = frame.alt_agl != null ? fmt(frame.alt_agl, 1) : "暂无";
+    updateAglDisplay(frame);
     els.mHdg.textContent = fmt(frame.heading, 0);
     els.mClimb.textContent = fmt(frame.climb_rate, 2);
     els.mRoll.textContent = fmt(frame.roll, 1);
     els.mPitch.textContent = fmt(frame.pitch, 1);
     els.mYaw.textContent = fmt(frame.yaw, 0);
     els.mLink.textContent = linkLabel(frame.link);
-    els.attBall.style.transform = `translateY(${(-Number(frame.pitch) || 0) * 1.2}px) rotate(${Number(frame.roll) || 0}deg)`;
+    els.attBall.style.transform = `translateY(${(Number(frame.pitch) || 0) * 1.2}px) rotate(${Number(frame.roll) || 0}deg)`;
     els.hudPos.textContent = fmtPos(frame.lat, frame.lon);
     els.hudSeq.textContent = frame.seq != null ? `序号 ${frame.seq}` : "序号 暂无";
     els.clock.textContent = frame.t || "暂无";
@@ -833,7 +888,7 @@
     }
 
     const now = performance.now();
-    if (hasPos(frame) && now - state.envTimer > 8000) {
+    if (hasPos(frame) && now - state.envTimer > 20000) {
       state.envTimer = now;
       refreshEnv(frame.lat, frame.lon, frame.alt_msl);
     }
@@ -842,6 +897,144 @@
       scheduleLayerRefresh(200, { force: true });
     }
     if (window.__rtwindQuad) window.__rtwindQuad.onFrame(frame);
+    refreshSystemLayers();
+  }
+
+  function setStatusBar(msg) {
+    if (!els.statusBar) return;
+    const text = (msg || "").trim();
+    if (!text) {
+      els.statusBar.hidden = true;
+      els.statusBar.textContent = "";
+      return;
+    }
+    els.statusBar.hidden = false;
+    els.statusBar.textContent = text;
+  }
+
+  function fmtPct(v) {
+    if (v == null || !Number.isFinite(Number(v))) return "—";
+    return `${Math.round(Number(v) * 100)}%`;
+  }
+
+  function updatePlanUi() {
+    const lam = state.plan.lambda;
+    if (els.pLambda) els.pLambda.textContent = fmtPct(lam);
+    if (els.hudLambda) els.hudLambda.textContent = `λ ${fmtPct(lam)}`;
+    if (els.pMs) {
+      els.pMs.textContent = state.plan.planning_ms != null ? fmt(state.plan.planning_ms, 0) : "—";
+    }
+    if (els.pMode) els.pMode.textContent = state.plan.planning_mode || "—";
+    if (els.planMeta) {
+      if (state.plan.last_error) els.planMeta.textContent = state.plan.last_error;
+      else if (state.plan.ready) els.planMeta.textContent = "规划运行中（路径线已隐藏）";
+      else els.planMeta.textContent = "信念锚定后每 5s 自动重规划";
+    }
+  }
+
+  function applyPlanPath(data) {
+    if (!data) return;
+    state.plan = {
+      ready: !!data.ok,
+      planned: data.planned || [],
+      baseline: data.baseline || [],
+      lambda: data.lambda != null ? data.lambda : state.plan.lambda,
+      planning_ms: data.planning_ms != null ? data.planning_ms : state.plan.planning_ms,
+      planning_mode: data.planning_mode != null ? data.planning_mode : state.plan.planning_mode,
+      last_error: data.last_error != null ? data.last_error : state.plan.last_error,
+    };
+    updatePlanUi();
+  }
+
+  function clearPlanPath() {
+    applyPlanPath({
+      ok: false,
+      planned: [],
+      baseline: [],
+      lambda: 0,
+      planning_ms: null,
+      planning_mode: null,
+      last_error: null,
+    });
+  }
+
+  function applySystemLayers(data) {
+    if (!data) return;
+    const perc = data.perception || {};
+    const cog = data.cognition || {};
+    const planning = data.planning || {};
+
+    const setLayer = (row, cls, detail) => {
+      if (!row) return;
+      row.classList.remove("ready", "partial", "wait");
+      row.classList.add(cls);
+      if (detail) {
+        const el = row.querySelector(".layer-detail");
+        if (el) el.textContent = detail;
+      }
+    };
+
+    let percCls = "wait";
+    let percMeta = "DEM / 风场 · 未预下载";
+    if (perc.ready || perc.dem_ok) {
+      percCls = perc.ready ? "ready" : "partial";
+      const km = perc.size_km || MISSION_SIZE_KM;
+      percMeta = perc.dem_ok
+        ? `DEM 就绪 · 气象由浏览器直连 · ${km}×${km} km`
+        : `地形部分就绪 · ${km}×${km} km`;
+    } else if (perc.prefetched || perc.partial) {
+      percCls = "partial";
+      percMeta = `部分就绪 · DEM ${perc.dem_ok ? "✓" : "—"} · 气象走客户端`;
+    } else {
+      percCls = "wait";
+      percMeta = "DEM 未预下载 · 气象走客户端 IP";
+    }
+    setLayer(els.layerPerception, percCls, percMeta);
+
+    let cogCls = "wait";
+    let cogMeta = "信念场 · 未锚定";
+    if (cog.anchored && (cog.obs_count || 0) > 0) {
+      cogCls = "ready";
+      cogMeta = `已锚定 · 观测 ${cog.obs_count}`;
+    } else if (cog.anchored) {
+      cogCls = "partial";
+      cogMeta = "已锚定 · 等待观测";
+    }
+    setLayer(els.layerCognition, cogCls, cogMeta);
+
+    let planCls = "wait";
+    let planMeta = "路径 · 等待信念";
+    if (planning.ready) {
+      planCls = "ready";
+      planMeta = `路径就绪 · λ ${fmtPct(planning.lambda)} · ${planning.planning_ms != null ? `${Math.round(planning.planning_ms)} ms` : "—"}`;
+    } else if (planning.last_error) {
+      planCls = "partial";
+      planMeta = planning.last_error;
+    } else if (cog.anchored) {
+      planCls = "partial";
+      planMeta = "信念就绪 · 规划中";
+    }
+    setLayer(els.layerPlanning, planCls, planMeta);
+
+    if (els.cObs) els.cObs.textContent = cog.obs_count != null ? String(cog.obs_count) : "—";
+    if (els.cUnc) els.cUnc.textContent = cog.mean_uncertainty != null ? fmt(cog.mean_uncertainty, 3) : "—";
+    if (els.cConf) els.cConf.textContent = cog.mean_confidence != null ? fmt(cog.mean_confidence, 3) : "—";
+    if (planning.lambda != null) state.plan.lambda = planning.lambda;
+    updatePlanUi();
+  }
+
+  async function refreshSystemLayers(force = false) {
+    const now = performance.now();
+    if (!force && now - state.systemLayersTimer < 4000) return;
+    state.systemLayersTimer = now;
+    try {
+      const res = await fetch(api("/api/system/layers"), { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      applySystemLayers(data);
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   function applyTrack(points) {
@@ -860,25 +1053,54 @@
         els.eDir.textContent = "暂无";
         els.eTemp.textContent = "暂无";
         els.eMeta.textContent = "暂无 GPS，环境数据不可用";
+        setStatusBar("暂无 GPS，环境数据不可用");
         return;
       }
       if (!hadValues) els.eMeta.textContent = "环境加载中…";
-      const res = await fetch(api(`/api/env/at?lat=${lat}&lon=${lon}`), { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const demPromise = fetch(api(`/api/env/at?lat=${lat}&lon=${lon}&weather=0`), { cache: "no-store" })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`地形 HTTP ${res.status}`);
+          return res.json();
+        });
+      const wxPromise = window.RtwindMeteo
+        ? window.RtwindMeteo.fetchWeatherAt(lat, lon)
+        : Promise.reject(new Error("气象客户端未加载"));
+      const [demPart, wxPart] = await Promise.allSettled([demPromise, wxPromise]);
       if (reqId !== state.envReq) return;
-      els.eDem.textContent = fmt(data.dem_msl, 1);
-      els.eWind.textContent = fmt(data.wind_speed_mps, 1);
-      els.eDir.textContent = fmt(data.wind_dir_deg, 0);
-      els.eTemp.textContent = fmt(data.temperature_c, 1);
-      if (data.dem_msl != null && altMsl != null) {
-        els.mAgl.textContent = fmt(altMsl - data.dem_msl, 1);
+
+      let demErr = "";
+      if (demPart.status === "fulfilled") {
+        const data = demPart.value;
+        els.eDem.textContent = fmt(data.dem_msl, 1);
+        if (data.dem_msl != null) state.lastDemMsl = Number(data.dem_msl);
+        if (state.frame) updateAglDisplay(state.frame);
+        if (data.error) demErr = data.error;
+      } else {
+        els.eDem.textContent = "暂无";
+        demErr = demPart.reason?.message || "地形失败";
       }
-      const stale = data.stale ? " · 缓存" : "";
-      els.eMeta.textContent = `${data.weather_source || "open-meteo-forecast"}${stale}${data.error ? " · " + data.error : ""}`;
+
+      let wxErr = "";
+      if (wxPart.status === "fulfilled") {
+        const wx = wxPart.value;
+        els.eWind.textContent = fmt(wx.wind_speed_mps, 1);
+        els.eDir.textContent = fmt(wx.wind_dir_deg, 0);
+        els.eTemp.textContent = fmt(wx.temperature_c, 1);
+        const stale = wx._cached ? " · 缓存" : "";
+        els.eMeta.textContent = `${wx.source || "open-meteo-client"}${stale}`;
+        wxErr = wx._soft_error || "";
+      } else {
+        els.eWind.textContent = "暂无";
+        els.eDir.textContent = "暂无";
+        els.eTemp.textContent = "暂无";
+        els.eMeta.textContent = "气象客户端";
+        wxErr = wxPart.reason?.message || "气象失败";
+      }
+      setStatusBar([demErr, wxErr].filter(Boolean).join(" · "));
     } catch (err) {
       if (reqId !== state.envReq) return;
-      els.eMeta.textContent = `环境错误: ${err.message}`;
+      els.eMeta.textContent = "环境请求失败";
+      setStatusBar(`环境错误: ${err.message}`);
     }
   }
 
@@ -894,6 +1116,8 @@
     const data = await res.json();
     setActiveUi(data.active);
     applyTrack([]);
+    clearPlanPath();
+    refreshSystemLayers(true);
     state.altHist = [];
     state.spdHist = [];
     setBadge({ link: next === "live" ? "waiting" : "ok" });
@@ -908,6 +1132,7 @@
       body: JSON.stringify({ action: "reset" }),
     });
     applyTrack([]);
+    clearPlanPath();
     state.altHist = [];
     state.spdHist = [];
   });
@@ -1029,14 +1254,32 @@
           });
           if (state.track.length > 1200) state.track.shift();
           trackLine.setLatLngs(state.track.map((p) => [p.lat, p.lon]));
+          if (window.__rtwindQuad) window.__rtwindQuad.onTrack(state.track);
         }
       }
       if (msg.type === "track_snapshot") applyTrack(msg.track);
       if (msg.type === "belief_tick" && els.layerBelief && els.layerBelief.checked) {
         scheduleLayerRefresh(400, { force: true });
       }
+      if (msg.type === "belief_tick") {
+        refreshSystemLayers(true);
+      }
       if (msg.type === "belief_tick" && window.__rtwindQuad) {
         window.__rtwindQuad.onBeliefTick();
+      }
+      if (msg.type === "plan_update") {
+        applyPlanPath(msg);
+        refreshSystemLayers(true);
+      }
+      if (msg.type === "plan_progress" && msg.lambda != null) {
+        state.plan.lambda = msg.lambda;
+        updatePlanUi();
+        if (els.layerPlanning) {
+          const detail = els.layerPlanning.querySelector(".layer-detail");
+          if (detail && state.plan.ready) {
+            detail.textContent = `路径就绪 · λ ${fmtPct(msg.lambda)} · ${state.plan.planning_ms != null ? `${Math.round(state.plan.planning_ms)} ms` : "—"}`;
+          }
+        }
       }
     };
     ws.onclose = () => {
@@ -1049,6 +1292,7 @@
     api,
     L,
     TILES,
+    cartoTileOptions,
     mainMap: map,
     getTheme: currentTheme,
     themeColors,
@@ -1059,6 +1303,21 @@
     followEnabled: () => !!(els.follow && els.follow.checked),
     onMapModeEnter: () => snapFollow(true),
   });
+
+  fetch(api("/api/config/public"))
+    .then((r) => r.json())
+    .then((d) => applyCartoBasemapKey(d.carto_basemap_key))
+    .catch(() => {});
+
+  fetch(api("/api/plan/path"))
+    .then((r) => r.json())
+    .then((d) => applyPlanPath(d))
+    .catch(() => {});
+
+  fetch(api("/api/system/layers"))
+    .then((r) => r.json())
+    .then((d) => applySystemLayers(d))
+    .catch(() => {});
 
   fetch(api("/api/env/region"))
     .then((r) => r.json())

@@ -239,57 +239,23 @@
 
   const DEG = Math.PI / 180;
 
-  function vecNorm(v) {
-    const l = Math.hypot(v[0], v[1], v[2]) || 1;
-    return [v[0] / l, v[1] / l, v[2] / l];
-  }
-
-  function vecCross(a, b) {
-    return [
-      a[1] * b[2] - a[2] * b[1],
-      a[2] * b[0] - a[0] * b[2],
-      a[0] * b[1] - a[1] * b[0],
-    ];
-  }
-
-  function vecDot(a, b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  }
-
-  /** NED body attitude: aviation pitch + = nose up. */
-  function buildBodyMatrix(rollDeg, pitchDeg, yawDeg) {
+  /**
+   * NED body: +X nose, +Y right, +Z down.
+   * Attitude indicator: roll/pitch only (no yaw — heading does not bank the 3D model).
+   * View: orthographic from nose/tail (±X), wings level on screen when roll=pitch=0.
+   */
+  function buildBodyMatrix(rollDeg, pitchDeg) {
     const roll = rollDeg * DEG;
     const pitch = pitchDeg * DEG;
-    const yaw = yawDeg * DEG;
-    return mulMat(rotZ(yaw), mulMat(rotY(pitch), rotX(roll)));
-  }
-
-  /** Fixed orbit camera in reference frame (front-right-above). Wings level at P=R=Y=0. */
-  const CAMERA_AXES = (() => {
-    const eye = vecNorm([1.4, 1.0, -1.2]);
-    const worldUp = [0, 0, -1];
-    const fwd = vecNorm([-eye[0], -eye[1], -eye[2]]);
-    let right = vecCross(fwd, worldUp);
-    right = vecNorm(right);
-    const up = vecCross(right, fwd);
-    return { right, up, fwd };
-  })();
-
-  function transformPoint(bodyMat, p) {
-    const w = mulMatVec(bodyMat, p);
-    return {
-      x: vecDot(w, CAMERA_AXES.right),
-      y: -vecDot(w, CAMERA_AXES.up),
-      z: vecDot(w, CAMERA_AXES.fwd),
-    };
+    return mulMat(rotY(pitch), rotX(roll));
   }
 
   function projectPoint(bodyMat, p, cx, cy, scale) {
-    const v = transformPoint(bodyMat, p);
+    const v = mulMatVec(bodyMat, p);
     return {
-      x: cx + v.x * scale,
-      y: cy + v.y * scale,
-      z: v.z,
+      x: cx + v[1] * scale,
+      y: cy + v[2] * scale,
+      z: -v[0],
     };
   }
 
@@ -351,7 +317,7 @@
     const roll = frame ? Number(frame.roll) || 0 : 0;
     const pitch = frame ? Number(frame.pitch) || 0 : 0;
     const yaw = frame ? Number(frame.yaw != null ? frame.yaw : frame.heading) || 0 : 0;
-    const bodyMat = buildBodyMatrix(roll, pitch, yaw);
+    const bodyMat = buildBodyMatrix(roll, pitch);
     const lines = projectMeshLines(bodyMat, w, h).sort((a, b) => a.z - b.z);
 
     ctx.strokeStyle = colors.wire || "#1e40af";
