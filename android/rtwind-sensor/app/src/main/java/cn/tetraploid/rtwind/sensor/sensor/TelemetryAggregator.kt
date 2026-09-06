@@ -195,7 +195,7 @@ class TelemetryAggregator @Inject constructor(
             pitch = if (cachedSettings.enableImu) imu.pitchDeg else 0.0,
             yaw = if (cachedSettings.enableImu) imu.yawDeg else null,
             airspeed = g?.speedMps ?: 0.0,
-            groundspeed = g?.speedMps,
+            groundspeed = g?.speedMps ?: 0.0,
             climbRate = g?.let { computeClimbRate(it.altMsl) } ?: 0.0,
             battery = readBatteryPct(),
             vehicleId = cachedSettings.vehicleId,

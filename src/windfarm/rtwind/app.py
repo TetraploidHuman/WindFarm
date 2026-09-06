@@ -449,7 +449,11 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
                     continue
                 if "alt_msl" not in payload and "alt" in payload:
                     payload["alt_msl"] = payload["alt"]
-                await live.ingest(payload)
+                try:
+                    await live.ingest(payload)
+                except Exception:
+                    # Bad client frame must not tear down the ingest socket.
+                    continue
         except WebSocketDisconnect:
             pass
 
@@ -476,7 +480,10 @@ def create_app(config: RtwindConfig | None = None) -> FastAPI:
                     continue
                 if "alt_msl" not in payload and "alt" in payload:
                     payload["alt_msl"] = payload["alt"]
-                await live.ingest(payload)
+                try:
+                    await live.ingest(payload)
+                except Exception:
+                    continue
 
         reader_task = asyncio.create_task(_ingest_reader(), name="rtwind-ws-ingest")
         try:

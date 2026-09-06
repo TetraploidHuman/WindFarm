@@ -330,8 +330,8 @@
     top: { label: "俯视", hint: "机头↑", project: makeViewCamera([0, 0, -1], [1, 0, 0]) },
     right: { label: "右侧", hint: "右翼→", project: makeViewCamera([0, 1, 0]) },
     left: { label: "左侧", hint: "左翼→", project: makeViewCamera([0, -1, 0]) },
-    // 45° elevation from above (rear-right); −Z = up in NED.
-    iso: { label: "斜视", hint: "后右俯视45°", project: makeViewCamera([-1, 1, -2], [0, 0, -1]) },
+    // Mild elevation from rear-right (less steep top-down).
+    iso: { label: "斜视", hint: "后右斜视", project: makeViewCamera([-1.2, 1.2, -1.0], [0, 0, -1]) },
   };
   const ATTITUDE_VIEW_ORDER = ["rear", "front", "top", "right", "left", "iso"];
   const DEFAULT_ATTITUDE_VIEW = "rear";
@@ -340,9 +340,11 @@
    * NED body: +X nose, +Y right wing, +Z down.
    * Roll = rot about nose (X); pitch = rot about wing (Y).
    * Sign: right wing down → roll + (matches ImuTracker body frame).
+   * Iso (rear-right from above) has mirrored screen handedness → negate roll.
    */
-  function buildBodyMatrix(rollDeg, pitchDeg, _viewId) {
-    const roll = rollDeg * DEG;
+  function buildBodyMatrix(rollDeg, pitchDeg, viewId) {
+    const signedRoll = viewId === "iso" ? -rollDeg : rollDeg;
+    const roll = signedRoll * DEG;
     const pitch = pitchDeg * DEG;
     return mulMat(rotY(pitch), rotX(roll));
   }
