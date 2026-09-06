@@ -10,14 +10,25 @@ from .mavlink_source import MavlinkState, MavlinkUdpListener
 from .types import RtwindConfig, TelemetryFrame, SourceKind
 
 
+def _as_float(value: Any, default: float | None = 0.0) -> float | None:
+    """Coerce JSON numbers; treat missing/null as default (JSON null ≠ missing key)."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_ingest(payload: dict[str, Any], *, source: SourceKind = "live") -> TelemetryFrame:
     now = datetime.now(timezone.utc).isoformat()
-    lat_raw = payload.get("lat")
-    lon_raw = payload.get("lon")
-    lat = float(lat_raw) if lat_raw is not None else None
-    lon = float(lon_raw) if lon_raw is not None else None
-    alt_raw = payload.get("alt_msl", payload.get("alt"))
-    alt_msl = float(alt_raw) if alt_raw is not None else None
+    lat = _as_float(payload.get("lat"), None)
+    lon = _as_float(payload.get("lon"), None)
+    alt_msl = _as_float(payload.get("alt_msl", payload.get("alt")), None)
+    airspeed = _as_float(payload.get("airspeed"), 0.0) or 0.0
+    groundspeed = _as_float(payload.get("groundspeed"), None)
+    if groundspeed is None:
+        groundspeed = airspeed
     return TelemetryFrame(
         source=source,
         vehicle_id=str(payload.get("vehicle_id") or "live-1"),
@@ -25,17 +36,17 @@ def _parse_ingest(payload: dict[str, Any], *, source: SourceKind = "live") -> Te
         lat=lat,
         lon=lon,
         alt_msl=alt_msl,
-        heading=float(payload.get("heading", payload.get("yaw", 0.0))),
-        roll=float(payload.get("roll", 0.0)),
-        pitch=float(payload.get("pitch", 0.0)),
-        yaw=float(payload.get("yaw", payload.get("heading", 0.0))),
-        airspeed=float(payload.get("airspeed", 0.0)),
-        groundspeed=float(payload.get("groundspeed", payload.get("airspeed", 0.0))),
-        climb_rate=float(payload.get("climb_rate", 0.0)),
-        battery=float(payload["battery"]) if payload.get("battery") is not None else None,
+        heading=_as_float(payload.get("heading", payload.get("yaw")), 0.0) or 0.0,
+        roll=_as_float(payload.get("roll"), 0.0) or 0.0,
+        pitch=_as_float(payload.get("pitch"), 0.0) or 0.0,
+        yaw=_as_float(payload.get("yaw", payload.get("heading")), 0.0) or 0.0,
+        airspeed=airspeed,
+        groundspeed=groundspeed,
+        climb_rate=_as_float(payload.get("climb_rate"), 0.0) or 0.0,
+        battery=_as_float(payload.get("battery"), None),
         link="ok",
-        alt_agl=float(payload["alt_agl"]) if payload.get("alt_agl") is not None else None,
-        client_ts=float(payload["client_ts"]) if payload.get("client_ts") is not None else None,
+        alt_agl=_as_float(payload.get("alt_agl"), None),
+        client_ts=_as_float(payload.get("client_ts"), None),
     )
 
 
