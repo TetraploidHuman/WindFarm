@@ -1,5 +1,10 @@
 package cn.tetraploid.rtwind.sensor.ui.screens
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -15,13 +21,18 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.ui.viewmodel.SettingsViewModel
@@ -140,11 +151,58 @@ private fun SettingsForm(settings: AppSettings, viewModel: SettingsViewModel) {
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
     )
 
+    BatteryOptimizationRow()
+
     Text(
         "使用前请在 RTWind 网页端将数据源切换为 Live，否则 ingest 数据不会显示在地图上。",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
     )
+}
+
+@Composable
+private fun BatteryOptimizationRow() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var ignored by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner) {
+        val refresh = {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            ignored = pm.isIgnoringBatteryOptimizations(context.packageName)
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) refresh()
+        }
+        refresh()
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    Text(
+        if (ignored) {
+            "已允许后台运行。息屏后仍会采集；小米 / 华为 / OPPO / vivo 还需在系统里允许自启动并锁定后台。"
+        } else {
+            "息屏后系统会冻结应用。请关闭电池优化，否则 GPS、IMU 和摄像头会停。"
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+    )
+    Button(
+        onClick = {
+            val intent = if (ignored) {
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            } else {
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+            }
+            runCatching { context.startActivity(intent) }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(if (ignored) "查看电池优化设置" else "关闭电池优化")
+    }
 }
 
 @Composable

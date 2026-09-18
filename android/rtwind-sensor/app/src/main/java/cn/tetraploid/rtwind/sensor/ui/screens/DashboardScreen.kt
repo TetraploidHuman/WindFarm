@@ -36,6 +36,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.tetraploid.rtwind.sensor.data.TelemetrySnapshot
@@ -120,6 +122,22 @@ fun DashboardScreen(
             }
         }
 
+        if (settings.keepScreenOn) {
+            Button(
+                onClick = { viewModel.setKeepScreenOn(false) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("永不息屏：已开启")
+            }
+        } else {
+            OutlinedButton(
+                onClick = { viewModel.setKeepScreenOn(true) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("永不息屏")
+            }
+        }
+
         OutlinedButton(
             onClick = { viewModel.pingServer { pingMsg = it } },
             modifier = Modifier.fillMaxWidth(),
@@ -158,7 +176,7 @@ private fun CameraPreviewCard(viewModel: DashboardViewModel, serviceRunning: Boo
         val view = previewView ?: return@LaunchedEffect
         runCatching {
             if (serviceRunning) {
-                viewModel.bindCameraForUpload(lifecycleOwner, view)
+                viewModel.attachCameraPreview(view)
             } else {
                 viewModel.bindCameraPreviewOnly(lifecycleOwner, view)
             }
@@ -171,8 +189,23 @@ private fun CameraPreviewCard(viewModel: DashboardViewModel, serviceRunning: Boo
         }
     }
 
-    DisposableEffect(serviceRunning) {
+    DisposableEffect(lifecycleOwner, serviceRunning) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (!serviceRunning) return@LifecycleEventObserver
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    scope.launch { runCatching { viewModel.cameraController.detachPreview() } }
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    val view = previewView ?: return@LifecycleEventObserver
+                    scope.launch { runCatching { viewModel.cameraController.attachPreview(view) } }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             scope.launch {
                 runCatching {
                     if (serviceRunning) {

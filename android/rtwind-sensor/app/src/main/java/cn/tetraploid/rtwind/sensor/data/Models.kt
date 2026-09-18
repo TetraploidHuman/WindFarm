@@ -39,6 +39,8 @@ data class AppSettings(
     val cameraUploadHz: Int = 15,
     /** JPEG quality 28–70; lower = smaller files. */
     val cameraJpegQuality: Int = 38,
+    /** Keep the display on while the app is in the foreground. */
+    val keepScreenOn: Boolean = false,
 ) {
     companion object {
         const val DEFAULT_SERVER = "http://tetraploid.cn:11024/rtwind"

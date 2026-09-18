@@ -50,10 +50,13 @@ class CameraController @Inject constructor(
         rebindInternal()
     }
 
-    suspend fun attachPreview(lifecycleOwner: LifecycleOwner, previewView: PreviewView) = withMain {
-        boundOwner = lifecycleOwner
+    /**
+     * 只挂预览 Surface，不改采集用的 LifecycleOwner。
+     * 息屏时 Activity 会 STOP，若把相机绑在 Activity 上，CameraX 会整路关掉。
+     */
+    suspend fun attachPreview(previewView: PreviewView) = withMain {
         this.previewView = previewView
-        rebindInternal()
+        if (boundOwner != null && isStreaming) rebindInternal()
     }
 
     suspend fun detachPreview() = withMain {
@@ -63,27 +66,27 @@ class CameraController @Inject constructor(
 
     /** Preview only (no upload) when service is stopped. */
     suspend fun bindPreview(lifecycleOwner: LifecycleOwner, previewView: PreviewView) = withMain {
-        boundOwner = lifecycleOwner
         this.previewView = previewView
-        if (!isStreaming) {
-            val provider = getProvider()
-            val preview = Preview.Builder().build().also {
-                it.surfaceProvider = previewView.surfaceProvider
-            }
-            val capture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .build()
-            imageCapture = capture
-            provider.unbindAll()
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                capture,
-            )
-        } else {
+        if (isStreaming) {
             rebindInternal()
+            return@withMain
         }
+        boundOwner = lifecycleOwner
+        val provider = getProvider()
+        val preview = Preview.Builder().build().also {
+            it.surfaceProvider = previewView.surfaceProvider
+        }
+        val capture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .build()
+        imageCapture = capture
+        provider.unbindAll()
+        provider.bindToLifecycle(
+            lifecycleOwner,
+            CameraSelector.DEFAULT_BACK_CAMERA,
+            preview,
+            capture,
+        )
     }
 
     suspend fun updateConfig(config: CameraStreamConfig) = withMain {

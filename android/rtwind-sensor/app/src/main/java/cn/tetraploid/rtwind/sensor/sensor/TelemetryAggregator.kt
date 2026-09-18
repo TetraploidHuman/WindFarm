@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
+import androidx.lifecycle.LifecycleOwner
 import cn.tetraploid.rtwind.sensor.camera.CameraController
+import cn.tetraploid.rtwind.sensor.camera.CameraStreamConfig
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
@@ -48,6 +50,7 @@ class TelemetryAggregator @Inject constructor(
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
     private var linkJob: Job? = null
+    @Volatile
     private var cachedSettings: AppSettings = AppSettings()
 
     fun start(scope: CoroutineScope) {
@@ -129,6 +132,20 @@ class TelemetryAggregator @Inject constructor(
                     it.copy(uploadChannel = if (api.isWsConnected()) "WebSocket" else "HTTP")
                 }
             }
+        }
+    }
+
+    /** 相机绑在前台 Service 上，息屏后 Activity STOP 也不会拆掉 ImageAnalysis。 */
+    suspend fun bindCamera(owner: LifecycleOwner) {
+        val settings = settingsRepository.settings.first()
+        cachedSettings = settings
+        if (!settings.enableCamera) {
+            cameraController.stopStream()
+            return
+        }
+        val config = CameraStreamConfig.fromSettings(settings)
+        cameraController.startStream(owner, config) { jpeg ->
+            api.publishCamera(jpeg, cachedSettings.vehicleId)
         }
     }
 

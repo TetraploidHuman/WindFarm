@@ -1,5 +1,9 @@
 package cn.tetraploid.rtwind.sensor.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.WindowManager
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
@@ -11,8 +15,12 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -21,6 +29,7 @@ import androidx.navigation.compose.rememberNavController
 import cn.tetraploid.rtwind.sensor.ui.screens.DashboardScreen
 import cn.tetraploid.rtwind.sensor.ui.screens.LogsScreen
 import cn.tetraploid.rtwind.sensor.ui.screens.SettingsScreen
+import cn.tetraploid.rtwind.sensor.ui.viewmodel.SettingsViewModel
 
 private sealed class Route(val path: String, val label: String) {
     data object Dashboard : Route("dashboard", "仪表盘")
@@ -30,6 +39,10 @@ private sealed class Route(val path: String, val label: String) {
 
 @Composable
 fun RtwindSensorApp() {
+    val settingsViewModel: SettingsViewModel = hiltViewModel()
+    val settings by settingsViewModel.settings.collectAsStateWithLifecycle()
+    KeepScreenOn(settings.keepScreenOn)
+
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val destination = backStack?.destination
@@ -67,4 +80,26 @@ fun RtwindSensorApp() {
             composable(Route.Logs.path) { LogsScreen() }
         }
     }
+}
+
+@Composable
+private fun KeepScreenOn(enabled: Boolean) {
+    val context = LocalContext.current
+    SideEffect {
+        val window = context.findActivity()?.window ?: return@SideEffect
+        if (enabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+}
+
+private fun Context.findActivity(): Activity? {
+    var current: Context = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
 }

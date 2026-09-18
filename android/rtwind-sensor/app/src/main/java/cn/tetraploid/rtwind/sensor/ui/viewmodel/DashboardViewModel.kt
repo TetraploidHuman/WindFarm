@@ -1,11 +1,15 @@
 package cn.tetraploid.rtwind.sensor.ui.viewmodel
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
 import cn.tetraploid.rtwind.sensor.camera.CameraController
-import cn.tetraploid.rtwind.sensor.camera.CameraStreamConfig
 import cn.tetraploid.rtwind.sensor.data.AppSettings
 import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
@@ -15,7 +19,6 @@ import cn.tetraploid.rtwind.sensor.log.AppLog
 import cn.tetraploid.rtwind.sensor.service.TelemetryService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import android.content.Context
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -45,7 +48,20 @@ class DashboardViewModel @Inject constructor(
             runCatching {
                 TelemetryService.start(context, settings.value.enableCamera)
             }.onFailure { AppLog.e("Dashboard", "startTelemetry failed", it) }
+            promptIgnoreBatteryOptimizations()
         }
+    }
+
+    /** 国产系统息屏后会冻结未加入白名单的进程，即使前台服务也一样。 */
+    private fun promptIgnoreBatteryOptimizations() {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(context.packageName)) return
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:${context.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(intent) }
+            .onFailure { AppLog.w("Dashboard", "battery optimization prompt failed", it) }
     }
 
     fun stopTelemetry() {
@@ -57,20 +73,19 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    suspend fun bindCameraForUpload(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        val s = settings.value
-        if (!s.enableCamera) return
-        val config = CameraStreamConfig.fromSettings(s)
-        cameraController.startStream(lifecycleOwner, config) { jpeg ->
-            api.publishCamera(jpeg, s.vehicleId)
-        }
-        cameraController.attachPreview(lifecycleOwner, previewView)
+    suspend fun attachCameraPreview(previewView: PreviewView) {
+        if (!settings.value.enableCamera) return
+        cameraController.attachPreview(previewView)
     }
 
     suspend fun bindCameraPreviewOnly(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
         if (settings.value.enableCamera) {
             cameraController.bindPreview(lifecycleOwner, previewView)
         }
+    }
+
+    fun setKeepScreenOn(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.updateKeepScreenOn(enabled) }
     }
 
     fun pingServer(onResult: (String) -> Unit) {

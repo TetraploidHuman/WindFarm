@@ -30,6 +30,7 @@ class SettingsRepository @Inject constructor(
         val CAMERA_HEIGHT = intPreferencesKey("camera_height")
         val CAMERA_HZ = intPreferencesKey("camera_upload_hz")
         val CAMERA_QUALITY = intPreferencesKey("camera_jpeg_quality")
+        val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -48,6 +49,7 @@ class SettingsRepository @Inject constructor(
             },
             cameraUploadHz = (prefs[Keys.CAMERA_HZ] ?: 15).coerceIn(1, 20),
             cameraJpegQuality = (prefs[Keys.CAMERA_QUALITY] ?: 38).coerceIn(28, 70),
+            keepScreenOn = prefs[Keys.KEEP_SCREEN_ON] ?: false,
         )
     }
 
@@ -65,6 +67,7 @@ class SettingsRepository @Inject constructor(
     }
     suspend fun updateCameraUploadHz(hz: Int) = edit { it[Keys.CAMERA_HZ] = hz.coerceIn(1, 20) }
     suspend fun updateCameraJpegQuality(q: Int) = edit { it[Keys.CAMERA_QUALITY] = q.coerceIn(28, 70) }
+    suspend fun updateKeepScreenOn(enabled: Boolean) = edit { it[Keys.KEEP_SCREEN_ON] = enabled }
 
     private suspend fun edit(block: suspend (MutablePreferences) -> Unit) {
         context.dataStore.edit { block(it) }
