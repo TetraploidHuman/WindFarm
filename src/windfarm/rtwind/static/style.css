@@ -113,6 +113,51 @@ body {
 [data-theme="dark"] .theme-icon-light { display: none; }
 [data-theme="light"] .theme-icon-dark { display: none; }
 
+/* ---- mobile chrome (hidden on desktop, see @media max-width: 900px) ---- */
+.mobilebar { display: none; }
+.rail-scrim { display: none; }
+
+.icon-btn {
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--switch-bg);
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  flex: 0 0 auto;
+  padding: 0;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.icon-btn:focus-visible,
+.theme-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.burger {
+  position: relative;
+  width: 18px; height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.burger::before,
+.burger::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 18px; height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.burger::before { top: -6px; }
+.burger::after { top: 6px; }
+/* Keep after .icon-btn so the base (desktop) rule wins on specificity ties. */
+.rail-close { display: none; }
+
 .source-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -542,10 +587,11 @@ html[data-theme="dark"] .quad-att-wrap {
 }
 
 .hud-top {
-  position: absolute; top: 12px; left: 12px; right: 12px;
+  position: absolute; top: 12px; left: 52px; right: 12px;
   display: flex; justify-content: space-between; gap: 12px;
   pointer-events: none; z-index: 500;
 }
+.hud-top #hudPos { flex: 0 1 auto; min-width: 0; }
 .stage[data-view="quad"] .hud-top {
   top: auto;
   bottom: 10px;
@@ -579,8 +625,193 @@ html[data-theme="dark"] .quad-att-wrap {
 .ac-icon.live { fill: var(--live); }
 
 @media (max-width: 900px) {
-  #app { grid-template-columns: 1fr; grid-template-rows: 42vh 1fr; }
-  .rail { border-right: 0; border-bottom: 1px solid var(--line); }
-  .quad-grid { grid-template-columns: 1fr; grid-template-rows: repeat(4, minmax(140px, 1fr)); }
-  .stage[data-view="quad"] { min-height: 70vh; }
+  /* Page itself never scrolls: the map fills the viewport and the rail is a drawer. */
+  html, body { overflow: hidden; }
+  body { overscroll-behavior-y: none; }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* ---------- compact top bar ---------- */
+  .mobilebar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    padding-left: calc(10px + env(safe-area-inset-left, 0px));
+    padding-right: calc(10px + env(safe-area-inset-right, 0px));
+    background: linear-gradient(180deg, var(--rail-top), var(--rail-bot));
+    border-bottom: 1px solid var(--line);
+    z-index: 20;
+  }
+  .mobilebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .mobilebar-brand .brand-mark { width: 32px; height: 32px; border-radius: 9px; font-size: 12px; }
+  .mobilebar-copy { min-width: 0; overflow: hidden; }
+  .mobilebar .brand-title { font-size: 14px; line-height: 1.2; }
+  .mobilebar .brand-sub { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mobilebar .theme-btn { margin-left: 0; width: 40px; height: 40px; }
+  .mobilebar .badge {
+    flex: 0 1 auto;
+    padding: 6px 9px;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 45vw;
+  }
+
+  .stage { flex: 1 1 auto; }
+
+  /* ---------- rail → slide-in drawer ---------- */
+  .rail {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 88vw;
+    width: min(88vw, 340px);
+    max-width: 340px;
+    gap: 10px;
+    padding: 12px;
+    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    padding-left: calc(12px + env(safe-area-inset-left, 0px));
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+    box-shadow: 0 0 48px rgba(0, 0, 0, 0.5);
+    transform: translateX(-102%);
+    visibility: hidden;
+    transition: transform 0.24s ease, visibility 0s linear 0.24s;
+    will-change: transform;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    /* Above Leaflet panes/controls (which reach z-index 1000). */
+    z-index: 1200;
+  }
+  body.rail-open .rail {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.24s ease;
+  }
+  .rail-close { display: grid; }
+
+  .rail-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 12, 0.55);
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.24s ease;
+    z-index: 1100;
+  }
+  body.rail-open .rail-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  /* Tuck the top bar away so it doesn't peek out beside the open drawer. */
+  .mobilebar { transition: opacity 0.2s ease; }
+  body.rail-open .mobilebar {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* ---------- touch-friendly controls ---------- */
+  .src-btn { min-height: 44px; font-size: 13px; }
+  .ghost { min-height: 40px; padding: 8px 12px; font-size: 13px; }
+  .chk { min-height: 32px; font-size: 13px; }
+  .chk input { width: 18px; height: 18px; flex: 0 0 auto; }
+  .theme-btn, .icon-btn { width: 40px; height: 40px; }
+
+  /* iOS zooms into focused fields below 16px. */
+  .sim-panel .field input,
+  .meta select,
+  .quad-settings select {
+    font-size: 16px;
+    padding: 9px 10px;
+  }
+  .sim-panel .field { font-size: 12px; }
+
+  /* ---------- map HUD ---------- */
+  .hud-top {
+    top: 8px;
+    left: 50px;
+    right: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .hud-top span {
+    font-size: 11px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hud-top #hudPos { flex: 0 1 auto; min-width: 0; }
+  .leaflet-bottom { bottom: env(safe-area-inset-bottom, 0px); }
+  .leaflet-control-attribution { font-size: 9px; }
+
+  /* ---------- quad view: single scrollable column ---------- */
+  .quad-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(4, minmax(200px, 42vh));
+    align-content: start;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .stage[data-view="quad"] { min-height: 0; }
+
+  /* Keep the source switch / status reachable without scrolling the whole drawer. */
+  .rail-footer {
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    padding-top: 10px;
+    padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px));
+    background: var(--rail-bot);
+  }
+
+  .rail button,
+  .mobilebar button,
+  .rail label,
+  .mobilebar label { touch-action: manipulation; }
+}
+
+@media (max-width: 560px) {
+  .mobilebar { gap: 8px; }
+  .mobilebar .brand-mark { width: 28px; height: 28px; border-radius: 8px; font-size: 11px; }
+  .mobilebar .brand-sub { display: none; }
+  .mobilebar .badge { max-width: 38vw; }
+  .rail {
+    width: 92vw;
+    width: min(92vw, 320px);
+    max-width: 320px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .panel { padding: 10px; }
+  .att-box { width: 72px; height: 72px; }
+}
+
+/* Short landscape phones: reclaim vertical space. */
+@media (max-width: 900px) and (max-height: 480px) {
+  .mobilebar { padding-top: calc(4px + env(safe-area-inset-top, 0px)); padding-bottom: 4px; }
+  .mobilebar .brand-sub { display: none; }
+  .quad-grid { grid-template-rows: repeat(4, minmax(180px, 62vh)); }
 }

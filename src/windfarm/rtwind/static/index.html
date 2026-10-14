@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" id="themeColorMeta" content="#070b12" />
   <title>rtwind · 实时监视</title>
   <script>
     (function () {
@@ -28,11 +29,31 @@
     })();
   </script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="static/style.css?v=19" />
+  <link rel="stylesheet" href="static/style.css?v=20" />
 </head>
 <body>
   <div id="app">
-    <aside class="rail">
+    <header class="mobilebar">
+      <button type="button" id="btnRail" class="icon-btn rail-toggle" aria-label="打开控制面板" aria-expanded="false" aria-controls="rail">
+        <span class="burger" aria-hidden="true"></span>
+      </button>
+      <div class="mobilebar-brand">
+        <span class="brand-mark" aria-hidden="true">RT</span>
+        <div class="mobilebar-copy">
+          <div class="brand-title">rtwind</div>
+          <div class="brand-sub">风场实时监视</div>
+        </div>
+      </div>
+      <div id="mobileBadge" class="badge sim">连接中</div>
+      <button type="button" id="btnThemeMobile" class="theme-btn" title="切换主题" aria-label="切换暗黑/明亮主题">
+        <span class="theme-icon-dark" aria-hidden="true">☾</span>
+        <span class="theme-icon-light" aria-hidden="true">☀</span>
+      </button>
+    </header>
+
+    <div class="rail-scrim" id="railScrim" aria-hidden="true"></div>
+
+    <aside class="rail" id="rail">
       <div class="brand">
         <span class="brand-mark">RT</span>
         <div>
@@ -43,6 +64,7 @@
           <span class="theme-icon-dark" aria-hidden="true">☾</span>
           <span class="theme-icon-light" aria-hidden="true">☀</span>
         </button>
+        <button type="button" id="btnRailClose" class="icon-btn rail-close" aria-label="关闭控制面板">✕</button>
       </div>
 
       <section class="panel">
@@ -259,6 +281,6 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="static/meteo.js?v=1"></script>
   <script src="static/quad.js?v=22"></script>
-  <script src="static/app.js?v=34"></script>
+  <script src="static/app.js?v=36"></script>
 </body>
 </html>

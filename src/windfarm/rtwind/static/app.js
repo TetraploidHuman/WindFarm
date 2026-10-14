@@ -70,6 +70,15 @@
     altChart: document.getElementById("altChart"),
     spdChart: document.getElementById("spdChart"),
     btnTheme: document.getElementById("btnTheme"),
+    btnThemeMobile: document.getElementById("btnThemeMobile"),
+    rail: document.getElementById("rail"),
+    btnRail: document.getElementById("btnRail"),
+    btnRailClose: document.getElementById("btnRailClose"),
+    railScrim: document.getElementById("railScrim"),
+    mobileBadge: document.getElementById("mobileBadge"),
+    themeColorMeta: document.getElementById("themeColorMeta"),
+    btnViewMap: document.getElementById("btnViewMap"),
+    btnViewQuad: document.getElementById("btnViewQuad"),
   };
 
   const state = {
@@ -111,6 +120,52 @@
   };
 
   const MISSION_SIZE_KM = 10;
+
+  // ---- mobile drawer (rail) ----
+  // Below 900px the rail is an off-canvas drawer so the map keeps the full viewport.
+  const mobileQuery = window.matchMedia("(max-width: 900px)");
+
+  function isMobileLayout() {
+    return mobileQuery.matches;
+  }
+
+  function setRailOpen(open) {
+    const next = !!open && isMobileLayout();
+    document.body.classList.toggle("rail-open", next);
+    if (els.btnRail) {
+      els.btnRail.setAttribute("aria-expanded", next ? "true" : "false");
+      els.btnRail.setAttribute("aria-label", next ? "关闭控制面板" : "打开控制面板");
+    }
+    if (els.rail) {
+      if (isMobileLayout()) els.rail.setAttribute("aria-hidden", next ? "false" : "true");
+      else els.rail.removeAttribute("aria-hidden");
+    }
+  }
+
+  function closeRail() {
+    setRailOpen(false);
+  }
+
+  function toggleRail() {
+    setRailOpen(!document.body.classList.contains("rail-open"));
+  }
+
+  els.btnRail?.addEventListener("click", toggleRail);
+  els.btnRailClose?.addEventListener("click", closeRail);
+  els.railScrim?.addEventListener("click", closeRail);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closeRail();
+  });
+  // Switching between map and quad view hides the drawer so the result is visible.
+  els.btnViewMap?.addEventListener("click", () => { if (isMobileLayout()) closeRail(); });
+  els.btnViewQuad?.addEventListener("click", () => { if (isMobileLayout()) closeRail(); });
+  const onLayoutChange = () => {
+    setRailOpen(false);
+    requestAnimationFrame(() => map.invalidateSize());
+  };
+  if (mobileQuery.addEventListener) mobileQuery.addEventListener("change", onLayoutChange);
+  else if (mobileQuery.addListener) mobileQuery.addListener(onLayoutChange);
+  setRailOpen(false);
 
   function isMapView() {
     const stage = document.getElementById("stage");
@@ -217,9 +272,13 @@
     if (typeof originOrbit !== "undefined" && originOrbit) {
       originOrbit.setStyle({ color: colors.sim });
     }
-    if (els.btnTheme) {
-      els.btnTheme.title = next === "dark" ? "切换到明亮模式" : "切换到暗黑模式";
-      els.btnTheme.setAttribute("aria-label", els.btnTheme.title);
+    [els.btnTheme, els.btnThemeMobile].forEach((btn) => {
+      if (!btn) return;
+      btn.title = next === "dark" ? "切换到明亮模式" : "切换到暗黑模式";
+      btn.setAttribute("aria-label", btn.title);
+    });
+    if (els.themeColorMeta) {
+      els.themeColorMeta.setAttribute("content", getComputedStyle(document.body).backgroundColor || (next === "dark" ? "#070b12" : "#eef2f7"));
     }
     if (window.__rtwindQuad) window.__rtwindQuad.onTheme();
   }
@@ -666,13 +725,21 @@
       }
     }
     document.getElementById("map").classList.toggle("pick-origin", els.pickOrigin.checked && active === "sim");
+    setBadge(state.frame);
     if (window.__rtwindQuad) window.__rtwindQuad.onActiveChange();
   }
 
   function setBadge(frame) {
     const link = frame?.link || "waiting";
-    els.badge.className = `badge ${state.active}${link === "stale" ? " stale" : ""}`;
-    els.badge.textContent = `${sourceLabel(state.active)} · ${linkLabel(link)}`;
+    const cls = `badge ${state.active}${link === "stale" ? " stale" : ""}`;
+    const text = `${sourceLabel(state.active)} · ${linkLabel(link)}`;
+    els.badge.className = cls;
+    els.badge.textContent = text;
+    if (els.mobileBadge) {
+      // Top bar shows the link status only; sim/live is conveyed by colour and the rail badge.
+      els.mobileBadge.className = cls;
+      els.mobileBadge.textContent = linkLabel(link);
+    }
   }
 
   function pushHist(arr, value, max = 80) {
@@ -1270,7 +1337,7 @@
     // Live rescale arrows while pinching/scrolling.
     redrawWindForZoom();
   });
-  els.btnTheme.addEventListener("click", () => {
+  function toggleTheme() {
     applyTheme(currentTheme() === "dark" ? "light" : "dark");
     if (anyMapLayerOn()) scheduleLayerRefresh(50, { force: true });
     if (state.altHist.length || state.spdHist.length) {
@@ -1278,7 +1345,9 @@
       drawSpark(els.altChart, state.altHist, colors.alt);
       drawSpark(els.spdChart, state.spdHist, colors.sim);
     }
-  });
+  }
+  els.btnTheme.addEventListener("click", toggleTheme);
+  els.btnThemeMobile?.addEventListener("click", toggleTheme);
   applyTheme(currentTheme(), { persist: false });
 
   function connectWs() {
@@ -1326,7 +1395,9 @@
       }
     };
     ws.onclose = () => {
-      els.badge.textContent = `${sourceLabel(state.active)} · 重连中`;
+      const retext = `${sourceLabel(state.active)} · 重连中`;
+      els.badge.textContent = retext;
+      if (els.mobileBadge) els.mobileBadge.textContent = "重连中";
       setTimeout(connectWs, 1500);
     };
   }
