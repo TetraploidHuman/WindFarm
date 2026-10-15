@@ -138,14 +138,21 @@ python -m unittest tests.test_pipeline
 
 评测并行：默认 **`--workers 8`**（16 图分两波）；勿开到 16+ 以免刷交换区。
 
-构建 / 补下载：
+构建 / 补下载（大文件不进 Git，用脚本拉取）：
 
 ```bash
-# 若 Windows 上 Clash Verge 已开「允许局域网」，在 NixOS 开发机走代理（更快下 SRTM）：
-export HTTPS_PROXY=http://172.20.128.142:7897   # 以实际探测到的主机/端口为准
+# 若 Clash 等代理可用（国内下 SRTM 更快）：
+export HTTPS_PROXY=http://127.0.0.1:7897   # 按本机端口改
 export HTTP_PROXY="$HTTPS_PROXY"
 
-.venv-linux/bin/python -m windfarm.cli build-scenarios \
+# 只下 DEM 瓦片（~25 MB/张，编目场景约 20 张）
+python scripts/download_data.py --dem-only
+
+# DEM + 重建场景 training/truth（走 Open-Meteo archive）
+python scripts/download_data.py --with-scenarios
+
+# 等价 CLI：
+python -m windfarm.cli build-scenarios \
   --output-dir scenarios --data-dir data --base-config config_eval.json \
   --resolution-m 30
 ```

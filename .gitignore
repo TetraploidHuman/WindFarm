@@ -50,7 +50,7 @@ fonts/SimHei.ttf
 fonts/*.ttf
 fonts/*.ttc
 
-# Heavy regenerable scenario products (rebuild via simulate/resample scripts)
+# Heavy regenerable scenario products (rebuild via scripts/download_data.py)
 scenarios/*/training.json
 scenarios/*/truth.json
 scenarios/*/*.npz
@@ -58,3 +58,9 @@ scenarios/*/model.json
 scenarios/*/metrics.json
 dashboard.html
 /dashboard.html
+
+# Heavy regenerable examples (python -m windfarm.cli simulate / train / run-demo)
+examples/training.json
+examples/truth.json
+examples/mission_report*.json
+examples/dashboard*.html
