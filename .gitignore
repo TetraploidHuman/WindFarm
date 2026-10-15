@@ -65,5 +65,6 @@ examples/truth.json
 examples/mission_report*.json
 examples/dashboard*.html
 
-# Local competition Word drafts / backups (keep on disk, not on GitHub)
-docs/\[5\]*.docx
+# Local Word documents (keep on disk, not on GitHub; prefer .md)
+docs/*.docx
+*.docx
