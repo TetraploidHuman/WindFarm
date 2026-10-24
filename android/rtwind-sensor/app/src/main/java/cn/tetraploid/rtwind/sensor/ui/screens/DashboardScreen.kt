@@ -235,6 +235,7 @@ private fun TelemetryCard(snapshot: TelemetrySnapshot) {
             MetricRow("海拔 (MSL)", snapshot.altMsl?.let { fmt(it, 1) + " m" } ?: "—")
             MetricRow("航向", snapshot.heading?.let { fmt(it, 1) + "°" } ?: "—")
             MetricRow("Roll / Pitch", "${fmt(snapshot.roll, 1)}° / ${fmt(snapshot.pitch, 1)}°")
+            MetricRow("姿态零点", snapshot.attitudeZeroStatus)
             MetricRow("地速", fmt(snapshot.groundspeed, 2) + " m/s")
             MetricRow("爬升率", fmt(snapshot.climbRate, 2) + " m/s")
             MetricRow("电量", snapshot.battery?.let { fmt(it, 0) + "%" } ?: "—")

@@ -12,6 +12,7 @@ import cn.tetraploid.rtwind.sensor.data.RtwindApi
 import cn.tetraploid.rtwind.sensor.data.SettingsRepository
 import cn.tetraploid.rtwind.sensor.data.TelemetryPayload
 import cn.tetraploid.rtwind.sensor.data.TelemetrySnapshot
+import cn.tetraploid.rtwind.sensor.log.AppLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +27,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.Dispatchers
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -38,6 +40,10 @@ class TelemetryAggregator @Inject constructor(
     private val api: RtwindApi,
     private val cameraController: CameraController,
 ) {
+    private companion object {
+        private const val TAG = "Telemetry"
+    }
+
     private val _snapshot = MutableStateFlow(TelemetrySnapshot())
     val snapshot: StateFlow<TelemetrySnapshot> = _snapshot.asStateFlow()
 
@@ -47,6 +53,10 @@ class TelemetryAggregator @Inject constructor(
     private var prevAltTimeMs: Long = 0L
     private var lastPushMs: Long = 0L
 
+    /** 校准完成（成功或失败）前不推送任何帧，避免上传未零点化的姿态。 */
+    @Volatile
+    private var attitudeZeroReady = false
+
     private var sensorJobs: List<Job> = emptyList()
     private var uploadJob: Job? = null
     private var linkJob: Job? = null
@@ -55,11 +65,18 @@ class TelemetryAggregator @Inject constructor(
 
     fun start(scope: CoroutineScope) {
         if (sensorJobs.isNotEmpty()) return
+        attitudeZeroReady = false
+        // 上一架次的姿态必须先作废，否则校准期间可能把旧姿态继续推给 RTWind。
+        imu = ImuReading(0.0, 0.0, 0.0)
         _snapshot.update {
             it.copy(
                 serviceRunning = true,
                 lastUploadError = null,
                 locationDiag = locationTracker.diagnose(),
+                attitudeZeroStatus = "姿态零点校准中…（请保持静止）",
+                roll = 0.0,
+                pitch = 0.0,
+                yaw = 0.0,
             )
         }
         publishLocal()
@@ -110,6 +127,31 @@ class TelemetryAggregator @Inject constructor(
                 }
             },
             scope.launch {
+                // 停止上传会取消本协程：CancellationException 必须继续抛出，不能当成校准失败。
+                val calibration: Result<AttitudeZero> = try {
+                    Result.success(imuTracker.calibrateZero())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+                calibration
+                    .onSuccess { z ->
+                        attitudeZeroReady = true
+                        _snapshot.update { it.copy(attitudeZeroStatus = formatZeroStatus(z)) }
+                        AppLog.i(
+                            TAG,
+                            "attitude zero calibrated roll=${z.rollDeg} pitch=${z.pitchDeg} " +
+                                "yaw=${z.yawDeg} samples=${z.samples} spread=${z.spreadDeg}",
+                        )
+                    }
+                    .onFailure { e ->
+                        attitudeZeroReady = true // 仍推送绝对姿态，绝不永久阻塞遥测
+                        _snapshot.update {
+                            it.copy(attitudeZeroStatus = "校准失败: ${e.message ?: "未知错误"}")
+                        }
+                        AppLog.w(TAG, "attitude zero calibration failed", e)
+                    }
                 try {
                     imuTracker.readings().collect { reading ->
                         imu = reading
@@ -160,11 +202,14 @@ class TelemetryAggregator @Inject constructor(
             runCatching { cameraController.stopStream() }
         }
         api.stopTransport()
+        attitudeZeroReady = false
+        imuTracker.clearZero()
         _snapshot.update {
             it.copy(
                 serviceRunning = false,
                 lastUploadError = null,
                 locationDiag = "已停止 | ${locationTracker.diagnose()}",
+                attitudeZeroStatus = "未校准",
             )
         }
     }
@@ -194,6 +239,8 @@ class TelemetryAggregator @Inject constructor(
     }
 
     private fun pushFrame() {
+        // 姿态零点校准完成前不上传，避免把未零点化的姿态发到 RTWind。
+        if (!attitudeZeroReady) return
         val minIntervalMs = (1000L / cachedSettings.uploadHz.coerceIn(1, 20)).coerceAtLeast(50L)
         val now = System.currentTimeMillis()
         if (now - lastPushMs < minIntervalMs) return
@@ -229,6 +276,18 @@ class TelemetryAggregator @Inject constructor(
                 uploadsTotal = it.uploadsTotal + 1,
             )
         }
+    }
+
+    private fun formatZeroStatus(z: AttitudeZero): String {
+        val base = String.format(
+            Locale.US,
+            "已校准 · R %.1f° · P %.1f° · Y %.1f° · %d 样本",
+            z.rollDeg,
+            z.pitchDeg,
+            z.yawDeg,
+            z.samples,
+        )
+        return if (z.spreadDeg > 5.0) "$base · 晃动较大，建议静止重试" else base
     }
 
     private fun computeClimbRate(altMsl: Double): Double {

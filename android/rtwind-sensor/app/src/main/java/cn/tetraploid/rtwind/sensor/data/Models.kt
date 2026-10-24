@@ -61,6 +61,7 @@ data class TelemetrySnapshot(
     val gpsAccuracyM: Float? = null,
     val gpsProvider: String? = null,
     val locationDiag: String = "未开始定位",
+    val attitudeZeroStatus: String = "未校准",
     val lastUploadOk: Boolean? = null,
     val lastUploadError: String? = null,
     val uploadChannel: String = "—",
